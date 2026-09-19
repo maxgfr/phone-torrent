@@ -6,10 +6,13 @@
   "type": "module",
   "scripts": {
     "start": "node test/serve.mjs",
-    "test": "node test/e2e.mjs"
+    "test": "node test/e2e.mjs",
+    "lint": "eslint app.js saver.js sw.js proxy/cloudflare-worker.js test/*.mjs"
   },
   "devDependencies": {
     "bittorrent-tracker": "^11.0.0",
-    "playwright": "^1.63.0"
+    "playwright": "^1.63.0",
+    "eslint": "^9.39.0",
+    "globals": "^15.0.0"
   }
 }

@@ -116,12 +116,15 @@ streaming saves during development.
 npm test
 ```
 
-The end‑to‑end test (`test/e2e.mjs`) starts a local WebSocket tracker and static server, seeds a
-two‑file torrent through the UI of one headless Chromium context and downloads it in a second,
-phone‑sized context through the real UI. It verifies the file list, pause/resume, the details panel,
-saving the `.torrent`, per‑file save, zip save (byte‑for‑byte against the seeded data), restore
-after reload, removal, the Web Share Target flow, magnet links passed in the URL, and the in‑memory
-fallback when service workers are blocked.
+`npm run lint` checks the sources for undefined or unused symbols. The end‑to‑end test
+(`test/e2e.mjs`) starts a local WebSocket tracker and static server, seeds a two‑file torrent through
+the UI of one headless browser context and downloads it in a second, phone‑sized context through the
+real UI. It verifies the file list, pause/resume, the details panel, saving the `.torrent`, per‑file
+save (twice), zip save (byte‑for‑byte against the seeded data), restore after reload, file selection
+persistence, the delete‑all cycle, removal, the Web Share Target flow, magnet links passed in the
+URL, the tracker‑list merge, the network check, metadata from a fallback source with a tampered file
+rejected, the no‑peers retry, an iPhone‑emulated context, and the in‑memory fallback when service
+workers are blocked. CI runs it on Chromium and on WebKit (`BROWSER=webkit npm test`).
 
 To try it against the real network, seed something with the app on one device (or with any
 WebTorrent‑compatible client) and open the shared link on your phone; public trackers are not
