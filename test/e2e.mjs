@@ -36,7 +36,13 @@ function findChromium() {
   return undefined;
 }
 
-const log = (...a) => console.log('•', ...a);
+let lastStep = 'start';
+const log = (...a) => { lastStep = a.join(' '); console.log('•', ...a); };
+const WATCHDOG_MS = 8 * 60 * 1000;
+setTimeout(() => {
+  console.error(`\nWATCHDOG: suite exceeded ${WATCHDOG_MS / 60000} minutes; last completed step: ${lastStep}`);
+  process.exit(2);
+}, WATCHDOG_MS).unref();
 const sha = (buf) => createHash('sha256').update(buf).digest('hex');
 
 async function waitFor(fn, { timeout = 60000, interval = 250, label = 'condition' } = {}) {
@@ -171,12 +177,14 @@ try {
   assert.equal((await phone.$$('#netcheck-results li')).length, 3);
   log('network check OK');
 
-  const saverMode = await phone.evaluate(() => new Promise((resolve) => {
+  const waitSaver = (page) => page.evaluate(() => new Promise((resolve) => {
+    const started = Date.now();
     const t = setInterval(() => {
       const s = window.__phoneTorrent.saver;
-      if (s.mode === 'stream' || s.reason) { clearInterval(t); resolve(s.mode); }
+      if (s.mode === 'stream' || s.reason || Date.now() - started > 15000) { clearInterval(t); resolve({ mode: s.mode, reason: s.reason }); }
     }, 50);
   }));
+  const saverMode = (await waitSaver(phone)).mode;
   log('saver mode:', saverMode);
   // Chromium streams saves through the service worker; WebKit (Safari) deliberately saves via memory.
   assert.equal(saverMode, BROWSER === 'webkit' ? 'blob' : 'stream', 'expected save mode for this engine');
@@ -310,7 +318,7 @@ try {
   const notesIndex = names.indexOf(files[1].name);
   await phone.locator('.torrent .file input[type="checkbox"]').nth(notesIndex).uncheck();
   assert.equal(await phone.evaluate((i) => window.__phoneTorrent.views.values().next().value.record.deselected.includes(i), notesIndex), true);
-  await phone.evaluate(() => window.__phoneTorrent.views.values().next().value.persisted);
+  await phone.evaluate(() => Promise.race([window.__phoneTorrent.views.values().next().value.persisted, new Promise((r) => setTimeout(r, 5000))]));
   await phone.reload();
   await phone.waitForSelector('.torrent .file', { timeout: 15000 });
   const restoredRecord = await phone.evaluate(() => { const r = window.__phoneTorrent.views.values().next().value.record; return { deselected: r?.deselected, source: r?.source?.type, paused: r?.paused }; });
@@ -421,12 +429,7 @@ try {
   await ios.addInitScript((t) => localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], trackerList: false })), trackerUrl);
   await ios.goto(site.url);
   await ios.waitForFunction(() => window.__phoneTorrent?.client);
-  const iosSaver = await ios.evaluate(() => new Promise((resolve) => {
-    const t = setInterval(() => {
-      const s = window.__phoneTorrent.saver;
-      if (s.mode === 'stream' || s.reason) { clearInterval(t); resolve({ mode: s.mode, reason: s.reason, sw: Boolean(navigator.serviceWorker?.controller || navigator.serviceWorker) }); }
-    }, 50);
-  }));
+  const iosSaver = await waitSaver(ios);
   assert.equal(iosSaver.mode, 'blob', 'iOS saves through memory, not the streaming worker');
   assert.match(iosSaver.reason, /iOS/);
   await ios.setInputFiles('#torrent-file-input', { name: 'test.torrent', mimeType: 'application/x-bittorrent', buffer: Buffer.from(torrentFile) });
@@ -456,12 +459,7 @@ try {
   await legacy.addInitScript((t) => localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t] })), trackerUrl);
   await legacy.goto(site.url);
   await legacy.waitForFunction(() => window.__phoneTorrent?.client);
-  const legacyMode = await legacy.evaluate(() => new Promise((resolve) => {
-    const t = setInterval(() => {
-      const s = window.__phoneTorrent.saver;
-      if (s.mode === 'stream' || s.reason) { clearInterval(t); resolve(s.mode); }
-    }, 50);
-  }));
+  const legacyMode = (await waitSaver(legacy)).mode;
   assert.equal(legacyMode, 'blob', 'falls back to in-memory saving without a service worker');
   await legacy.setInputFiles('#torrent-file-input', { name: 'test.torrent', mimeType: 'application/x-bittorrent', buffer: Buffer.from(torrentFile) });
   await legacy.waitForSelector('.torrent .file', { timeout: 15000 });

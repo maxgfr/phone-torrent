@@ -12,6 +12,7 @@ jobs:
       matrix:
         browser: [chromium, webkit]
     name: e2e (${{ matrix.browser }})
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
