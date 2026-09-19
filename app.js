@@ -130,10 +130,28 @@ function parseTrackerList(text) {
   return text.split(/\r?\n/).map((l) => l.trim()).filter((l) => /^wss?:\/\//i.test(l));
 }
 
+// Ports browsers refuse to open sockets to (the Fetch "bad port" list). WebKit throws synchronously
+// from `new WebSocket` for them, which would abort WebTorrent's tracker setup for the whole torrent.
+const BAD_PORTS = new Set([1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 69, 77, 79, 87, 95, 101, 102, 103,
+  104, 109, 110, 111, 113, 115, 117, 119, 123, 135, 137, 139, 143, 161, 179, 389, 427, 465, 512, 513, 514, 515, 526, 530, 531,
+  532, 540, 548, 554, 556, 563, 587, 601, 636, 989, 990, 993, 995, 1719, 1720, 1723, 2049, 3659, 4045, 5060, 5061, 6000, 6566,
+  6665, 6666, 6667, 6668, 6669, 6697, 10080]);
+
+function usableTracker(url) {
+  try {
+    const u = new URL(url);
+    if (!/^wss?:$/.test(u.protocol)) return false;
+    const port = Number(u.port || (u.protocol === 'wss:' ? 443 : 80));
+    return !BAD_PORTS.has(port);
+  } catch {
+    return false;
+  }
+}
+
 /** All trackers to announce to: the user's list plus the fetched public list, deduplicated. */
 function effectiveTrackers() {
   const extra = settings.trackerList ? (loadTrackerListCache()?.trackers || []) : [];
-  return Array.from(new Set([...settings.trackers, ...extra]));
+  return Array.from(new Set([...settings.trackers, ...extra])).filter(usableTracker);
 }
 
 async function refreshTrackerList({ force = false } = {}) {
@@ -1306,7 +1324,9 @@ els.resetTrackersBtn.addEventListener('click', () => {
 els.settingsDialog.addEventListener('close', () => {
   if (els.settingsDialog.returnValue !== 'save') return;
 
-  const trackers = els.trackersInput.value.split('\n').map((s) => s.trim()).filter((s) => /^wss?:\/\//i.test(s));
+  const typed = els.trackersInput.value.split('\n').map((s) => s.trim()).filter((s) => /^wss?:\/\//i.test(s));
+  const trackers = typed.filter(usableTracker);
+  if (typed.length !== trackers.length) toast(`Ignored ${typed.length - trackers.length} tracker(s) on a port browsers refuse to open.`, { error: true });
   if (trackers.length === 0) {
     toast('Keeping the previous trackers: at least one wss:// tracker is needed.', { error: true });
     return;

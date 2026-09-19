@@ -143,7 +143,7 @@ try {
   writeFileSync(path.join(TMP, 'trackers.txt'), `udp://tracker.example.org:1337/announce\n\nhttp://ignored.example/announce\n${trackerUrl}\nwss://also-dead.example\n`);
   const listUrl = `${site.url}test/.tmp/trackers.txt`;
   await phone.addInitScript(({ listUrl, metaUrl }) => localStorage.setItem('phone-torrent:settings', JSON.stringify({
-    trackers: ['ws://127.0.0.1:9/dead'], trackerList: true, trackerListUrl: listUrl,
+    trackers: ['ws://127.0.0.1:2/dead'], trackerList: true, trackerListUrl: listUrl,
     metadataSources: ['https://127.0.0.1:1/never/{INFOHASH}.torrent', metaUrl], fallbackDelay: 5,
     dohResolver: `${new URL(listUrl).origin}/__doh`,
   })), { listUrl, metaUrl: `${site.url}test/.tmp/{infohash}.torrent` });
@@ -151,7 +151,7 @@ try {
   await phone.waitForFunction(() => window.__phoneTorrent?.client);
   await waitFor(() => phone.evaluate((t) => window.__phoneTorrent.effectiveTrackers().includes(t), trackerUrl), { label: 'tracker list to be fetched and merged', timeout: 15000 });
   const effective = await phone.evaluate(() => window.__phoneTorrent.effectiveTrackers());
-  assert.deepEqual(effective, ['ws://127.0.0.1:9/dead', trackerUrl, 'wss://also-dead.example'], 'only ws(s) trackers are merged, deduplicated, user list first');
+  assert.deepEqual(effective, ['ws://127.0.0.1:2/dead', trackerUrl, 'wss://also-dead.example'], 'only ws(s) trackers are merged, deduplicated, user list first');
   log('tracker list merged:', effective.length, 'trackers');
 
   // PWA: manifest points at real PNG icons and the service worker precached the app shell.
@@ -173,7 +173,7 @@ try {
   const byUrl = Object.fromEntries(netcheck.map((r) => [r.url, r]));
   assert.equal(byUrl[trackerUrl].level, 'ok', 'local tracker reachable');
   assert.equal(byUrl['wss://also-dead.example'].level, 'bad', 'non-existent host reported dead');
-  assert.equal(byUrl['ws://127.0.0.1:9/dead'].level, 'warn', 'unreachable but existing host reported as possibly blocked');
+  assert.equal(byUrl['ws://127.0.0.1:2/dead'].level, 'warn', 'unreachable but existing host reported as possibly blocked');
   assert.equal((await phone.$$('#netcheck-results li')).length, 3);
   log('network check OK');
 
@@ -373,13 +373,22 @@ try {
 
   /* ---------- fallback "resolvers": metadata from a torrent cache, retry with fresh trackers ---------- */
   // A torrent nobody seeds: created on the seeder, then dropped there, so only its .torrent bytes exist.
+  log('creating orphan torrent');
   const orphan = await seeder.evaluate(async () => {
+    const timeout = (ms, what) => new Promise((_, rej) => setTimeout(() => rej(new Error(`timed out: ${what}`)), ms));
     const f = new File([new Uint8Array(200 * 1024).fill(7)], 'orphan.bin');
-    const t = await new Promise((resolve) => window.__phoneTorrent.client.seed([f], { name: 'Fallback Test' }, resolve));
+    const t = await Promise.race([
+      new Promise((resolve) => window.__phoneTorrent.client.seed([f], { name: 'Fallback Test' }, resolve)),
+      timeout(20000, 'seed orphan'),
+    ]);
     const out = { infoHash: t.infoHash, torrentFile: Array.from(t.torrentFile) };
-    await new Promise((resolve) => window.__phoneTorrent.client.remove(t, { destroyStore: true }, resolve));
+    await Promise.race([
+      new Promise((resolve) => window.__phoneTorrent.client.remove(t, { destroyStore: true }, resolve)),
+      timeout(10000, 'remove orphan'),
+    ]);
     return out;
   });
+  log('orphan torrent created');
   writeFileSync(path.join(TMP, `${orphan.infoHash}.torrent`), Buffer.from(orphan.torrentFile));
 
   // Tampered .torrent must be rejected by the info-hash check.
