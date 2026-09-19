@@ -22,10 +22,42 @@ self.addEventListener('fetch', (event) => {
     event.respondWith(new Response('ok', { headers: { 'Cache-Control': 'no-store' } }));
     return;
   }
+  if (event.request.method === 'POST' && url.pathname === scope + 'share') {
+    event.respondWith(receiveShare(event.request, scope));
+    return;
+  }
   if (!url.pathname.startsWith(scope + 'dl/')) return;
   const id = url.pathname.slice((scope + 'dl/').length).split('/')[0];
   event.respondWith(serve(id));
 });
+
+/* Web Share Target: Android lets the user "share" a .torrent file or a magnet
+ * link to this app. The browser POSTs it here; we park it in the Cache API and
+ * redirect to the app, which picks it up (see app.js, takeSharedInbox). */
+const INBOX_CACHE = 'phone-torrent-inbox';
+
+async function receiveShare(request, scope) {
+  try {
+    const form = await request.formData();
+    const cache = await caches.open(INBOX_CACHE);
+    const stamp = Date.now();
+    let i = 0;
+    for (const file of form.getAll('torrents')) {
+      if (!(file instanceof File)) continue;
+      await cache.put(
+        `${scope}inbox/${stamp}-${i++}`,
+        new Response(file, { headers: { 'X-Name': encodeURIComponent(file.name), 'X-Kind': 'torrent' } }),
+      );
+    }
+    const text = [form.get('url'), form.get('text'), form.get('title')].filter((v) => typeof v === 'string').join('\n');
+    if (/magnet:\?|\b[a-f0-9]{40}\b/i.test(text)) {
+      await cache.put(`${scope}inbox/${stamp}-${i++}`, new Response(text, { headers: { 'X-Kind': 'text' } }));
+    }
+  } catch (err) {
+    console.error('share target failed', err);
+  }
+  return Response.redirect(`${scope}?shared=1`, 303);
+}
 
 async function serve(id) {
   const clientList = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });

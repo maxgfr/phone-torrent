@@ -91,7 +91,7 @@ body {
 .add-card.dragover { outline: 2px dashed var(--primary); outline-offset: 2px; }
 
 .add-row { display: flex; gap: 8px; margin-bottom: 10px; }
-.add-row input[type="text"] {
+.add-row input[type="text"], .add-row input[type="url"] {
   flex: 1;
   min-width: 0;
   font: inherit;
@@ -101,7 +101,7 @@ body {
   background: var(--bg);
   color: var(--text);
 }
-.add-row input[type="text"]:focus { outline: 2px solid var(--primary); outline-offset: 1px; }
+.add-row input[type="text"], .add-row input[type="url"]:focus { outline: 2px solid var(--primary); outline-offset: 1px; }
 
 .btn {
   font: inherit;
@@ -205,13 +205,15 @@ body {
   background: var(--card);
   color: var(--text);
   width: min(92vw, 520px);
+  max-height: calc(100dvh - 32px);
+  overflow-y: auto;
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
 }
 .dialog::backdrop { background: rgba(0, 0, 0, 0.5); }
 .dialog-body { padding: 20px; display: grid; gap: 14px; }
 .dialog-body h2 { margin: 0; font-size: 1.1rem; }
 .field { display: grid; gap: 6px; }
-.field > span { font-weight: 600; font-size: 0.9rem; }
+.field > span:not(.hint) { font-weight: 600; font-size: 0.9rem; }
 .field textarea {
   font: 0.85rem ui-monospace, monospace;
   padding: 10px;
@@ -253,3 +255,48 @@ body {
   .actions .zip-btn { flex-basis: 100%; }
   .actions .ghost { flex: 1; }
 }
+
+/* ---- tabs ---- */
+.tabs { display: flex; gap: 4px; background: var(--bg); border-radius: 10px; padding: 4px; margin-bottom: 14px; }
+.tab {
+  flex: 1; font: inherit; font-weight: 600; padding: 9px 12px; border-radius: 8px; border: none;
+  background: transparent; color: var(--muted); cursor: pointer; min-height: 40px;
+}
+.tab.active { background: var(--card); color: var(--text); box-shadow: var(--shadow); }
+
+/* ---- torrent head actions ---- */
+.head-actions { display: flex; gap: 2px; flex: none; }
+.torrent .ic-play { display: none; }
+.torrent.paused .ic-play { display: block; }
+.torrent.paused .ic-pause { display: none; }
+.torrent.paused .progress .bar { background: var(--muted); }
+.torrent.seeding .progress .bar { background: var(--accent); }
+
+/* ---- details ---- */
+.details { border-top: 1px solid var(--border); margin-top: 10px; padding-top: 12px; display: grid; gap: 12px; }
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; margin: 0; font-size: 0.85rem; }
+.kv dt { color: var(--muted); }
+.kv dd { margin: 0; overflow-wrap: anywhere; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.8rem; }
+.details-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.log { list-style: none; margin: 0; padding: 8px 10px; background: var(--bg); border-radius: 8px; font-size: 0.75rem; color: var(--muted); display: grid; gap: 2px; max-height: 140px; overflow: auto; }
+.log li { overflow-wrap: anywhere; }
+
+.toggle { display: flex; align-items: center; gap: 10px; font-size: 0.9rem; cursor: pointer; }
+.toggle input { width: 20px; height: 20px; margin: 0; accent-color: var(--primary); flex: none; }
+.field .hint { margin: 0; }
+
+@media (max-width: 480px) {
+  .actions .ghost { flex: 1; }
+}
+
+/* seeding cards: the files are already on this device */
+.torrent.seeding .zip-btn,
+.torrent.seeding .select-all-btn,
+.torrent.seeding .select-none-btn,
+.torrent.seeding .file-progress,
+.torrent.seeding .save-btn { display: none; }
+.torrent.seeding .file { grid-template-areas: "check size"; grid-template-columns: 1fr auto; }
+.torrent.seeding .file-check input { display: none; }
+.share-link-btn { display: none; flex: 1; }
+.torrent.seeding .share-link-btn { display: inline-flex; }

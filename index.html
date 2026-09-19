@@ -6,7 +6,11 @@
   <meta name="color-scheme" content="light dark" />
   <meta name="theme-color" content="#0f172a" media="(prefers-color-scheme: dark)" />
   <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
-  <meta name="description" content="Download torrents straight from your phone's browser and save the files to your device. Runs entirely in the browser." />
+  <meta name="description" content="Download and share torrents straight from your phone's browser and save the files to your device. Runs entirely in the browser." />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Torrent" />
   <title>Phone Torrent</title>
   <link rel="manifest" href="./manifest.webmanifest" />
   <link rel="icon" href="./icon.svg" type="image/svg+xml" />
@@ -20,7 +24,7 @@
       <h1>Phone Torrent</h1>
     </div>
     <div class="topbar-right">
-      <span id="net-status" class="pill" title="Download / upload speed">idle</span>
+      <span id="net-status" class="pill" title="Total download / upload speed">idle</span>
       <button id="settings-btn" class="icon-btn" type="button" aria-label="Settings" title="Settings">
         <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M19.14 12.94a7.07 7.07 0 0 0 .06-.94 7.07 7.07 0 0 0-.06-.94l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.61-.22l-2.39.96a7.3 7.3 0 0 0-1.63-.94l-.36-2.54A.5.5 0 0 0 13.9 2h-3.8a.5.5 0 0 0-.49.42l-.36 2.54c-.59.24-1.13.56-1.63.94l-2.39-.96a.5.5 0 0 0-.61.22L2.7 8.48a.5.5 0 0 0 .12.64L4.85 10.7a7.07 7.07 0 0 0 0 1.88l-2.03 1.58a.5.5 0 0 0-.12.64l1.92 3.32c.13.22.39.31.61.22l2.39-.96c.5.38 1.04.7 1.63.94l.36 2.54c.04.24.25.42.49.42h3.8c.24 0 .45-.18.49-.42l.36-2.54c.59-.24 1.13-.56 1.63-.94l2.39.96c.22.09.48 0 .61-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.58ZM12 15.5A3.5 3.5 0 1 1 12 8.5a3.5 3.5 0 0 1 0 7Z"/></svg>
       </button>
@@ -31,24 +35,50 @@
     <noscript><p class="notice error">This app needs JavaScript enabled.</p></noscript>
 
     <section class="card add-card" id="drop-zone">
-      <h2>Add a torrent</h2>
-      <div class="add-row">
-        <label class="btn primary file-btn">
-          <input id="torrent-file-input" type="file" accept=".torrent,application/x-bittorrent" multiple />
-          <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6Zm4 18H6V4h7v5h5v11Zm-6-1 4-4h-2.5v-4h-3v4H8l4 4Z"/></svg>
-          Pick a .torrent file
-        </label>
+      <div class="tabs" role="tablist">
+        <button class="tab active" type="button" role="tab" data-tab="download" aria-selected="true">Download</button>
+        <button class="tab" type="button" role="tab" data-tab="seed" aria-selected="false">Seed &amp; share</button>
       </div>
-      <form id="magnet-form" class="add-row" autocomplete="off">
-        <input id="magnet-input" type="text" inputmode="url" placeholder="magnet:?xt=urn:btih:… or info hash"
-               aria-label="Magnet link or info hash" spellcheck="false" />
-        <button class="btn" type="submit">Add</button>
-      </form>
-      <p class="hint">
-        Everything happens in your browser: nothing is uploaded to a server. Browsers can only reach
-        <strong>WebRTC-capable peers</strong> (other browsers, WebTorrent Desktop, or hybrid seeders),
-        so a torrent that only has classic seeders may find no peers here.
-      </p>
+
+      <div class="tab-panel" id="tab-download" role="tabpanel">
+        <div class="add-row">
+          <label class="btn primary file-btn">
+            <input id="torrent-file-input" type="file" accept=".torrent,application/x-bittorrent" multiple />
+            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6Zm4 18H6V4h7v5h5v11Zm-6-1 4-4h-2.5v-4h-3v4H8l4 4Z"/></svg>
+            Pick a .torrent file
+          </label>
+        </div>
+        <form id="magnet-form" class="add-row" autocomplete="off">
+          <input id="magnet-input" type="text" inputmode="url" placeholder="magnet:?xt=urn:btih:… or info hash"
+                 aria-label="Magnet link or info hash" spellcheck="false" />
+          <button class="btn" type="submit">Add</button>
+        </form>
+        <p class="hint">
+          Everything happens in your browser: nothing is uploaded to a server. Browsers can only reach
+          <strong>WebRTC-capable peers</strong> (other browsers, WebTorrent Desktop, or hybrid seeders),
+          so a torrent that only has classic seeders may find no peers here.
+        </p>
+      </div>
+
+      <div class="tab-panel" id="tab-seed" role="tabpanel" hidden>
+        <div class="add-row">
+          <label class="btn primary file-btn">
+            <input id="seed-file-input" type="file" multiple />
+            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M9 16h6v-6h4l-7-7-7 7h4v6Zm-4 2h14v2H5v-2Z"/></svg>
+            Pick files to share
+          </label>
+        </div>
+        <form id="seed-url-form" class="add-row" autocomplete="off">
+          <input id="seed-url-input" type="url" inputmode="url" placeholder="https://… (CORS-enabled file URL)"
+                 aria-label="Remote file URL to seed" spellcheck="false" />
+          <button class="btn" type="submit">Seed</button>
+        </form>
+        <p class="hint">
+          Turn files on your phone into a torrent and share the link. The files are sent directly from this
+          browser to whoever opens the link, so keep this page open while sharing. Remote URLs must allow
+          cross-origin requests and are fetched into memory first.
+        </p>
+      </div>
     </section>
 
     <section id="torrents" class="torrents" aria-live="polite"></section>
@@ -63,9 +93,18 @@
           <h3 class="name"></h3>
           <div class="meta"><span class="size"></span> · <span class="state"></span></div>
         </div>
-        <button class="icon-btn remove-btn" type="button" aria-label="Remove torrent" title="Remove torrent">
-          <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M6 19a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V7H6v12ZM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4Z"/></svg>
-        </button>
+        <div class="head-actions">
+          <button class="icon-btn pause-btn" type="button" aria-label="Pause" title="Pause">
+            <svg class="ic-pause" viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M6 5h4v14H6zm8 0h4v14h-4z"/></svg>
+            <svg class="ic-play" viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M8 5v14l11-7z"/></svg>
+          </button>
+          <button class="icon-btn share-btn" type="button" aria-label="Share" title="Share">
+            <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11A2.99 2.99 0 0 0 21 5a3 3 0 1 0-6 0c0 .24.04.47.09.7L8.04 9.81A3 3 0 0 0 3 12a3 3 0 0 0 5.04 2.19l7.12 4.16c-.05.21-.08.43-.08.65a2.92 2.92 0 1 0 2.92-2.92Z"/></svg>
+          </button>
+          <button class="icon-btn remove-btn" type="button" aria-label="Remove torrent" title="Remove torrent">
+            <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M6 19a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V7H6v12ZM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4Z"/></svg>
+          </button>
+        </div>
       </header>
       <div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="bar"></div></div>
       <div class="stats">
@@ -76,10 +115,29 @@
       </div>
       <div class="actions">
         <button class="btn primary zip-btn" type="button" disabled>Save selected as .zip</button>
+        <button class="btn primary share-link-btn" type="button">Share link</button>
         <button class="btn ghost select-all-btn" type="button">All</button>
         <button class="btn ghost select-none-btn" type="button">None</button>
+        <button class="btn ghost details-btn" type="button" aria-expanded="false">Details</button>
       </div>
       <ul class="files"></ul>
+      <section class="details" hidden>
+        <dl class="kv">
+          <dt>Info hash</dt><dd class="d-infohash mono"></dd>
+          <dt>Downloaded</dt><dd class="d-downloaded"></dd>
+          <dt>Uploaded</dt><dd class="d-uploaded"></dd>
+          <dt>Ratio</dt><dd class="d-ratio"></dd>
+          <dt>Pieces</dt><dd class="d-pieces"></dd>
+          <dt>Peers</dt><dd class="d-peers"></dd>
+          <dt>Trackers</dt><dd class="d-trackers mono"></dd>
+        </dl>
+        <div class="details-actions">
+          <button class="btn small copy-magnet-btn" type="button">Copy magnet</button>
+          <button class="btn small save-torrent-btn" type="button">Save .torrent</button>
+          <button class="btn small copy-link-btn" type="button">Copy app link</button>
+        </div>
+        <ul class="log" hidden></ul>
+      </section>
     </article>
   </template>
 
@@ -98,20 +156,42 @@
   <dialog id="settings-dialog" class="dialog">
     <form method="dialog" class="dialog-body">
       <h2>Settings</h2>
+
       <label class="field">
         <span>WebSocket trackers (one per line)</span>
         <textarea id="trackers-input" rows="5" spellcheck="false"></textarea>
+        <span class="hint">Added to every torrent so browsers can find each other. Only <code>wss://</code> trackers work from a web page.</span>
       </label>
-      <p class="hint">Trackers are added to every torrent so browsers can find each other. Only <code>wss://</code> trackers work from a web page.</p>
+
+      <label class="field">
+        <span>WebRTC configuration (JSON, optional)</span>
+        <textarea id="rtc-input" rows="3" spellcheck="false" placeholder='{"iceServers":[{"urls":"stun:stun.l.google.com:19302"}]}'></textarea>
+        <span class="hint">Custom STUN/TURN servers. Leave empty for the defaults. Takes effect after reload.</span>
+      </label>
+
+      <label class="toggle">
+        <input id="wakelock-toggle" type="checkbox" />
+        <span>Keep the screen awake while downloading or seeding</span>
+      </label>
+
+      <label class="toggle">
+        <input id="debug-toggle" type="checkbox" />
+        <span>Debug logging to the browser console (reloads the page)</span>
+      </label>
+
       <div class="field">
         <span>Storage</span>
         <p class="hint" id="storage-info">Downloaded pieces are kept in the browser's private storage so you can reload the page without losing progress.</p>
         <button id="clear-storage-btn" class="btn danger" type="button">Delete all stored torrent data</button>
       </div>
+
       <div class="field">
-        <span>Saving files</span>
+        <span>Client</span>
         <p class="hint" id="saver-info"></p>
+        <p class="hint mono" id="client-info"></p>
+        <button id="copy-diag-btn" class="btn small" type="button">Copy diagnostics</button>
       </div>
+
       <div class="dialog-actions">
         <button class="btn ghost" type="button" id="reset-trackers-btn">Reset trackers</button>
         <button class="btn primary" type="submit" value="save">Save</button>

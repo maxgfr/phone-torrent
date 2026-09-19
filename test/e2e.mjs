@@ -71,27 +71,30 @@ try {
 
   const FILE_A = 3 * 1024 * 1024 + 123; // > one piece, uneven size
   const FILE_B = 700 * 1024;
-  const { torrentFile, files } = await seeder.evaluate(async ({ trackerUrl, FILE_A, FILE_B }) => {
-    const rnd = (n, seed) => {
-      const out = new Uint8Array(n);
-      let x = seed;
-      for (let i = 0; i < n; i++) { x = (x * 1103515245 + 12345) & 0x7fffffff; out[i] = x >> 16; }
-      return out;
-    };
-    const a = new File([rnd(FILE_A, 7)], 'video clip.bin');
-    const b = new File([rnd(FILE_B, 11)], 'notes.txt');
-    const torrent = await new Promise((resolve) =>
-      window.__phoneTorrent.client.seed([a, b], { name: 'Phone Torrent Test', announce: [trackerUrl] }, resolve));
-    const hex = async (blob) => {
-      const buf = await blob.arrayBuffer();
-      const h = await crypto.subtle.digest('SHA-256', buf);
-      return [...new Uint8Array(h)].map((x) => x.toString(16).padStart(2, '0')).join('');
-    };
-    return {
-      torrentFile: Array.from(torrent.torrentFile),
-      files: [{ name: a.name, size: a.size, sha: await hex(a) }, { name: b.name, size: b.size, sha: await hex(b) }],
-    };
-  }, { trackerUrl, FILE_A, FILE_B });
+  const rnd = (n, seed) => {
+    const out = Buffer.alloc(n);
+    let x = seed;
+    for (let i = 0; i < n; i++) { x = (x * 1103515245 + 12345) & 0x7fffffff; out[i] = x >> 16; }
+    return out;
+  };
+  const seedBuffers = [rnd(FILE_A, 7), rnd(FILE_B, 11)];
+  const files = [
+    { name: 'video clip.bin', size: FILE_A, sha: sha(seedBuffers[0]) },
+    { name: 'notes.txt', size: FILE_B, sha: sha(seedBuffers[1]) },
+  ];
+
+  // Seed through the real UI: "Seed & share" tab, pick files, name the collection.
+  await seeder.click('.tab[data-tab="seed"]');
+  seeder.once('dialog', (d) => d.accept('Phone Torrent Test'));
+  await seeder.setInputFiles('#seed-file-input', files.map((f, i) => ({ name: f.name, mimeType: 'application/octet-stream', buffer: seedBuffers[i] })));
+  await seeder.waitForSelector('.torrent.seeding .file', { timeout: 30000 });
+  await waitFor(() => seeder.evaluate(() => window.__phoneTorrent.client.torrents[0]?.ready), { label: 'seeder ready' });
+  const torrentFile = await seeder.evaluate(() => Array.from(window.__phoneTorrent.client.torrents[0].torrentFile));
+  assert.equal(await seeder.$eval('.torrent .name', (e) => e.textContent), 'Phone Torrent Test');
+  assert.ok(!(await seeder.$eval('.torrent .details', (e) => e.hidden)), 'details open automatically after seeding starts');
+  assert.match(await seeder.$eval('.torrent .d-infohash', (e) => e.textContent), /^[a-f0-9]{40}$/);
+  await seeder.setViewportSize({ width: 390, height: 844 });
+  await seeder.screenshot({ path: path.join(TMP, 'seeder.png'), fullPage: true });
   log('seeding', files.map((f) => `${f.name} (${f.size} B)`).join(', '));
 
   /* ---------- downloader ("the phone") ---------- */
@@ -133,6 +136,32 @@ try {
   assert.ok((await phone.$$('.torrent .save-btn:not([disabled])')).length === 2, 'both Save buttons enabled');
   assert.ok(await phone.$('.torrent .zip-btn:not([disabled])'), 'zip button enabled');
 
+  // Pause / resume.
+  await phone.click('.torrent .pause-btn');
+  assert.ok(await phone.$('.torrent.paused'), 'torrent shows paused');
+  assert.equal(await phone.$eval('.torrent .state', (e) => e.textContent), 'paused');
+  assert.equal(await phone.evaluate(() => window.__phoneTorrent.client.torrents[0].paused), true);
+  await phone.click('.torrent .pause-btn');
+  assert.equal(await phone.evaluate(() => window.__phoneTorrent.client.torrents[0].paused), false);
+  assert.ok(!(await phone.$('.torrent.paused')), 'torrent resumed');
+  log('pause/resume OK');
+
+  // Details panel.
+  await phone.click('.torrent .details-btn');
+  assert.ok(!(await phone.$eval('.torrent .details', (e) => e.hidden)));
+  assert.match(await phone.$eval('.torrent .d-infohash', (e) => e.textContent), /^[a-f0-9]{40}$/);
+  assert.match(await phone.$eval('.torrent .d-trackers', (e) => e.textContent), /^ws:\/\/127\.0\.0\.1/);
+  assert.ok((await phone.$$('.torrent .log li')).length > 0, 'event log has entries');
+  const [torrentDl] = await Promise.all([
+    phone.waitForEvent('download', { timeout: 30000 }),
+    phone.click('.torrent .save-torrent-btn'),
+  ]);
+  assert.equal(torrentDl.suggestedFilename(), 'Phone Torrent Test.torrent');
+  const torrentDlPath = path.join(TMP, 'saved.torrent');
+  await torrentDl.saveAs(torrentDlPath);
+  assert.deepEqual(Array.from(readFileSync(torrentDlPath)), torrentFile, '.torrent file round-trips');
+  log('details + save .torrent OK');
+
   // Save one file: expect a real browser download whose bytes match the seed.
   const saveIndex = names.indexOf(files[0].name);
   const [download] = await Promise.all([
@@ -170,16 +199,39 @@ try {
   log('restored after reload with all pieces intact');
 
   await phone.screenshot({ path: path.join(TMP, 'phone.png'), fullPage: true });
+  await phone.click('#settings-btn');
+  await phone.waitForSelector('#settings-dialog[open]');
+  await phone.screenshot({ path: path.join(TMP, 'settings.png') });
+  await phone.keyboard.press('Escape');
 
   // Removing deletes it from the list and from the persisted set.
   phone.once('dialog', (d) => d.accept());
   await phone.click('.torrent .remove-btn');
   await waitFor(() => phone.$$('.torrent').then((l) => l.length === 0), { label: 'torrent removal' });
+  await waitFor(() => phone.evaluate(() => window.__phoneTorrent.client.torrents.length === 0), { label: 'client to drop the torrent' });
   await phone.reload();
   await phone.waitForFunction(() => window.__phoneTorrent?.client);
   await new Promise((r) => setTimeout(r, 800));
   assert.equal((await phone.$$('.torrent')).length, 0, 'removed torrent does not come back');
   log('remove OK');
+
+  /* ---------- Web Share Target: a .torrent shared to the installed app ---------- */
+  await phone.setContent(`<form id="f" method="POST" enctype="multipart/form-data" action="${site.url}share">
+    <input type="file" name="torrents" id="file"><input name="title" value="Phone Torrent Test"></form>`);
+  await phone.setInputFiles('#file', { name: 'shared.torrent', mimeType: 'application/x-bittorrent', buffer: Buffer.from(torrentFile) });
+  await Promise.all([phone.waitForNavigation(), phone.evaluate(() => document.getElementById('f').submit())]);
+  assert.equal(new URL(phone.url()).pathname, new URL(site.url).pathname, 'share target redirects back to the app');
+  await phone.waitForSelector('.torrent .file', { timeout: 15000 });
+  assert.equal(await phone.$eval('.torrent .name', (e) => e.textContent), 'Phone Torrent Test');
+  await waitFor(() => phone.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 'shared torrent download', timeout: 90000 });
+  log('share target OK');
+
+  // Opening the app with a magnet in the URL adds it (protocol handler / shared link).
+  await phone.goto(`${site.url}?magnet=${encodeURIComponent('magnet:?xt=urn:btih:' + '0'.repeat(40) + '&dn=fake')}`);
+  await phone.waitForSelector('.torrent', { timeout: 15000 });
+  await waitFor(() => phone.$$('.torrent').then((l) => l.length === 2), { label: 'magnet from URL to be added' });
+  assert.equal(new URL(phone.url()).search, '', 'query string is cleaned up');
+  log('magnet from URL OK');
 
   /* ---------- fallback: browser without service workers ---------- */
   const legacyCtx = await browser.newContext({ acceptDownloads: true, serviceWorkers: 'block' });

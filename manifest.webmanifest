@@ -1,13 +1,30 @@
 {
   "name": "Phone Torrent",
   "short_name": "Torrent",
-  "description": "Download torrents in your browser and save the files to your phone.",
+  "description": "Download and share torrents in your browser and save the files to your phone.",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
+  "orientation": "portrait",
   "background_color": "#0b1220",
   "theme_color": "#2563eb",
   "icons": [
     { "src": "./icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ],
+  "share_target": {
+    "action": "./share",
+    "method": "POST",
+    "enctype": "multipart/form-data",
+    "params": {
+      "title": "title",
+      "text": "text",
+      "url": "url",
+      "files": [
+        { "name": "torrents", "accept": [".torrent", "application/x-bittorrent"] }
+      ]
+    }
+  },
+  "protocol_handlers": [
+    { "protocol": "magnet", "url": "./?magnet=%s" }
   ]
 }
