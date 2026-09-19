@@ -377,8 +377,10 @@ try {
   const orphan = await seeder.evaluate(async () => {
     const timeout = (ms, what) => new Promise((_, rej) => setTimeout(() => rej(new Error(`timed out: ${what}`)), ms));
     const f = new File([new Uint8Array(200 * 1024).fill(7)], 'orphan.bin');
-    const t = await Promise.race([
-      new Promise((resolve) => window.__phoneTorrent.client.seed([f], { name: 'Fallback Test' }, resolve)),
+    // Use the app's own seeding path so it picks the same piece store the app would (OPFS or memory).
+    const t = await window.__phoneTorrent.seedFiles([f], { name: 'Fallback Test' });
+    await Promise.race([
+      new Promise((resolve) => (t.ready ? resolve() : t.once('ready', resolve))),
       timeout(20000, 'seed orphan'),
     ]);
     const out = { infoHash: t.infoHash, torrentFile: Array.from(t.torrentFile) };
