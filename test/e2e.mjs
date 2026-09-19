@@ -11,7 +11,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { chromium } from 'playwright';
+import { chromium, webkit, devices } from 'playwright';
 import { Server as TrackerServer } from 'bittorrent-tracker';
 import { startServer } from './serve.mjs';
 
@@ -57,7 +57,12 @@ log('tracker at', trackerUrl);
 const site = await startServer(0);
 log('site at', site.url);
 
-const browser = await chromium.launch({ executablePath: findChromium(), args: ['--allow-insecure-localhost'] });
+// BROWSER=webkit runs the same suite on Safari's engine (what every browser on iOS uses).
+const BROWSER = process.env.BROWSER || 'chromium';
+const browser = BROWSER === 'webkit'
+  ? await webkit.launch()
+  : await chromium.launch({ executablePath: findChromium(), args: ['--allow-insecure-localhost'] });
+log('browser:', BROWSER);
 
 let failed = false;
 try {
@@ -95,6 +100,24 @@ try {
   assert.match(await seeder.$eval('.torrent .d-infohash', (e) => e.textContent), /^[a-f0-9]{40}$/);
   await seeder.setViewportSize({ width: 390, height: 844 });
   await seeder.screenshot({ path: path.join(TMP, 'seeder.png'), fullPage: true });
+
+  // Storage housekeeping must never delete the store of a torrent that is live in the client
+  // (seeds have no persisted record). Wait until the seed's pieces are on disk, run the cleanup,
+  // then read them back and verify their hashes.
+  const readPieces = () => seeder.evaluate(async () => {
+    const t = window.__phoneTorrent.client.torrents[0];
+    for (const i of [0, t.pieces.length - 1]) {
+      const buf = await new Promise((r) => t.store.get(i, (e, b) => r(e ? null : b)));
+      if (!buf) return false;
+      const h = await crypto.subtle.digest('SHA-1', buf);
+      if ([...new Uint8Array(h)].map((x) => x.toString(16).padStart(2, '0')).join('') !== t._hashes[i]) return false;
+    }
+    return true;
+  });
+  await waitFor(readPieces, { label: 'seed pieces written to the store', timeout: 20000 });
+  await seeder.evaluate(() => window.__phoneTorrent.cleanOrphanStores([]));
+  assert.equal(await readPieces(), true, 'orphan cleanup leaves live seed data intact');
+  log('seed store survives housekeeping');
   log('seeding', files.map((f) => `${f.name} (${f.size} B)`).join(', '));
 
   /* ---------- downloader ("the phone") ---------- */
@@ -114,6 +137,7 @@ try {
   await phone.addInitScript(({ listUrl, metaUrl }) => localStorage.setItem('phone-torrent:settings', JSON.stringify({
     trackers: ['ws://127.0.0.1:9/dead'], trackerList: true, trackerListUrl: listUrl,
     metadataSources: ['https://127.0.0.1:1/never/{INFOHASH}.torrent', metaUrl], fallbackDelay: 5,
+    dohResolver: `${new URL(listUrl).origin}/__doh`,
   })), { listUrl, metaUrl: `${site.url}test/.tmp/{infohash}.torrent` });
   await phone.goto(site.url);
   await phone.waitForFunction(() => window.__phoneTorrent?.client);
@@ -135,6 +159,15 @@ try {
     return Boolean(await cache.match('./app.js') && await cache.match('./vendor/webtorrent.min.js') && await cache.match('./index.html'));
   }), { label: 'app shell precache', timeout: 15000 });
   log('PWA manifest + app shell cache OK');
+
+  // Network check: live tracker reachable, dead hostname flagged as dead, unreachable IP flagged as blocked.
+  const netcheck = await phone.evaluate(() => window.__phoneTorrent.runNetworkCheck());
+  const byUrl = Object.fromEntries(netcheck.map((r) => [r.url, r]));
+  assert.equal(byUrl[trackerUrl].level, 'ok', 'local tracker reachable');
+  assert.equal(byUrl['wss://also-dead.example'].level, 'bad', 'non-existent host reported dead');
+  assert.equal(byUrl['ws://127.0.0.1:9/dead'].level, 'warn', 'unreachable but existing host reported as possibly blocked');
+  assert.equal((await phone.$$('#netcheck-results li')).length, 3);
+  log('network check OK');
 
   const saverMode = await phone.evaluate(() => new Promise((resolve) => {
     const t = setInterval(() => {
@@ -160,7 +193,33 @@ try {
   assert.deepEqual([...names].sort(), files.map((f) => f.name).sort());
   log('file list rendered:', names.join(', '));
 
-  await waitFor(() => phone.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 'download to finish', timeout: 90000 });
+  try {
+    await waitFor(() => phone.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 'download to finish', timeout: 90000 });
+  } catch (err) {
+    const dump = (page) => page.evaluate(() => window.__phoneTorrent.client.torrents.map((t) => ({
+      name: t.name, peers: t.numPeers, progress: t.progress, paused: t.paused, ready: t.ready, done: t.done,
+      downloaded: t.downloaded, uploaded: t.uploaded, received: t.received, selections: t._selections?._items?.length,
+      warnings: window.__phoneTorrent.views.get(t)?.log?.filter((l) => /warning|error|fail/i.test(l)),
+      wires: t.wires.map((w) => ({ type: w.type, peerChoking: w.peerChoking, amChoking: w.amChoking, peerInterested: w.peerInterested, amInterested: w.amInterested, requests: w.requests.length, peerRequests: w.peerRequests.length, peerPieces: w.peerPieces?.buffer?.length, uploaded: w.uploaded, downloaded: w.downloaded })),
+    })));
+    console.error('phone:', JSON.stringify(await dump(phone), null, 1));
+    console.error('seeder:', JSON.stringify(await dump(seeder), null, 1));
+    console.error('seeder piece check:', JSON.stringify(await seeder.evaluate(async () => {
+      const t = window.__phoneTorrent.client.torrents[0];
+      const out = { pieces: t.pieces.length, pieceLength: t.pieceLength, storeName: t.store?.store?.name || t.store?.name, results: [] };
+      for (const i of [0, 1, t.pieces.length - 1]) {
+        const buf = await new Promise((r) => t.store.get(i, (e, b) => r(e ? { err: String(e) } : b)));
+        if (buf.err) { out.results.push({ i, err: buf.err }); continue; }
+        const h = await crypto.subtle.digest('SHA-1', buf);
+        const hex = [...new Uint8Array(h)].map((x) => x.toString(16).padStart(2, '0')).join('');
+        out.results.push({ i, len: buf.length, ok: hex === t._hashes[i], zeros: buf.every((b) => b === 0) });
+      }
+      return out;
+    })));
+    console.error('phone warnings:', JSON.stringify(await phone.evaluate(() => window.__phoneTorrent.views.values().next().value.log.filter((l) => /verif|warning/i.test(l)))));
+    console.error('tracker server torrents:', Object.keys(tracker.torrents).length);
+    throw err;
+  }
   log('download complete');
   assert.ok((await phone.$$('.torrent .save-btn:not([disabled])')).length === 2, 'both Save buttons enabled');
   assert.ok(await phone.$('.torrent .zip-btn:not([disabled])'), 'zip button enabled');
@@ -349,6 +408,43 @@ try {
   assert.equal(await phone.isVisible('.torrent .nopeers'), false, 'hint resets after retry');
   assert.equal(await phone.$eval('.torrent .name', (e) => e.textContent), 'Fallback Test', 'metadata kept across retry');
   log('retry with fresh trackers OK');
+
+  /* ---------- iOS (Safari / Brave / Chrome on iPhone all report a WebKit iPhone UA) ---------- */
+  const iphone = devices['iPhone 13'];
+  const iosCtx = await browser.newContext({ ...iphone, acceptDownloads: true });
+  const ios = await iosCtx.newPage();
+  ios.on('pageerror', (e) => console.error('ios page error:', e));
+  ios.on('dialog', (d) => d.accept());
+  await ios.addInitScript((t) => localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], trackerList: false })), trackerUrl);
+  await ios.goto(site.url);
+  await ios.waitForFunction(() => window.__phoneTorrent?.client);
+  const iosSaver = await ios.evaluate(() => new Promise((resolve) => {
+    const t = setInterval(() => {
+      const s = window.__phoneTorrent.saver;
+      if (s.mode === 'stream' || s.reason) { clearInterval(t); resolve({ mode: s.mode, reason: s.reason, sw: Boolean(navigator.serviceWorker?.controller || navigator.serviceWorker) }); }
+    }, 50);
+  }));
+  assert.equal(iosSaver.mode, 'blob', 'iOS saves through memory, not the streaming worker');
+  assert.match(iosSaver.reason, /iOS/);
+  await ios.setInputFiles('#torrent-file-input', { name: 'test.torrent', mimeType: 'application/x-bittorrent', buffer: Buffer.from(torrentFile) });
+  await ios.waitForSelector('.torrent .file', { timeout: 15000 });
+  await waitFor(() => ios.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 'iOS download', timeout: 90000 });
+  const iosNames = await ios.$$eval('.torrent .file .file-name', (els) => els.map((e) => e.textContent));
+  const [iosDownload] = await Promise.all([
+    ios.waitForEvent('download', { timeout: 30000 }),
+    ios.locator('.torrent .file .save-btn').nth(iosNames.indexOf(files[1].name)).click(),
+  ]);
+  const iosPath = path.join(TMP, 'ios.bin');
+  await iosDownload.saveAs(iosPath);
+  assert.equal(sha(readFileSync(iosPath)), files[1].sha, 'iOS save matches the seeded file');
+  const [iosZip] = await Promise.all([
+    ios.waitForEvent('download', { timeout: 30000 }),
+    ios.click('.torrent .zip-btn'),
+  ]);
+  assert.equal(iosZip.suggestedFilename(), 'Phone Torrent Test.zip');
+  await ios.screenshot({ path: path.join(TMP, 'ios.png'), fullPage: true });
+  log('iOS-emulated save + zip OK');
+  await iosCtx.close();
 
   /* ---------- fallback: browser without service workers ---------- */
   const legacyCtx = await browser.newContext({ acceptDownloads: true, serviceWorkers: 'block' });

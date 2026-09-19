@@ -58,6 +58,16 @@ shows a **retry** that refreshes the tracker list and re‑announces, plus an **
 option. The Details panel's event log shows what was tried and why it failed (for example
 "blocked by CORS", which the proxy in `proxy/` fixes).
 
+### Blocked DNS
+
+Some ISPs block tracker hostnames at the DNS level. A web page cannot pick its own DNS server, but
+**Settings → Network check** resolves every tracker through DNS over HTTPS (Cloudflare 1.1.1.1,
+Google or Quad9, your choice) and tries to connect to it, then tells you which trackers are simply
+dead and which exist but are unreachable from your network, meaning blocked. The fix is on the
+device, not in the app: Android → Settings → Network → Private DNS → `one.one.one.one`; iPhone →
+the 1.1.1.1 app or Cloudflare's encrypted‑DNS profile; or set the DNS on your router. The public
+tracker list itself is fetched from GitHub with two mirrors as fallback.
+
 What no browser can do is talk to classic BitTorrent peers over UDP/TCP or query the DHT. If you
 need torrents that only have such seeders, the only option is a small **bridge server** (for
 example `webtorrent-hybrid` on a VPS) that downloads them the classic way and re‑seeds them over
@@ -152,8 +162,14 @@ automated test cannot cover.
 
 Recent Chrome/Edge/Firefox on Android and desktop, and Safari 16.4+ on iOS. Everything degrades
 gracefully: without OPFS the pieces are kept in memory, and without a service worker files are
-assembled in memory before saving, which limits the practical file size on phones. Share Target and
-`magnet:` protocol handling are Android/Chromium features; iOS Safari does not offer them, so use the
-file picker or paste the link there. On iOS, saved files are assembled in memory and handed to the
-share sheet (choose "Save to Files"), because Safari has no download manager for streamed files. Keep the tab in the foreground while downloading: mobile
+assembled in memory before saving, which limits the practical file size on phones.
+
+**iOS (Safari, Brave, Chrome, Firefox).** Every browser on iOS runs Apple's WebKit engine, so they
+all behave like Safari here: WebRTC and the app itself work, "Add to Home Screen" installs it, and
+saved files are assembled in memory then handed to the download popup or, in the installed app, to
+the share sheet (choose "Save to Files"). That memory step caps the practical file size at what the
+device can hold, roughly one to two gigabytes. Share Target and `magnet:` protocol handling are not
+available on iOS, so use the file picker or paste the link. In Brave, if no peers ever connect,
+lower Shields for the site: aggressive blocking can interfere with tracker connections. CI runs the
+whole end‑to‑end suite on WebKit as well as Chromium, including an iPhone‑emulated context. Keep the tab in the foreground while downloading: mobile
 browsers throttle or suspend background pages, which is why the wake lock option exists.

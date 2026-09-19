@@ -13,7 +13,11 @@ let registration = null;
 let keepAliveTimer = null;
 let activeStreams = 0;
 
-const IS_IOS = /iP(hone|ad|od)/.test(navigator.userAgent) && !window.MSStream;
+const UA = navigator.userAgent;
+const IS_IOS = /iP(hone|ad|od)/.test(UA) && !window.MSStream;
+// Safari on macOS, and every browser on iOS (Safari, Brave, Chrome, Firefox all use WebKit there),
+// do not hand a service-worker streamed attachment to a download manager.
+const IS_WEBKIT_ONLY = IS_IOS || (/AppleWebKit/.test(UA) && !/Chrome|Chromium|CriOS|EdgiOS|Edg\/|Firefox|FxiOS/.test(UA));
 const isStandalone = () => window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
 
 export const saver = {
@@ -33,10 +37,11 @@ export const saver = {
       registration = await navigator.serviceWorker.register('./sw.js', { scope: './' });
       await waitForActive(registration);
       navigator.serviceWorker.addEventListener('message', onWorkerMessage);
-      if (IS_IOS) {
-        // Safari, and especially home-screen web apps, do not hand a streamed attachment to a
-        // download manager. Keep the worker (offline shell, share target) but save via memory.
-        this.reason = 'On iOS files are prepared in memory, then saved through the share sheet.';
+      if (IS_WEBKIT_ONLY) {
+        // Keep the worker (offline shell, share target) but save via memory.
+        this.reason = IS_IOS
+          ? 'On iOS files are prepared in memory, then saved with the share sheet or the download popup.'
+          : 'Safari prepares files in memory before saving.';
       } else {
         this.mode = 'stream';
       }

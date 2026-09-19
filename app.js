@@ -17,6 +17,12 @@ const DEBUG_NAMESPACES = 'webtorrent*,bittorrent-tracker*,simple-peer*';
 const TRACKER_LIST_KEY = 'phone-torrent:trackerlist';
 const TRACKER_LIST_TTL = 6 * 60 * 60 * 1000;
 const DEFAULT_TRACKER_LIST_URL = 'https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_all_ws.txt';
+// Same list from other hosts, for networks that block GitHub's raw domain.
+const TRACKER_LIST_MIRRORS = [
+  'https://cdn.jsdelivr.net/gh/ngosang/trackerslist@master/trackers_all_ws.txt',
+  'https://cdn.statically.io/gh/ngosang/trackerslist/master/trackers_all_ws.txt',
+];
+const DEFAULT_DOH = 'https://cloudflare-dns.com/dns-query';
 // Torrent caches that serve a .torrent by info hash. Tried only when peers never deliver the metadata.
 const DEFAULT_METADATA_SOURCES = [
   'https://itorrents.org/torrent/{INFOHASH}.torrent',
@@ -49,6 +55,9 @@ const els = {
   strategySelect: $('#strategy-select'),
   installBtn: $('#install-btn'),
   metaSourcesInput: $('#metasources-input'),
+  dohSelect: $('#doh-select'),
+  netcheckBtn: $('#netcheck-btn'),
+  netcheckResults: $('#netcheck-results'),
   corsProxyInput: $('#corsproxy-input'),
   fallbackDelayInput: $('#fallback-delay'),
   rtcInput: $('#rtc-input'),
@@ -81,6 +90,7 @@ function loadSettings() {
     metadataSources: [...DEFAULT_METADATA_SOURCES],
     corsProxy: '',
     fallbackDelay: 20, // seconds
+    dohResolver: DEFAULT_DOH,
   };
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
@@ -130,18 +140,91 @@ async function refreshTrackerList({ force = false } = {}) {
   if (!settings.trackerList || !/^https?:\/\//i.test(settings.trackerListUrl || '')) return null;
   const cached = loadTrackerListCache();
   if (!force && cached && cached.url === settings.trackerListUrl && Date.now() - cached.fetchedAt < TRACKER_LIST_TTL) return cached;
-  try {
-    const res = await fetch(settings.trackerListUrl, { cache: 'no-store' });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const trackers = parseTrackerList(await res.text());
-    const record = { url: settings.trackerListUrl, fetchedAt: Date.now(), trackers };
-    try { localStorage.setItem(TRACKER_LIST_KEY, JSON.stringify(record)); } catch { /* ignore */ }
-    applyTrackers();
-    return record;
-  } catch (err) {
-    console.warn('tracker list fetch failed', err);
-    return cached;
+  const urls = [settings.trackerListUrl, ...(settings.trackerListUrl === DEFAULT_TRACKER_LIST_URL ? TRACKER_LIST_MIRRORS : [])];
+  for (const url of urls) {
+    try {
+      const res = await fetch(url, { cache: 'no-store', signal: AbortSignal.timeout(8000) });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const trackers = parseTrackerList(await res.text());
+      if (!trackers.length) throw new Error('empty list');
+      const record = { url: settings.trackerListUrl, fetchedAt: Date.now(), trackers, via: url };
+      try { localStorage.setItem(TRACKER_LIST_KEY, JSON.stringify(record)); } catch { /* ignore */ }
+      applyTrackers();
+      return record;
+    } catch (err) {
+      console.warn('tracker list fetch failed', url, err);
+    }
   }
+  return cached;
+}
+
+/* ---------- network check: is a tracker dead, or blocked by this network's DNS? ---------- */
+
+function wsReachable(url, timeoutMs = 6000) {
+  return new Promise((resolve) => {
+    let ws;
+    const timer = setTimeout(() => { try { ws && ws.close(); } catch { /* ignore */ } resolve(false); }, timeoutMs);
+    try {
+      ws = new WebSocket(url);
+    } catch {
+      clearTimeout(timer);
+      resolve(false);
+      return;
+    }
+    ws.onopen = () => { clearTimeout(timer); ws.close(); resolve(true); };
+    ws.onerror = () => { clearTimeout(timer); resolve(false); };
+  });
+}
+
+/** Look a hostname up through a DNS-over-HTTPS JSON resolver: 'exists' | 'nxdomain' | 'unknown'. */
+async function dohLookup(host) {
+  const resolver = settings.dohResolver || DEFAULT_DOH;
+  try {
+    const res = await fetch(`${resolver}${resolver.includes('?') ? '&' : '?'}name=${encodeURIComponent(host)}&type=A`, {
+      headers: { accept: 'application/dns-json' },
+      cache: 'no-store',
+    });
+    if (!res.ok) return 'unknown';
+    const data = await res.json();
+    if (data.Status === 3) return 'nxdomain';
+    if (data.Status === 0) return Array.isArray(data.Answer) && data.Answer.length ? 'exists' : 'nxdomain';
+    return 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
+async function checkTracker(url) {
+  let host;
+  try { host = new URL(url).hostname; } catch { return { url, level: 'bad', text: 'invalid URL' }; }
+  const [reachable, dns] = await Promise.all([wsReachable(url), /^[\d.]+$|^\[/.test(host) ? 'exists' : dohLookup(host)]);
+  if (reachable) return { url, level: 'ok', text: 'reachable' };
+  if (dns === 'nxdomain') return { url, level: 'bad', text: 'does not exist any more (dead tracker)' };
+  if (dns === 'exists') return { url, level: 'warn', text: 'exists but unreachable from this network: likely blocked by your DNS or firewall, try DNS 1.1.1.1' };
+  return { url, level: 'warn', text: 'unreachable (could not verify its DNS either)' };
+}
+
+async function runNetworkCheck() {
+  const trackers = effectiveTrackers();
+  els.netcheckBtn.disabled = true;
+  els.netcheckBtn.textContent = `Checking ${trackers.length} trackers…`;
+  els.netcheckResults.hidden = false;
+  els.netcheckResults.textContent = '';
+  const results = await Promise.all(trackers.map(checkTracker));
+  for (const r of results) {
+    const li = document.createElement('li');
+    const mark = document.createElement('span');
+    mark.className = r.level;
+    mark.textContent = r.level === 'ok' ? '✓' : r.level === 'bad' ? '✗' : '!';
+    const text = document.createElement('span');
+    text.textContent = `${r.url} — ${r.text}`;
+    li.append(mark, text);
+    els.netcheckResults.appendChild(li);
+  }
+  const okCount = results.filter((r) => r.level === 'ok').length;
+  els.netcheckBtn.disabled = false;
+  els.netcheckBtn.textContent = `Check again (${okCount}/${results.length} reachable)`;
+  return results;
 }
 
 function applyTrackers() {
@@ -203,7 +286,11 @@ async function dbClear() {
 /** Our OPFS store directories are named "<torrent name> - <first 8 hex of info hash>". */
 const STORE_DIR_RE = / - ([a-f0-9]{8})$/;
 
-/** Remove OPFS directories that belong to no remembered torrent (closed seeds, failed removals). */
+/**
+ * Remove OPFS directories that belong to no remembered torrent (closed seeds, failed removals).
+ * Directories of torrents currently in the client are never touched, so a torrent added or seeded
+ * while this runs keeps its data.
+ */
 async function cleanOrphanStores(records) {
   if (!navigator.storage?.getDirectory) return;
   try {
@@ -211,10 +298,15 @@ async function cleanOrphanStores(records) {
     const known = new Set(records.map((r) => String(r.infoHash).slice(0, 8)));
     for await (const name of root.keys()) {
       const m = name.match(STORE_DIR_RE);
-      if (m && !known.has(m[1])) await root.removeEntry(name, { recursive: true }).catch(() => {});
+      if (!m || known.has(m[1])) continue;
+      if (client.torrents.some((t) => t.infoHash && t.infoHash.startsWith(m[1]))) continue;
+      await root.removeEntry(name, { recursive: true }).catch(() => {});
     }
   } catch { /* ignore */ }
 }
+
+/** Resolves once persisted records are loaded and orphan stores are cleaned; adding waits for it. */
+let storageReady = Promise.resolve([]);
 
 /* ---------- helpers ---------- */
 
@@ -424,6 +516,7 @@ function logEvent(view, message) {
 }
 
 async function addTorrent(id, { record } = {}) {
+  await storageReady;
   const existing = await client.get(id).catch(() => null);
   if (existing) {
     toast(`"${existing.name || existing.infoHash}" is already in the list.`);
@@ -452,8 +545,9 @@ function sourceToId(record) {
   return new Uint8Array(record.torrentFile);
 }
 
-function seedFiles(files, { name } = {}) {
-  if (!files.length) return;
+async function seedFiles(files, { name } = {}) {
+  if (!files.length) return null;
+  await storageReady;
   // Seeds copy the files into OPFS; drop that copy when the seed is removed.
   const opts = { announce: effectiveTrackers(), destroyStoreOnDestroy: true };
   if (name) opts.name = name;
@@ -498,6 +592,7 @@ function attachTorrent(torrent, { record, seeding }) {
     const msg = String(err && err.message || err);
     // udp:// and http:// trackers in .torrent files are expected to be unusable from a browser.
     if (/Unsupported tracker protocol/i.test(msg)) return;
+    console.warn('torrent warning:', msg);
     logEvent(view, `warning: ${msg}`);
   });
   torrent.on('wire', (wire, addr) => logEvent(view, `peer connected ${addr || wire.type || ''}`.trim()));
@@ -1115,6 +1210,10 @@ els.settingsBtn.addEventListener('click', async () => {
   els.seedAfterToggle.checked = Boolean(settings.seedAfterDone);
   els.strategySelect.value = settings.strategy === 'rarest' ? 'rarest' : 'sequential';
   els.metaSourcesInput.value = (settings.metadataSources || []).join('\n');
+  if ([...els.dohSelect.options].some((o) => o.value === settings.dohResolver)) els.dohSelect.value = settings.dohResolver;
+  els.netcheckResults.hidden = true;
+  els.netcheckBtn.disabled = false;
+  els.netcheckBtn.textContent = 'Check tracker connectivity';
   els.corsProxyInput.value = settings.corsProxy || '';
   els.fallbackDelayInput.value = String(settings.fallbackDelay || 20);
   els.rtcInput.value = settings.rtcConfig ? JSON.stringify(settings.rtcConfig) : '';
@@ -1130,6 +1229,12 @@ els.settingsBtn.addEventListener('click', async () => {
   } catch { /* keep default text */ }
   els.settingsDialog.returnValue = '';
   els.settingsDialog.showModal();
+});
+
+els.netcheckBtn.addEventListener('click', () => {
+  // Use the resolver currently chosen in the dialog, even before Save.
+  settings = { ...settings, dohResolver: els.dohSelect.value || DEFAULT_DOH };
+  runNetworkCheck();
 });
 
 els.resetTrackersBtn.addEventListener('click', () => {
@@ -1179,6 +1284,7 @@ els.settingsDialog.addEventListener('close', () => {
     metadataSources: els.metaSourcesInput.value.split('\n').map((s) => s.trim()).filter((s) => /^https?:\/\/.*\{infohash\}/i.test(s)),
     corsProxy: /^https?:\/\/.*\{url\}/i.test(els.corsProxyInput.value.trim()) ? els.corsProxyInput.value.trim() : '',
     fallbackDelay: Math.max(5, Number(els.fallbackDelayInput.value) || 20),
+    dohResolver: els.dohSelect.value || DEFAULT_DOH,
   });
   applyTrackers();
   applySpeedLimits();
@@ -1328,15 +1434,20 @@ function maybeShowIosInstallHint() {
 /* ---------- startup ---------- */
 
 (async function start() {
-  await saver.init();
+  // Storage housekeeping first, before anything can be added or seeded.
+  storageReady = (async () => {
+    const records = await dbAll();
+    records.sort((a, b) => a.addedAt - b.addedAt);
+    await cleanOrphanStores(records);
+    return records;
+  })();
+  const [records] = await Promise.all([storageReady, saver.init()]);
+
   // Give the public tracker list a moment so restored torrents announce to it too; the cached list is
   // already applied, so on a slow network we simply continue and it merges in when it arrives.
   await Promise.race([refreshTrackerList(), new Promise((r) => setTimeout(r, 2500))]);
   maybeShowIosInstallHint();
 
-  const records = await dbAll();
-  records.sort((a, b) => a.addedAt - b.addedAt);
-  await cleanOrphanStores(records);
   for (const record of records) {
     try {
       const torrent = await addTorrent(sourceToId(record), { record });
@@ -1368,4 +1479,4 @@ function maybeShowIosInstallHint() {
 })();
 
 // Expose for debugging and tests.
-window.__phoneTorrent = { client, views, saver, addTorrent, seedFiles, effectiveTrackers, refreshTrackerList, fetchMetadataFallback, verifyTorrentBytes };
+window.__phoneTorrent = { client, views, saver, addTorrent, seedFiles, effectiveTrackers, refreshTrackerList, fetchMetadataFallback, verifyTorrentBytes, runNetworkCheck, cleanOrphanStores };

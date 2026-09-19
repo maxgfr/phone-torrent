@@ -24,7 +24,17 @@ const TYPES = {
 
 export function startServer(port = 0) {
   const server = http.createServer((req, res) => {
-    let pathname = decodeURIComponent(new URL(req.url, 'http://localhost').pathname);
+    const reqUrl = new URL(req.url, 'http://localhost');
+    if (reqUrl.pathname === '/__doh') {
+      // Test double for a DNS-over-HTTPS JSON resolver: *.dead.example does not exist, anything else resolves.
+      const name = reqUrl.searchParams.get('name') || '';
+      const body = /dead\.example$/.test(name)
+        ? { Status: 3, Answer: [] }
+        : { Status: 0, Answer: [{ name, type: 1, data: '127.0.0.1' }] };
+      res.writeHead(200, { 'Content-Type': 'application/dns-json', 'Cache-Control': 'no-store' }).end(JSON.stringify(body));
+      return;
+    }
+    let pathname = decodeURIComponent(reqUrl.pathname);
     if (pathname.endsWith('/')) pathname += 'index.html';
     const file = path.join(ROOT, path.normalize(pathname));
     if (!file.startsWith(ROOT)) {

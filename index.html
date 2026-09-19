@@ -183,6 +183,24 @@
         <span class="hint" id="trackerlist-info"></span>
       </label>
 
+      <div class="field">
+        <span>Network check</span>
+        <label class="field">
+          <span class="hint">Resolver used to check whether tracker hostnames exist (DNS over HTTPS)</span>
+          <select id="doh-select">
+            <option value="https://cloudflare-dns.com/dns-query">Cloudflare 1.1.1.1</option>
+            <option value="https://dns.google/resolve">Google 8.8.8.8</option>
+            <option value="https://dns.quad9.net:5053/dns-query">Quad9 9.9.9.9</option>
+          </select>
+        </label>
+        <button id="netcheck-btn" class="btn small" type="button">Check tracker connectivity</button>
+        <ul id="netcheck-results" class="netcheck" hidden></ul>
+        <p class="hint">A web page cannot change which DNS server your phone uses. If trackers show as
+          <strong>blocked by your network</strong>, set the DNS on the device: Android → Settings → Network →
+          Private DNS → <code>one.one.one.one</code>; iPhone → install the 1.1.1.1 app or Cloudflare's encrypted DNS
+          profile; or change the DNS on your router.</p>
+      </div>
+
       <div class="field two-col">
         <label class="field">
           <span>Download limit (KB/s, 0 = unlimited)</span>
