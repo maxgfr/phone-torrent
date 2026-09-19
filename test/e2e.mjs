@@ -178,7 +178,8 @@ try {
     }, 50);
   }));
   log('saver mode:', saverMode);
-  assert.equal(saverMode, 'stream', 'service worker streaming should be active on localhost');
+  // Chromium streams saves through the service worker; WebKit (Safari) deliberately saves via memory.
+  assert.equal(saverMode, BROWSER === 'webkit' ? 'blob' : 'stream', 'expected save mode for this engine');
 
   // Add through the real file input, as a user picking a .torrent from their phone would.
   await phone.setInputFiles('#torrent-file-input', {
