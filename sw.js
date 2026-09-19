@@ -11,8 +11,69 @@
 
 const ANSWER_TIMEOUT_MS = 8000;
 
-self.addEventListener('install', () => self.skipWaiting());
-self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim()));
+/* App shell cache so the installed app opens offline and loads instantly.
+ * Network first, cache as fallback: a deploy is picked up on the next online load. */
+const SHELL_CACHE = 'phone-torrent-shell-v1';
+const SHELL_FILES = [
+  './',
+  './index.html',
+  './app.js',
+  './saver.js',
+  './styles.css',
+  './icon.svg',
+  './manifest.webmanifest',
+  './vendor/webtorrent.min.js',
+  './vendor/client-zip.js',
+  './icons/icon-192.png',
+  './icons/icon-512.png',
+  './icons/maskable-512.png',
+  './icons/apple-touch-icon.png',
+];
+
+self.addEventListener('install', (event) => {
+  event.waitUntil((async () => {
+    try {
+      const cache = await caches.open(SHELL_CACHE);
+      await cache.addAll(SHELL_FILES);
+    } catch (err) {
+      console.warn('shell precache failed', err);
+    }
+    await self.skipWaiting();
+  })());
+});
+
+self.addEventListener('activate', (event) => {
+  event.waitUntil((async () => {
+    const keys = await caches.keys();
+    await Promise.all(keys
+      .filter((k) => k.startsWith('phone-torrent-shell-') && k !== SHELL_CACHE)
+      .map((k) => caches.delete(k)));
+    await self.clients.claim();
+  })());
+});
+
+const SHELL_PATHS = new Set(SHELL_FILES.map((f) => new URL(f, self.registration.scope).pathname));
+
+function isShellRequest(url) {
+  return SHELL_PATHS.has(url.pathname);
+}
+
+async function networkFirst(request) {
+  const cache = await caches.open(SHELL_CACHE);
+  try {
+    const fresh = await fetch(request);
+    if (fresh.ok) cache.put(request, fresh.clone()).catch(() => {});
+    return fresh;
+  } catch (err) {
+    const cached = await cache.match(request, { ignoreSearch: true });
+    if (cached) return cached;
+    if (request.mode === 'navigate') {
+      const index = await cache.match('./index.html');
+      if (index) return index;
+    }
+    throw err;
+  }
+}
 
 self.addEventListener('fetch', (event) => {
   const scope = new URL(self.registration.scope).pathname;
@@ -26,9 +87,15 @@ self.addEventListener('fetch', (event) => {
     event.respondWith(receiveShare(event.request, scope));
     return;
   }
-  if (!url.pathname.startsWith(scope + 'dl/')) return;
-  const id = url.pathname.slice((scope + 'dl/').length).split('/')[0];
-  event.respondWith(serve(id));
+  if (url.pathname.startsWith(scope + 'dl/')) {
+    const id = url.pathname.slice((scope + 'dl/').length).split('/')[0];
+    event.respondWith(serve(id));
+    return;
+  }
+  // Only the app shell is cached; everything else (tracker lists, remote files) goes straight to the network.
+  if (event.request.method === 'GET' && (isShellRequest(url) || event.request.mode === 'navigate')) {
+    event.respondWith(networkFirst(event.request));
+  }
 });
 
 /* Web Share Target: Android lets the user "share" a .torrent file or a magnet

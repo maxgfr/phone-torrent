@@ -19,8 +19,13 @@ your phone either file by file or as a single `.zip`.
   seeded too. The `.torrent` file and magnet link are one tap away.
 - **Pause / resume**, **remove**, per‑torrent and total **download / upload speed**, ETA and peer
   counts, and a **details panel** with info hash, ratio, pieces, trackers and an event log.
-- **Made for phones.** Big touch targets, dark mode, safe‑area aware, installable (Add to Home
-  Screen), and an optional **screen wake lock** so the phone does not suspend a running download.
+- **Installable PWA.** Proper icons, offline app shell, an **Install** button on Android and a hint on
+  iOS ("Add to Home Screen"). Big touch targets, dark mode, safe‑area aware, and an optional
+  **screen wake lock** so the phone does not suspend a running download.
+- **Automatic trackers, like qBittorrent.** Your own tracker list is added to every torrent, and a
+  public list of WebSocket trackers is fetched and merged automatically (refreshed every 6 hours).
+- **Speed limits, seeding policy, piece order.** Global download/upload limits, "keep seeding after
+  a download finishes", and sequential vs rarest‑first piece selection.
 - **Survives reloads.** Downloaded pieces live in the browser's Origin Private File System, and the
   torrent list, file selection and paused state are remembered.
 - **Custom trackers and WebRTC configuration** (STUN/TURN), a **debug logging** switch and a
@@ -46,6 +51,22 @@ manual dispatch). One‑time setup: open **Settings → Pages** and set **Source
 GitHub does not let a workflow token create the Pages site itself, so the first deploy run fails at
 the "configure-pages" step until that switch is flipped; after that every push to `main` goes live at
 `https://<user>.github.io/<repo>/`.
+
+The deploy job deliberately does not declare `environment: github-pages`. Declaring it makes GitHub
+apply the environment's "deployment branches" rule, which is pinned to whatever branch was the
+default when Pages was enabled, and the job then fails instantly if that is not `main`.
+
+### Custom domain (DNS)
+
+1. At your DNS provider, add a `CNAME` record for the subdomain you want (for example
+   `torrent.example.com`) pointing to `<user>.github.io`. For an apex domain (`example.com`) add
+   `A` records to `185.199.108.153`, `185.199.109.153`, `185.199.110.153`, `185.199.111.153`
+   (and optionally `AAAA` records to GitHub's IPv6 addresses).
+2. In **Settings → Pages → Custom domain**, enter the domain and save. GitHub verifies the DNS,
+   issues a certificate, then tick **Enforce HTTPS**. Service workers, WebRTC and the share target
+   all require HTTPS, so this step matters.
+3. With the GitHub Actions source, no `CNAME` file in the repository is needed; the setting is
+   stored by GitHub.
 
 No build step is needed. The site is plain HTML, CSS and ES modules; the two libraries it uses
 (WebTorrent and client‑zip) are vendored in `vendor/`.
@@ -88,6 +109,24 @@ automated test cannot cover.
 | `sw.js` | Turns a page stream into an HTTP response with `Content-Disposition: attachment`; receives Web Share Target posts |
 | `vendor/webtorrent.min.js` | WebTorrent 3 browser bundle (MIT) |
 | `vendor/client-zip.js` | Streaming zip writer, store mode (MIT) |
+
+## Compared with qBittorrent
+
+| qBittorrent feature | Phone Torrent | Notes |
+| --- | --- | --- |
+| Add by magnet / info hash / .torrent | Yes | Also share‑to‑app and `magnet:` links on Android |
+| Automatically add trackers | Yes | Your list plus a fetched public list of `wss://` trackers |
+| Select files to download | Yes | |
+| Pause / resume / remove | Yes | |
+| Global speed limits | Yes | Settings |
+| Sequential download | Yes | Default; rarest‑first available |
+| Seeding, create torrent | Yes | "Seed & share" tab; only while the page is open |
+| Web seeds (HTTP) | Yes | When the torrent lists CORS‑enabled URLs |
+| Per‑torrent stats, ratio, trackers | Yes | Details panel |
+| DHT, PeX, UDP/HTTP trackers | No | Need raw UDP/TCP sockets, impossible in a browser |
+| Connecting to non‑WebRTC peers | No | Same reason; see the limitation above |
+| Background downloads with the screen off | Partially | Wake lock keeps the screen on; browsers suspend background tabs |
+| RSS, search, scheduler, IP filter, proxy | No | Out of scope for a static web app |
 
 ## Browser support
 

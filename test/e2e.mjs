@@ -7,7 +7,7 @@
  */
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -106,9 +106,33 @@ try {
   });
   const phone = await phoneCtx.newPage();
   phone.on('pageerror', (e) => console.error('phone page error:', e));
-  await phone.addInitScript((t) => localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t] })), trackerUrl);
+  // The phone only knows a dead tracker; the real one must come from the fetched tracker list
+  // (the qBittorrent-style "automatically add trackers" feature).
+  writeFileSync(path.join(TMP, 'trackers.txt'), `udp://tracker.example.org:1337/announce\n\nhttp://ignored.example/announce\n${trackerUrl}\nwss://also-dead.example\n`);
+  const listUrl = `${site.url}test/.tmp/trackers.txt`;
+  await phone.addInitScript(({ listUrl }) => localStorage.setItem('phone-torrent:settings', JSON.stringify({
+    trackers: ['ws://127.0.0.1:9/dead'], trackerList: true, trackerListUrl: listUrl,
+  })), { listUrl });
   await phone.goto(site.url);
   await phone.waitForFunction(() => window.__phoneTorrent?.client);
+  await waitFor(() => phone.evaluate((t) => window.__phoneTorrent.effectiveTrackers().includes(t), trackerUrl), { label: 'tracker list to be fetched and merged', timeout: 15000 });
+  const effective = await phone.evaluate(() => window.__phoneTorrent.effectiveTrackers());
+  assert.deepEqual(effective, ['ws://127.0.0.1:9/dead', trackerUrl, 'wss://also-dead.example'], 'only ws(s) trackers are merged, deduplicated, user list first');
+  log('tracker list merged:', effective.length, 'trackers');
+
+  // PWA: manifest points at real PNG icons and the service worker precached the app shell.
+  const manifest = await phone.evaluate(async () => (await fetch('./manifest.webmanifest')).json());
+  for (const icon of manifest.icons.filter((i) => i.type === 'image/png')) {
+    const res = await phone.evaluate(async (src) => { const r = await fetch(src); return { ok: r.ok, type: r.headers.get('content-type') }; }, icon.src);
+    assert.ok(res.ok && /image\/png/.test(res.type), `icon ${icon.src} is served as PNG`);
+  }
+  assert.ok(manifest.icons.some((i) => i.purpose === 'maskable'), 'has a maskable icon');
+  assert.ok(manifest.share_target && manifest.protocol_handlers, 'share target and protocol handler declared');
+  await waitFor(() => phone.evaluate(async () => {
+    const cache = await caches.open('phone-torrent-shell-v1');
+    return Boolean(await cache.match('./app.js') && await cache.match('./vendor/webtorrent.min.js') && await cache.match('./index.html'));
+  }), { label: 'app shell precache', timeout: 15000 });
+  log('PWA manifest + app shell cache OK');
 
   const saverMode = await phone.evaluate(() => new Promise((resolve) => {
     const t = setInterval(() => {
@@ -159,7 +183,8 @@ try {
   assert.equal(torrentDl.suggestedFilename(), 'Phone Torrent Test.torrent');
   const torrentDlPath = path.join(TMP, 'saved.torrent');
   await torrentDl.saveAs(torrentDlPath);
-  assert.deepEqual(Array.from(readFileSync(torrentDlPath)), torrentFile, '.torrent file round-trips');
+  const phoneTorrentFile = await phone.evaluate(() => Array.from(window.__phoneTorrent.client.torrents[0].torrentFile));
+  assert.deepEqual(Array.from(readFileSync(torrentDlPath)), phoneTorrentFile, '.torrent file round-trips');
   log('details + save .torrent OK');
 
   // Save one file: expect a real browser download whose bytes match the seed.

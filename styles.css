@@ -300,3 +300,12 @@ body {
 .torrent.seeding .file-check input { display: none; }
 .share-link-btn { display: none; flex: 1; }
 .torrent.seeding .share-link-btn { display: inline-flex; }
+
+/* ---- settings extras ---- */
+.field input[type="url"], .field input[type="number"], .field select {
+  font: inherit; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--border);
+  background: var(--bg); color: var(--text); min-width: 0; width: 100%;
+}
+.two-col { grid-template-columns: 1fr 1fr; }
+@media (max-width: 420px) { .two-col { grid-template-columns: 1fr; } }
+#install-btn { min-height: 34px; padding: 6px 12px; }

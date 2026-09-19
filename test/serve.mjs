@@ -16,6 +16,10 @@ const TYPES = {
   '.webmanifest': 'application/manifest+json',
   '.json': 'application/json',
   '.txt': 'text/plain; charset=utf-8',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.ico': 'image/x-icon',
+  '.woff2': 'font/woff2',
 };
 
 export function startServer(port = 0) {

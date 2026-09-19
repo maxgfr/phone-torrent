@@ -14,6 +14,9 @@ const DB_NAME = 'phone-torrent';
 const DB_STORE = 'torrents';
 const INBOX_CACHE = 'phone-torrent-inbox';
 const DEBUG_NAMESPACES = 'webtorrent*,bittorrent-tracker*,simple-peer*';
+const TRACKER_LIST_KEY = 'phone-torrent:trackerlist';
+const TRACKER_LIST_TTL = 6 * 60 * 60 * 1000;
+const DEFAULT_TRACKER_LIST_URL = 'https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_all_ws.txt';
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
@@ -32,6 +35,14 @@ const els = {
   settingsBtn: $('#settings-btn'),
   settingsDialog: $('#settings-dialog'),
   trackersInput: $('#trackers-input'),
+  trackerListToggle: $('#trackerlist-toggle'),
+  trackerListUrl: $('#trackerlist-url'),
+  trackerListInfo: $('#trackerlist-info'),
+  downLimit: $('#down-limit'),
+  upLimit: $('#up-limit'),
+  seedAfterToggle: $('#seed-after-toggle'),
+  strategySelect: $('#strategy-select'),
+  installBtn: $('#install-btn'),
   rtcInput: $('#rtc-input'),
   wakelockToggle: $('#wakelock-toggle'),
   debugToggle: $('#debug-toggle'),
@@ -49,7 +60,17 @@ const els = {
 /* ---------- settings ---------- */
 
 function loadSettings() {
-  const defaults = { trackers: [...DEFAULT_TRACKERS], rtcConfig: null, wakeLock: true };
+  const defaults = {
+    trackers: [...DEFAULT_TRACKERS],
+    rtcConfig: null,
+    wakeLock: true,
+    trackerList: true,
+    trackerListUrl: DEFAULT_TRACKER_LIST_URL,
+    downloadLimit: 0, // KB/s, 0 = unlimited
+    uploadLimit: 0,
+    seedAfterDone: true,
+    strategy: 'sequential',
+  };
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
     if (raw) {
@@ -69,6 +90,56 @@ let settings = loadSettings();
 
 function debugEnabled() {
   try { return Boolean(localStorage.getItem('debug')); } catch { return false; }
+}
+
+/* ---------- public tracker list (qBittorrent-style "automatically add trackers") ---------- */
+
+function loadTrackerListCache() {
+  try {
+    const raw = localStorage.getItem(TRACKER_LIST_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed.trackers) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function parseTrackerList(text) {
+  return text.split(/\r?\n/).map((l) => l.trim()).filter((l) => /^wss?:\/\//i.test(l));
+}
+
+/** All trackers to announce to: the user's list plus the fetched public list, deduplicated. */
+function effectiveTrackers() {
+  const extra = settings.trackerList ? (loadTrackerListCache()?.trackers || []) : [];
+  return Array.from(new Set([...settings.trackers, ...extra]));
+}
+
+async function refreshTrackerList({ force = false } = {}) {
+  if (!settings.trackerList || !/^https?:\/\//i.test(settings.trackerListUrl || '')) return null;
+  const cached = loadTrackerListCache();
+  if (!force && cached && cached.url === settings.trackerListUrl && Date.now() - cached.fetchedAt < TRACKER_LIST_TTL) return cached;
+  try {
+    const res = await fetch(settings.trackerListUrl, { cache: 'no-store' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const trackers = parseTrackerList(await res.text());
+    const record = { url: settings.trackerListUrl, fetchedAt: Date.now(), trackers };
+    try { localStorage.setItem(TRACKER_LIST_KEY, JSON.stringify(record)); } catch { /* ignore */ }
+    applyTrackers();
+    return record;
+  } catch (err) {
+    console.warn('tracker list fetch failed', err);
+    return cached;
+  }
+}
+
+function applyTrackers() {
+  client.tracker.announce = effectiveTrackers();
+}
+
+function applySpeedLimits() {
+  client.throttleDownload(settings.downloadLimit > 0 ? settings.downloadLimit * 1024 : -1);
+  client.throttleUpload(settings.uploadLimit > 0 ? settings.uploadLimit * 1024 : -1);
 }
 
 /* ---------- persistence of added torrents (so a reload restores them) ---------- */
@@ -187,6 +258,8 @@ const clientOpts = { tracker: { announce: settings.trackers } };
 if (settings.rtcConfig && typeof settings.rtcConfig === 'object') clientOpts.tracker.rtcConfig = settings.rtcConfig;
 
 const client = new WebTorrent(clientOpts);
+applyTrackers();
+applySpeedLimits();
 
 client.on('error', (err) => toast(err.message || String(err), { error: true }));
 
@@ -217,7 +290,8 @@ async function addTorrent(id, { record } = {}) {
   }
 
   const torrent = client.add(id, {
-    announce: settings.trackers,
+    announce: effectiveTrackers(),
+    strategy: settings.strategy === 'rarest' ? 'rarest' : 'sequential',
     destroyStoreOnDestroy: false,
     deselect: Boolean(record && record.deselected && record.deselected.length),
   });
@@ -228,7 +302,7 @@ async function addTorrent(id, { record } = {}) {
 
 function seedFiles(files, { name } = {}) {
   if (!files.length) return;
-  const opts = { announce: settings.trackers };
+  const opts = { announce: effectiveTrackers() };
   if (name) opts.name = name;
   const torrent = client.seed(files, opts);
   attachTorrent(torrent, { seeding: true });
@@ -301,7 +375,10 @@ function createTorrentView(torrent, record, seeding) {
   });
   torrent.on('done', () => {
     el.classList.add('done');
-    if (!view.seeding) toast(`"${torrent.name}" finished downloading.`);
+    if (!view.seeding) {
+      toast(`"${torrent.name}" finished downloading.`);
+      if (!settings.seedAfterDone) stopTransfer(torrent);
+    }
     logEvent(view, 'download complete');
     refreshView(view);
     updateWakeLock();
@@ -477,9 +554,15 @@ function openDetails(torrent, force) {
   $('.details-btn', view.el).textContent = show ? 'Hide details' : 'Details';
   if (show) {
     $('.d-infohash', view.el).textContent = torrent.infoHash || '—';
-    $('.d-trackers', view.el).textContent = (torrent.announce || settings.trackers).join('\n');
+    $('.d-trackers', view.el).textContent = (torrent.announce || effectiveTrackers()).join('\n');
     refreshView(view);
   }
+}
+
+function stopTransfer(torrent) {
+  torrent.pause();
+  // pause() only stops new connections; drop the current ones so transfer really stops.
+  for (const wire of [...torrent.wires]) wire.destroy();
 }
 
 function togglePause(torrent) {
@@ -489,9 +572,7 @@ function togglePause(torrent) {
     torrent.resume();
     logEvent(view, 'resumed');
   } else {
-    torrent.pause();
-    // pause() only stops new connections; drop the current ones so transfer really stops.
-    for (const wire of [...torrent.wires]) wire.destroy();
+    stopTransfer(torrent);
     logEvent(view, 'paused');
   }
   persistTorrent(view);
@@ -729,6 +810,16 @@ document.addEventListener('visibilitychange', updateWakeLock);
 
 els.settingsBtn.addEventListener('click', async () => {
   els.trackersInput.value = settings.trackers.join('\n');
+  els.trackerListToggle.checked = Boolean(settings.trackerList);
+  els.trackerListUrl.value = settings.trackerListUrl || '';
+  const listCache = loadTrackerListCache();
+  els.trackerListInfo.textContent = settings.trackerList && listCache
+    ? `${listCache.trackers.length} tracker${listCache.trackers.length === 1 ? '' : 's'} from the list, refreshed ${new Date(listCache.fetchedAt).toLocaleString()}.`
+    : 'Only ws:// and wss:// entries are used; the rest cannot be reached from a browser.';
+  els.downLimit.value = String(settings.downloadLimit || 0);
+  els.upLimit.value = String(settings.uploadLimit || 0);
+  els.seedAfterToggle.checked = Boolean(settings.seedAfterDone);
+  els.strategySelect.value = settings.strategy === 'rarest' ? 'rarest' : 'sequential';
   els.rtcInput.value = settings.rtcConfig ? JSON.stringify(settings.rtcConfig) : '';
   els.wakelockToggle.checked = Boolean(settings.wakeLock);
   els.debugToggle.checked = debugEnabled();
@@ -768,10 +859,30 @@ els.settingsDialog.addEventListener('close', () => {
     }
   }
 
+  const trackerListUrl = els.trackerListUrl.value.trim();
+  if (els.trackerListToggle.checked && !/^https?:\/\//i.test(trackerListUrl)) {
+    toast('The tracker list URL must start with http(s)://', { error: true });
+    return;
+  }
+
   const rtcChanged = JSON.stringify(rtcConfig) !== JSON.stringify(settings.rtcConfig || null);
-  saveSettings({ ...settings, trackers, rtcConfig, wakeLock: els.wakelockToggle.checked });
-  client.tracker.announce = trackers;
+  const listChanged = els.trackerListToggle.checked !== Boolean(settings.trackerList) || trackerListUrl !== settings.trackerListUrl;
+  saveSettings({
+    ...settings,
+    trackers,
+    rtcConfig,
+    wakeLock: els.wakelockToggle.checked,
+    trackerList: els.trackerListToggle.checked,
+    trackerListUrl: trackerListUrl || DEFAULT_TRACKER_LIST_URL,
+    downloadLimit: Math.max(0, Number(els.downLimit.value) || 0),
+    uploadLimit: Math.max(0, Number(els.upLimit.value) || 0),
+    seedAfterDone: els.seedAfterToggle.checked,
+    strategy: els.strategySelect.value === 'rarest' ? 'rarest' : 'sequential',
+  });
+  applyTrackers();
+  applySpeedLimits();
   updateWakeLock();
+  if (listChanged) refreshTrackerList({ force: true });
 
   const wantDebug = els.debugToggle.checked;
   if (wantDebug !== debugEnabled()) {
@@ -816,6 +927,7 @@ els.copyDiagBtn.addEventListener('click', async () => {
     opfs: Boolean(navigator.storage && navigator.storage.getDirectory),
     webrtc: typeof RTCPeerConnection === 'function',
     settings,
+    effectiveTrackers: effectiveTrackers(),
     client: {
       version: WebTorrent.VERSION,
       peerId: client.peerId,
@@ -874,10 +986,51 @@ async function takeSharedInbox() {
   } catch { /* ignore */ }
 }
 
+/* ---------- install (PWA) ---------- */
+
+let installPrompt = null;
+const isStandalone = () => window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+
+window.addEventListener('beforeinstallprompt', (event) => {
+  event.preventDefault();
+  installPrompt = event;
+  if (!isStandalone()) els.installBtn.hidden = false;
+});
+
+window.addEventListener('appinstalled', () => {
+  installPrompt = null;
+  els.installBtn.hidden = true;
+  toast('Installed. Open Phone Torrent from your home screen.');
+});
+
+els.installBtn.addEventListener('click', async () => {
+  if (!installPrompt) return;
+  els.installBtn.hidden = true;
+  try {
+    await installPrompt.prompt();
+    await installPrompt.userChoice;
+  } catch { /* dismissed */ }
+  installPrompt = null;
+});
+
+function maybeShowIosInstallHint() {
+  const isIos = /iP(hone|ad|od)/.test(navigator.userAgent) && !window.MSStream;
+  if (!isIos || isStandalone()) return;
+  try {
+    if (localStorage.getItem('phone-torrent:ios-hint')) return;
+    localStorage.setItem('phone-torrent:ios-hint', '1');
+  } catch { /* ignore */ }
+  toast('Tip: tap Share, then "Add to Home Screen" to install this app.', { timeout: 9000 });
+}
+
 /* ---------- startup ---------- */
 
 (async function start() {
   await saver.init();
+  // Give the public tracker list a moment so restored torrents announce to it too; the cached list is
+  // already applied, so on a slow network we simply continue and it merges in when it arrives.
+  await Promise.race([refreshTrackerList(), new Promise((r) => setTimeout(r, 2500))]);
+  maybeShowIosInstallHint();
 
   const records = await dbAll();
   records.sort((a, b) => a.addedAt - b.addedAt);
@@ -909,4 +1062,4 @@ async function takeSharedInbox() {
 })();
 
 // Expose for debugging and tests.
-window.__phoneTorrent = { client, views, saver, addTorrent, seedFiles };
+window.__phoneTorrent = { client, views, saver, addTorrent, seedFiles, effectiveTrackers, refreshTrackerList };
