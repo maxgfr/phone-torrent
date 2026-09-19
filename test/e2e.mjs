@@ -117,6 +117,8 @@ try {
   await waitFor(readPieces, { label: 'seed pieces written to the store', timeout: 20000 });
   await seeder.evaluate(() => window.__phoneTorrent.cleanOrphanStores([]));
   assert.equal(await readPieces(), true, 'orphan cleanup leaves live seed data intact');
+  const opfs = await seeder.evaluate(() => window.__phoneTorrent.opfsOk);
+  log('piece storage:', opfs ? 'OPFS' : 'memory (OPFS unavailable in this browser build)');
   log('seed store survives housekeeping');
   log('seeding', files.map((f) => `${f.name} (${f.size} B)`).join(', '));
 
@@ -291,11 +293,11 @@ try {
   }
   log('zip save OK:', zipDownload.suggestedFilename());
 
-  // Reload: the torrent must come back from storage, already complete.
+  // Reload: the torrent must come back from storage, already complete (with OPFS) or re-downloaded (memory).
   await phone.reload();
   await phone.waitForSelector('.torrent .file', { timeout: 15000 });
-  await waitFor(() => phone.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 'restored torrent to verify', timeout: 30000 });
-  log('restored after reload with all pieces intact');
+  await waitFor(() => phone.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 'restored torrent to verify', timeout: 90000 });
+  log(opfs ? 'restored after reload with all pieces intact' : 'restored after reload and re-downloaded (memory store)');
 
   await phone.screenshot({ path: path.join(TMP, 'phone.png'), fullPage: true });
   await phone.click('#settings-btn');

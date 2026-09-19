@@ -292,7 +292,7 @@ const STORE_DIR_RE = / - ([a-f0-9]{8})$/;
  * while this runs keeps its data.
  */
 async function cleanOrphanStores(records) {
-  if (!navigator.storage?.getDirectory) return;
+  if (!opfsOk) return;
   try {
     const root = await navigator.storage.getDirectory();
     const known = new Set(records.map((r) => String(r.infoHash).slice(0, 8)));
@@ -307,6 +307,63 @@ async function cleanOrphanStores(records) {
 
 /** Resolves once persisted records are loaded and orphan stores are cleaned; adding waits for it. */
 let storageReady = Promise.resolve([]);
+
+/* ---------- piece storage: OPFS when it really works, otherwise memory ---------- */
+
+let opfsOk = false;
+
+/** WebKit exposes navigator.storage.getDirectory but may reject every call; probe before trusting it. */
+async function probeOpfs() {
+  if (!navigator.storage?.getDirectory) return false;
+  try {
+    const root = await navigator.storage.getDirectory();
+    const handle = await root.getFileHandle('.phone-torrent-probe', { create: true });
+    if (typeof handle.createSyncAccessHandle !== 'function' && typeof handle.createWritable !== 'function') throw new Error('no write API');
+    await root.removeEntry('.phone-torrent-probe').catch(() => {});
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Minimal in-memory chunk store with the interface WebTorrent expects. */
+class MemoryChunkStore {
+  constructor(chunkLength) {
+    this.chunkLength = Number(chunkLength);
+    this.chunks = new Map();
+    this.closed = false;
+  }
+
+  put(index, buf, cb = () => {}) {
+    if (this.closed) return queueMicrotask(() => cb(new Error('store is closed')));
+    this.chunks.set(index, buf);
+    queueMicrotask(() => cb(null));
+  }
+
+  get(index, opts, cb = () => {}) {
+    if (typeof opts === 'function') return this.get(index, null, opts);
+    if (this.closed) return queueMicrotask(() => cb(new Error('store is closed')));
+    const buf = this.chunks.get(index);
+    if (!buf) return queueMicrotask(() => cb(new Error(`chunk ${index} not found`)));
+    const offset = (opts && opts.offset) || 0;
+    const length = (opts && opts.length) || buf.length - offset;
+    queueMicrotask(() => cb(null, buf.subarray(offset, offset + length)));
+  }
+
+  close(cb = () => {}) {
+    this.closed = true;
+    queueMicrotask(() => cb(null));
+  }
+
+  destroy(cb = () => {}) {
+    this.chunks.clear();
+    this.close(cb);
+  }
+}
+
+function storeOpts() {
+  return opfsOk ? {} : { store: MemoryChunkStore };
+}
 
 /* ---------- helpers ---------- */
 
@@ -524,6 +581,7 @@ async function addTorrent(id, { record } = {}) {
   }
 
   const torrent = client.add(id, {
+    ...storeOpts(),
     announce: effectiveTrackers(),
     strategy: settings.strategy === 'rarest' ? 'rarest' : 'sequential',
     destroyStoreOnDestroy: false,
@@ -549,7 +607,7 @@ async function seedFiles(files, { name } = {}) {
   if (!files.length) return null;
   await storageReady;
   // Seeds copy the files into OPFS; drop that copy when the seed is removed.
-  const opts = { announce: effectiveTrackers(), destroyStoreOnDestroy: true };
+  const opts = { ...storeOpts(), announce: effectiveTrackers(), destroyStoreOnDestroy: true };
   if (name) opts.name = name;
   const torrent = client.seed(files, opts);
   attachTorrent(torrent, { seeding: true });
@@ -1223,10 +1281,14 @@ els.settingsBtn.addEventListener('click', async () => {
     ? 'Files stream straight to your downloads folder, so even very large files work.'
     : `Files are assembled in memory before saving, so very large files may fail. ${saver.reason}`;
   els.clientInfo.textContent = `WebTorrent ${WebTorrent.VERSION || ''} · peer ${client.peerId ? client.peerId.slice(0, 12) + '…' : '—'} · ${client.torrents.length} torrent${client.torrents.length === 1 ? '' : 's'} · ↓ ${formatSpeed(client.downloadSpeed)} ↑ ${formatSpeed(client.uploadSpeed)}`;
-  try {
-    const est = await navigator.storage.estimate();
-    els.storageInfo.textContent = `Downloaded pieces are kept in the browser's private storage so you can reload the page without losing progress. Currently using ${formatBytes(est.usage)} of ${formatBytes(est.quota)} available.`;
-  } catch { /* keep default text */ }
+  if (!opfsOk) {
+    els.storageInfo.textContent = 'This browser does not provide private file storage, so downloaded pieces are kept in memory: they are lost on reload and very large torrents may not fit.';
+  } else {
+    try {
+      const est = await navigator.storage.estimate();
+      els.storageInfo.textContent = `Downloaded pieces are kept in the browser's private storage so you can reload the page without losing progress. Currently using ${formatBytes(est.usage)} of ${formatBytes(est.quota)} available.`;
+    } catch { /* keep default text */ }
+  }
   els.settingsDialog.returnValue = '';
   els.settingsDialog.showModal();
 });
@@ -1314,6 +1376,7 @@ els.clearStorageBtn.addEventListener('click', async () => {
   }
   // Only touch our own directories: on *.github.io every project page shares one origin.
   try {
+    if (!opfsOk) throw new Error('no OPFS');
     const root = await navigator.storage.getDirectory();
     for await (const name of root.keys()) {
       if (STORE_DIR_RE.test(name) || name === 'chunks') await root.removeEntry(name, { recursive: true }).catch(() => {});
@@ -1332,7 +1395,7 @@ els.copyDiagBtn.addEventListener('click', async () => {
     userAgent: navigator.userAgent,
     secureContext: window.isSecureContext,
     saver: { mode: saver.mode, reason: saver.reason },
-    opfs: Boolean(navigator.storage && navigator.storage.getDirectory),
+    opfs: opfsOk,
     webrtc: typeof RTCPeerConnection === 'function',
     settings,
     effectiveTrackers: effectiveTrackers(),
@@ -1436,6 +1499,8 @@ function maybeShowIosInstallHint() {
 (async function start() {
   // Storage housekeeping first, before anything can be added or seeded.
   storageReady = (async () => {
+    opfsOk = await probeOpfs();
+    if (!opfsOk) console.warn('OPFS unavailable: pieces are kept in memory for this session');
     const records = await dbAll();
     records.sort((a, b) => a.addedAt - b.addedAt);
     await cleanOrphanStores(records);
@@ -1479,4 +1544,4 @@ function maybeShowIosInstallHint() {
 })();
 
 // Expose for debugging and tests.
-window.__phoneTorrent = { client, views, saver, addTorrent, seedFiles, effectiveTrackers, refreshTrackerList, fetchMetadataFallback, verifyTorrentBytes, runNetworkCheck, cleanOrphanStores };
+window.__phoneTorrent = { client, views, saver, addTorrent, seedFiles, effectiveTrackers, refreshTrackerList, fetchMetadataFallback, verifyTorrentBytes, runNetworkCheck, cleanOrphanStores, get opfsOk() { return opfsOk; } };
