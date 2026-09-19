@@ -17,6 +17,11 @@ const DEBUG_NAMESPACES = 'webtorrent*,bittorrent-tracker*,simple-peer*';
 const TRACKER_LIST_KEY = 'phone-torrent:trackerlist';
 const TRACKER_LIST_TTL = 6 * 60 * 60 * 1000;
 const DEFAULT_TRACKER_LIST_URL = 'https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_all_ws.txt';
+// Torrent caches that serve a .torrent by info hash. Tried only when peers never deliver the metadata.
+const DEFAULT_METADATA_SOURCES = [
+  'https://itorrents.org/torrent/{INFOHASH}.torrent',
+  'https://torrage.info/torrent.php?h={INFOHASH}',
+];
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
@@ -43,6 +48,9 @@ const els = {
   seedAfterToggle: $('#seed-after-toggle'),
   strategySelect: $('#strategy-select'),
   installBtn: $('#install-btn'),
+  metaSourcesInput: $('#metasources-input'),
+  corsProxyInput: $('#corsproxy-input'),
+  fallbackDelayInput: $('#fallback-delay'),
   rtcInput: $('#rtc-input'),
   wakelockToggle: $('#wakelock-toggle'),
   debugToggle: $('#debug-toggle'),
@@ -70,6 +78,9 @@ function loadSettings() {
     uploadLimit: 0,
     seedAfterDone: true,
     strategy: 'sequential',
+    metadataSources: [...DEFAULT_METADATA_SOURCES],
+    corsProxy: '',
+    fallbackDelay: 20, // seconds
   };
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
@@ -291,6 +302,85 @@ function appLinkFor(torrent) {
   return `${location.origin}${location.pathname}#${torrent.magnetURI}`;
 }
 
+/* ---------- fallback "resolvers": metadata caches, fresh trackers, web seeds ---------- */
+
+function proxied(url) {
+  const tpl = (settings.corsProxy || '').trim();
+  return tpl && tpl.includes('{url}') ? tpl.replace('{url}', encodeURIComponent(url)) : url;
+}
+
+function fallbackDelayMs() {
+  return Math.max(5, Number(settings.fallbackDelay) || 20) * 1000;
+}
+
+/**
+ * Minimal bencode walker: returns the [start, end) byte span of the top-level "info" dictionary,
+ * so its SHA-1 can be compared with the expected info hash before trusting a downloaded .torrent.
+ */
+function findInfoSpan(bytes) {
+  let pos = 0;
+  const dec = new TextDecoder();
+  const fail = () => { throw new Error('not a valid .torrent file'); };
+  function skip() {
+    const c = bytes[pos];
+    if (c === 0x69) { // i<int>e
+      const e = bytes.indexOf(0x65, pos);
+      if (e < 0) fail();
+      pos = e + 1;
+    } else if (c === 0x6c || c === 0x64) { // l / d
+      pos++;
+      while (bytes[pos] !== 0x65) { if (pos >= bytes.length) fail(); skip(); }
+      pos++;
+    } else if (c >= 0x30 && c <= 0x39) { // <len>:<bytes>
+      const colon = bytes.indexOf(0x3a, pos);
+      if (colon < 0) fail();
+      const len = Number(dec.decode(bytes.subarray(pos, colon)));
+      if (!Number.isFinite(len)) fail();
+      pos = colon + 1 + len;
+    } else fail();
+  }
+  if (bytes[pos] !== 0x64) fail();
+  pos++;
+  while (bytes[pos] !== 0x65) {
+    const colon = bytes.indexOf(0x3a, pos);
+    if (colon < 0) fail();
+    const len = Number(dec.decode(bytes.subarray(pos, colon)));
+    const key = dec.decode(bytes.subarray(colon + 1, colon + 1 + len));
+    pos = colon + 1 + len;
+    const start = pos;
+    skip();
+    if (key === 'info') return [start, pos];
+  }
+  fail();
+}
+
+async function verifyTorrentBytes(bytes, expectedInfoHash) {
+  const [start, end] = findInfoSpan(bytes);
+  const digest = await crypto.subtle.digest('SHA-1', bytes.subarray(start, end));
+  const hex = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+  if (hex !== expectedInfoHash.toLowerCase()) throw new Error('info hash mismatch');
+  return bytes;
+}
+
+/** Fetch the .torrent for an info hash from the configured caches; resolves with verified bytes or null. */
+async function fetchMetadataFallback(infoHash, onAttempt = () => {}) {
+  for (const template of settings.metadataSources || []) {
+    const url = template.replace(/\{infohash\}/gi, (m) => (m === m.toUpperCase() ? infoHash.toUpperCase() : infoHash));
+    try {
+      const res = await fetch(proxied(url), { cache: 'no-store' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const bytes = new Uint8Array(await res.arrayBuffer());
+      await verifyTorrentBytes(bytes, infoHash);
+      onAttempt(url, null);
+      return bytes;
+    } catch (err) {
+      // A TypeError from fetch almost always means the cache does not allow browser (CORS) requests.
+      onAttempt(url, err instanceof TypeError ? new Error('blocked by CORS or unreachable') : err);
+    }
+  }
+  return null;
+}
+
 /* ---------- WebTorrent client ---------- */
 
 const clientOpts = { tracker: { announce: settings.trackers } };
@@ -309,16 +399,28 @@ function updateEmptyState() {
   els.empty.hidden = client.torrents.length > 0;
 }
 
+const LOG_LIMIT = 60;
+
 function logEvent(view, message) {
-  const stamp = new Date().toLocaleTimeString();
-  view.log.push(`${stamp}  ${message}`);
-  if (view.log.length > 30) view.log.shift();
   const logEl = $('.log', view.el);
   logEl.hidden = false;
+  // Collapse repeats (tracker reconnect warnings fire endlessly) into one line with a counter.
+  if (view.lastLogMessage === message && logEl.lastElementChild) {
+    view.lastLogCount = (view.lastLogCount || 1) + 1;
+    const line = `${new Date().toLocaleTimeString()}  ${message} (×${view.lastLogCount})`;
+    view.log[view.log.length - 1] = line;
+    logEl.lastElementChild.textContent = line;
+    return;
+  }
+  view.lastLogMessage = message;
+  view.lastLogCount = 1;
+  const line = `${new Date().toLocaleTimeString()}  ${message}`;
+  view.log.push(line);
+  if (view.log.length > LOG_LIMIT) view.log.shift();
   const li = document.createElement('li');
-  li.textContent = view.log[view.log.length - 1];
+  li.textContent = line;
   logEl.appendChild(li);
-  while (logEl.children.length > 30) logEl.firstElementChild.remove();
+  while (logEl.children.length > LOG_LIMIT) logEl.firstElementChild.remove();
 }
 
 async function addTorrent(id, { record } = {}) {
@@ -392,7 +494,12 @@ function attachTorrent(torrent, { record, seeding }) {
       updateWakeLock();
     }
   });
-  torrent.on('warning', (err) => logEvent(view, `warning: ${err.message || err}`));
+  torrent.on('warning', (err) => {
+    const msg = String(err && err.message || err);
+    // udp:// and http:// trackers in .torrent files are expected to be unusable from a browser.
+    if (/Unsupported tracker protocol/i.test(msg)) return;
+    logEvent(view, `warning: ${msg}`);
+  });
   torrent.on('wire', (wire, addr) => logEvent(view, `peer connected ${addr || wire.type || ''}`.trim()));
   updateEmptyState();
   updateWakeLock();
@@ -401,7 +508,7 @@ function attachTorrent(torrent, { record, seeding }) {
 
 function createTorrentView(torrent, record, seeding) {
   const el = els.torrentTemplate.content.firstElementChild.cloneNode(true);
-  const view = { torrent, el, fileEls: [], record: record || null, seeding: Boolean(seeding), log: [] };
+  const view = { torrent, el, fileEls: [], record: record || null, seeding: Boolean(seeding), log: [], startedAt: Date.now() };
   views.set(torrent, view);
   el.classList.toggle('seeding', view.seeding);
 
@@ -424,10 +531,17 @@ function createTorrentView(torrent, record, seeding) {
     toast((await copyText(appLinkFor(torrent))) ? 'App link copied. Anyone opening it downloads this torrent here.' : 'Could not copy.');
   });
   $('.save-torrent-btn', el).addEventListener('click', () => saveTorrentFile(torrent));
+  for (const sel of ['.webseed-btn', '.nopeers-webseed-btn']) {
+    $(sel, el).addEventListener('click', () => addWebSeedPrompt(torrent));
+  }
+  for (const sel of ['.retry-btn', '.nopeers-retry-btn']) {
+    $(sel, el).addEventListener('click', () => retryDiscovery(torrent));
+  }
 
   torrent.on('infoHash', () => {
     if (!torrent.name) $('.name', el).textContent = torrent.infoHash;
     logEvent(view, `info hash ${torrent.infoHash}`);
+    if (!torrent.metadata && !view.seeding) scheduleMetadataFallback(view);
   });
   torrent.on('metadata', () => {
     logEvent(view, `metadata received: ${torrent.files.length} file${torrent.files.length === 1 ? '' : 's'}, ${formatBytes(torrent.length)}`);
@@ -583,6 +697,18 @@ function refreshView(view) {
     ? formatEta(((selectedBytes - selectedDownloaded) / torrent.downloadSpeed) * 1000)
     : '';
 
+  const stuck = !complete && !torrent.paused && torrent.numPeers === 0 && Date.now() - view.startedAt > 2 * fallbackDelayMs();
+  const noPeersEl = $('.nopeers', el);
+  if (stuck !== !noPeersEl.hidden) {
+    noPeersEl.hidden = !stuck;
+    if (stuck) {
+      const n = (torrent.announce || effectiveTrackers()).length;
+      $('.nopeers-text', el).textContent = torrent.metadata
+        ? `No peers found on ${n} trackers yet. Browsers only reach WebRTC peers; this torrent may only have classic seeders. You can retry with a fresh tracker list or add an HTTP web seed.`
+        : `Still waiting for metadata from ${n} trackers. If the fallback sources could not provide the .torrent either, try again later or add the .torrent file directly.`;
+    }
+  }
+
   $('.zip-btn', el).disabled = !allSelectedDone;
   $('.zip-btn', el).textContent = selected.length === torrent.files.length
     ? 'Save all as .zip'
@@ -647,6 +773,90 @@ function togglePause(torrent) {
   persistTorrent(view);
   refreshView(view);
   updateWakeLock();
+}
+
+function scheduleMetadataFallback(view) {
+  const { torrent } = view;
+  clearTimeout(view.fallbackTimer);
+  view.fallbackTimer = setTimeout(async () => {
+    if (torrent.destroyed || torrent.metadata || !views.has(torrent)) return;
+    if (!(settings.metadataSources || []).length) return;
+    logEvent(view, 'no metadata from peers yet, trying fallback sources');
+    const bytes = await fetchMetadataFallback(torrent.infoHash, (url, err) => {
+      logEvent(view, err ? `fallback ${new URL(url).host}: ${err.message}` : `fallback ${new URL(url).host}: got .torrent`);
+    });
+    if (!bytes || torrent.destroyed || torrent.metadata || !views.has(torrent)) return;
+    await replaceTorrent(torrent, bytes, 'metadata from fallback source');
+  }, fallbackDelayMs());
+}
+
+/** Swap a running torrent for a fresh one (new trackers or a real .torrent), keeping its data and card position. */
+async function replaceTorrent(torrent, id, why) {
+  const view = views.get(torrent);
+  if (!view) return null;
+  const record = view.record ? { ...view.record, paused: false } : null;
+  const source = view.source;
+  const anchor = view.el.nextElementSibling;
+  clearTimeout(view.fallbackTimer);
+  removeView(torrent);
+  await new Promise((resolve) => {
+    let settled = false;
+    const done = () => { if (!settled) { settled = true; resolve(); } };
+    client.remove(torrent, { destroyStore: false }, done).catch(done);
+  });
+  const next = await addTorrent(id, { record });
+  const nextView = views.get(next);
+  if (nextView) {
+    if (source && typeof id !== 'string' && !(record && record.source)) nextView.source = { type: 'torrent', bytes: new Uint8Array(id) };
+    else if (source) nextView.source = source;
+    nextView.log = [...view.log];
+    $('.log', nextView.el).hidden = view.log.length === 0;
+    for (const line of view.log) {
+      const li = document.createElement('li');
+      li.textContent = line;
+      $('.log', nextView.el).appendChild(li);
+    }
+    logEvent(nextView, why);
+    if (anchor && anchor.parentNode === els.torrents) els.torrents.insertBefore(nextView.el, anchor);
+    else if (!anchor) els.torrents.appendChild(nextView.el);
+    persistTorrent(nextView);
+  }
+  return next;
+}
+
+async function retryDiscovery(torrent) {
+  const view = views.get(torrent);
+  if (!view) return;
+  const before = new Set(torrent.announce || []);
+  const btns = $$('.retry-btn, .nopeers-retry-btn', view.el);
+  btns.forEach((b) => { b.disabled = true; b.textContent = 'Refreshing…'; });
+  await refreshTrackerList({ force: true });
+  const now = effectiveTrackers();
+  const added = now.filter((t) => !before.has(t));
+  const id = view.source?.type === 'magnet' ? view.source.uri : torrent.metadata ? new Uint8Array(torrent.torrentFile) : torrent.magnetURI;
+  toast(added.length ? `Re-announcing with ${added.length} new tracker${added.length === 1 ? '' : 's'}.` : 'No new trackers found; re-announcing to the current ones.');
+  const next = await replaceTorrent(torrent, id, `re-announced (${added.length} new trackers)`);
+  if (next) {
+    const nv = views.get(next);
+    if (nv) nv.startedAt = Date.now();
+  }
+}
+
+function addWebSeedPrompt(torrent) {
+  const url = prompt('HTTP(S) URL of the file (or folder for multi-file torrents) to use as a web seed:');
+  if (!url) return;
+  if (!/^https?:\/\//i.test(url.trim())) {
+    toast('Web seed must be an http(s) URL.', { error: true });
+    return;
+  }
+  const view = views.get(torrent);
+  try {
+    torrent.addWebSeed(proxied(url.trim()));
+    if (view) logEvent(view, `web seed added: ${url.trim()}`);
+    toast('Web seed added.');
+  } catch (err) {
+    toast(`Could not add web seed: ${err.message}`, { error: true });
+  }
 }
 
 async function shareTorrent(torrent) {
@@ -904,6 +1114,9 @@ els.settingsBtn.addEventListener('click', async () => {
   els.upLimit.value = String(settings.uploadLimit || 0);
   els.seedAfterToggle.checked = Boolean(settings.seedAfterDone);
   els.strategySelect.value = settings.strategy === 'rarest' ? 'rarest' : 'sequential';
+  els.metaSourcesInput.value = (settings.metadataSources || []).join('\n');
+  els.corsProxyInput.value = settings.corsProxy || '';
+  els.fallbackDelayInput.value = String(settings.fallbackDelay || 20);
   els.rtcInput.value = settings.rtcConfig ? JSON.stringify(settings.rtcConfig) : '';
   els.wakelockToggle.checked = Boolean(settings.wakeLock);
   els.debugToggle.checked = debugEnabled();
@@ -963,6 +1176,9 @@ els.settingsDialog.addEventListener('close', () => {
     uploadLimit: Math.max(0, Number(els.upLimit.value) || 0),
     seedAfterDone: els.seedAfterToggle.checked,
     strategy: els.strategySelect.value === 'rarest' ? 'rarest' : 'sequential',
+    metadataSources: els.metaSourcesInput.value.split('\n').map((s) => s.trim()).filter((s) => /^https?:\/\/.*\{infohash\}/i.test(s)),
+    corsProxy: /^https?:\/\/.*\{url\}/i.test(els.corsProxyInput.value.trim()) ? els.corsProxyInput.value.trim() : '',
+    fallbackDelay: Math.max(5, Number(els.fallbackDelayInput.value) || 20),
   });
   applyTrackers();
   applySpeedLimits();
@@ -1152,4 +1368,4 @@ function maybeShowIosInstallHint() {
 })();
 
 // Expose for debugging and tests.
-window.__phoneTorrent = { client, views, saver, addTorrent, seedFiles, effectiveTrackers, refreshTrackerList };
+window.__phoneTorrent = { client, views, saver, addTorrent, seedFiles, effectiveTrackers, refreshTrackerList, fetchMetadataFallback, verifyTorrentBytes };

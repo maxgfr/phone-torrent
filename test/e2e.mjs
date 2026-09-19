@@ -111,9 +111,10 @@ try {
   // (the qBittorrent-style "automatically add trackers" feature).
   writeFileSync(path.join(TMP, 'trackers.txt'), `udp://tracker.example.org:1337/announce\n\nhttp://ignored.example/announce\n${trackerUrl}\nwss://also-dead.example\n`);
   const listUrl = `${site.url}test/.tmp/trackers.txt`;
-  await phone.addInitScript(({ listUrl }) => localStorage.setItem('phone-torrent:settings', JSON.stringify({
+  await phone.addInitScript(({ listUrl, metaUrl }) => localStorage.setItem('phone-torrent:settings', JSON.stringify({
     trackers: ['ws://127.0.0.1:9/dead'], trackerList: true, trackerListUrl: listUrl,
-  })), { listUrl });
+    metadataSources: ['https://127.0.0.1:1/never/{INFOHASH}.torrent', metaUrl], fallbackDelay: 5,
+  })), { listUrl, metaUrl: `${site.url}test/.tmp/{infohash}.torrent` });
   await phone.goto(site.url);
   await phone.waitForFunction(() => window.__phoneTorrent?.client);
   await waitFor(() => phone.evaluate((t) => window.__phoneTorrent.effectiveTrackers().includes(t), trackerUrl), { label: 'tracker list to be fetched and merged', timeout: 15000 });
@@ -299,6 +300,55 @@ try {
   await waitFor(() => phone.$$('.torrent').then((l) => l.length === 2), { label: 'magnet from URL to be added' });
   assert.equal(new URL(phone.url()).search, '', 'query string is cleaned up');
   log('magnet from URL OK');
+
+  /* ---------- fallback "resolvers": metadata from a torrent cache, retry with fresh trackers ---------- */
+  // A torrent nobody seeds: created on the seeder, then dropped there, so only its .torrent bytes exist.
+  const orphan = await seeder.evaluate(async () => {
+    const f = new File([new Uint8Array(200 * 1024).fill(7)], 'orphan.bin');
+    const t = await new Promise((resolve) => window.__phoneTorrent.client.seed([f], { name: 'Fallback Test' }, resolve));
+    const out = { infoHash: t.infoHash, torrentFile: Array.from(t.torrentFile) };
+    await new Promise((resolve) => window.__phoneTorrent.client.remove(t, { destroyStore: true }, resolve));
+    return out;
+  });
+  writeFileSync(path.join(TMP, `${orphan.infoHash}.torrent`), Buffer.from(orphan.torrentFile));
+
+  // Tampered .torrent must be rejected by the info-hash check.
+  const tampered = Buffer.from(orphan.torrentFile);
+  const infoAt = tampered.indexOf('4:infod');
+  assert.ok(infoAt > 0, 'torrent has an info dictionary');
+  tampered[infoAt + 12] ^= 0xff; // inside the info dictionary
+  const rejected = await phone.evaluate(async ({ bytes, hash }) => {
+    try { await window.__phoneTorrent.verifyTorrentBytes(new Uint8Array(bytes), hash); return null; } catch (e) { return e.message; }
+  }, { bytes: Array.from(tampered), hash: orphan.infoHash });
+  assert.ok(rejected, 'tampered .torrent is rejected');
+  const accepted = await phone.evaluate(async ({ bytes, hash }) => {
+    await window.__phoneTorrent.verifyTorrentBytes(new Uint8Array(bytes), hash); return true;
+  }, { bytes: orphan.torrentFile, hash: orphan.infoHash });
+  assert.ok(accepted, 'genuine .torrent passes the info-hash check');
+
+  // Add by bare info hash: no peer can send metadata, so it must come from the fallback source.
+  for (const t of await phone.$$('.torrent .remove-btn')) await t.click();
+  await waitFor(() => phone.$$('.torrent').then((l) => l.length === 0), { label: 'clean slate' });
+  await phone.fill('#magnet-input', orphan.infoHash);
+  await phone.click('#magnet-form button[type="submit"]');
+  await phone.waitForSelector('.torrent', { timeout: 10000 });
+  await waitFor(() => phone.$eval('.torrent .name', (e) => e.textContent === 'Fallback Test').catch(() => false), { label: 'metadata via fallback source', timeout: 30000 });
+  await phone.waitForSelector('.torrent .file', { timeout: 5000 });
+  const fallbackLog = await phone.$$eval('.torrent .log li', (els) => els.map((e) => e.textContent).join('\n'));
+  if (!/fallback/.test(fallbackLog)) console.error('event log was:\n' + fallbackLog);
+  assert.match(fallbackLog, /fallback 127\.0\.0\.1:1: blocked by CORS or unreachable/, 'unreachable source is reported');
+  assert.match(fallbackLog, /got \.torrent/, 'working source is reported');
+  assert.match(fallbackLog, /metadata from fallback source/);
+  log('metadata fallback OK');
+
+  // No peers for a while → hint with retry; retry re-announces with a refreshed tracker list.
+  await waitFor(() => phone.isVisible('.torrent .nopeers'), { label: 'no-peers hint', timeout: 30000 });
+  assert.match(await phone.$eval('.torrent .nopeers-text', (e) => e.textContent), /No peers found on \d+ trackers/);
+  await phone.click('.torrent .nopeers-retry-btn');
+  await waitFor(() => phone.$$eval('.torrent .log li', (els) => els.some((e) => /re-announced/.test(e.textContent))), { label: 'retry re-announce', timeout: 15000 });
+  assert.equal(await phone.isVisible('.torrent .nopeers'), false, 'hint resets after retry');
+  assert.equal(await phone.$eval('.torrent .name', (e) => e.textContent), 'Fallback Test', 'metadata kept across retry');
+  log('retry with fresh trackers OK');
 
   /* ---------- fallback: browser without service workers ---------- */
   const legacyCtx = await browser.newContext({ acceptDownloads: true, serviceWorkers: 'block' });

@@ -122,6 +122,13 @@
         <button class="btn ghost details-btn" type="button" aria-expanded="false">Details</button>
       </div>
       <ul class="files"></ul>
+      <div class="nopeers" hidden>
+        <p class="hint nopeers-text"></p>
+        <div class="details-actions">
+          <button class="btn small nopeers-retry-btn" type="button">Retry with fresh trackers</button>
+          <button class="btn small nopeers-webseed-btn" type="button">Add web seed</button>
+        </div>
+      </div>
       <section class="details" hidden>
         <dl class="kv">
           <dt>Info hash</dt><dd class="d-infohash mono"></dd>
@@ -136,6 +143,8 @@
           <button class="btn small copy-magnet-btn" type="button">Copy magnet</button>
           <button class="btn small save-torrent-btn" type="button">Save .torrent</button>
           <button class="btn small copy-link-btn" type="button">Copy app link</button>
+          <button class="btn small webseed-btn" type="button">Add web seed</button>
+          <button class="btn small retry-btn" type="button">Retry with fresh trackers</button>
         </div>
         <ul class="log" hidden></ul>
       </section>
@@ -196,6 +205,24 @@
           <option value="sequential">Sequential (files become usable sooner)</option>
           <option value="rarest">Rarest first (better for the swarm)</option>
         </select>
+      </label>
+
+      <label class="field">
+        <span>Metadata fallback sources (one URL per line, <code>{infohash}</code> is replaced)</span>
+        <textarea id="metasources-input" rows="3" spellcheck="false"></textarea>
+        <span class="hint">When a magnet link finds no peers to send the metadata, the <code>.torrent</code> is fetched from these torrent caches instead and verified against the info hash. Most caches block browser requests (CORS); a proxy below fixes that.</span>
+      </label>
+
+      <label class="field">
+        <span>CORS proxy (optional, <code>{url}</code> is replaced)</span>
+        <input id="corsproxy-input" type="url" spellcheck="false" placeholder="https://your-worker.workers.dev/?url={url}" />
+        <span class="hint">Your own proxy for the fallback sources and remote seeds. A ready-made Cloudflare Worker is in <code>proxy/</code> in the repository.</span>
+      </label>
+
+      <label class="field">
+        <span>Give up on peers after (seconds)</span>
+        <input id="fallback-delay" type="number" min="5" step="5" inputmode="numeric" />
+        <span class="hint">After this long without metadata the fallback sources are tried; after twice this long without peers the torrent offers a retry.</span>
       </label>
 
       <label class="field">

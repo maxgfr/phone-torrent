@@ -24,6 +24,11 @@ your phone either file by file or as a single `.zip`.
   **screen wake lock** so the phone does not suspend a running download.
 - **Automatic trackers, like qBittorrent.** Your own tracker list is added to every torrent, and a
   public list of WebSocket trackers is fetched and merged automatically (refreshed every 6 hours).
+- **Fallbacks when nothing is found.** If a magnet link gets no metadata from peers, the
+  `.torrent` is fetched from configurable torrent caches and verified against the info hash. If a
+  torrent finds no peers, one tap re-fetches the public tracker list and re-announces. Any torrent
+  can be given an HTTP **web seed**. An optional CORS proxy you host yourself (see `proxy/`)
+  unlocks caches and seeds that block browser requests.
 - **Speed limits, seeding policy, piece order.** Global download/upload limits, "keep seeding after
   a download finishes", and sequential vs rarest‑first piece selection.
 - **Survives reloads.** Downloaded pieces live in the browser's Origin Private File System, and the
@@ -42,7 +47,21 @@ classic desktop clients will show *looking for peers* forever. Popular, actively
 with WebTorrent‑compatible seeders works well; obscure torrents may not.
 
 You can edit the tracker list in **Settings** (gear icon). The defaults are the public WebTorrent
-trackers.
+trackers, plus a public list fetched automatically.
+
+### When a torrent is not found
+
+The app tries, in order: the trackers you configured and the fetched public list; after the
+configurable delay without metadata, the **metadata fallback sources** (torrent caches queried by
+info hash, response verified against the hash); and after twice that delay without any peer, it
+shows a **retry** that refreshes the tracker list and re‑announces, plus an **add web seed**
+option. The Details panel's event log shows what was tried and why it failed (for example
+"blocked by CORS", which the proxy in `proxy/` fixes).
+
+What no browser can do is talk to classic BitTorrent peers over UDP/TCP or query the DHT. If you
+need torrents that only have such seeders, the only option is a small **bridge server** (for
+example `webtorrent-hybrid` on a VPS) that downloads them the classic way and re‑seeds them over
+WebRTC to this app; that is outside the scope of a static site.
 
 ## Deploying to GitHub Pages
 
@@ -121,7 +140,8 @@ automated test cannot cover.
 | Global speed limits | Yes | Settings |
 | Sequential download | Yes | Default; rarest‑first available |
 | Seeding, create torrent | Yes | "Seed & share" tab; only while the page is open |
-| Web seeds (HTTP) | Yes | When the torrent lists CORS‑enabled URLs |
+| Web seeds (HTTP) | Yes | From the torrent or added by hand; CORS‑enabled URLs, or via your proxy |
+| Fetch metadata from torrent caches | Yes | Fallback sources in Settings; verified against the info hash |
 | Per‑torrent stats, ratio, trackers | Yes | Details panel |
 | DHT, PeX, UDP/HTTP trackers | No | Need raw UDP/TCP sockets, impossible in a browser |
 | Connecting to non‑WebRTC peers | No | Same reason; see the limitation above |
