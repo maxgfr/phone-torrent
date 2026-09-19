@@ -106,6 +106,7 @@ try {
   });
   const phone = await phoneCtx.newPage();
   phone.on('pageerror', (e) => console.error('phone page error:', e));
+  phone.on('dialog', (d) => d.accept());
   // The phone only knows a dead tracker; the real one must come from the fetched tracker list
   // (the qBittorrent-style "automatically add trackers" feature).
   writeFileSync(path.join(TMP, 'trackers.txt'), `udp://tracker.example.org:1337/announce\n\nhttp://ignored.example/announce\n${trackerUrl}\nwss://also-dead.example\n`);
@@ -151,6 +152,9 @@ try {
   });
 
   await phone.waitForSelector('.torrent .file', { timeout: 15000 });
+  assert.equal(await phone.isVisible('#install-btn'), false, 'Install button stays hidden until beforeinstallprompt');
+  assert.equal(await phone.isVisible('.torrent .details'), false, 'details panel hidden until opened');
+  assert.equal(await phone.isVisible('.torrent .log'), false, 'event log hidden until opened');
   const names = await phone.$$eval('.torrent .file .file-name', (els) => els.map((e) => e.textContent));
   assert.deepEqual([...names].sort(), files.map((f) => f.name).sort());
   log('file list rendered:', names.join(', '));
@@ -201,6 +205,16 @@ try {
   assert.equal(sha(savedBuf), files[0].sha, 'saved bytes match the seeded file');
   log('per-file save OK:', download.suggestedFilename());
 
+  // Saving the same file again must work (WebTorrent caches recent pieces; they must not be detached).
+  const [download2] = await Promise.all([
+    phone.waitForEvent('download', { timeout: 30000 }),
+    phone.locator('.torrent .file .save-btn').nth(saveIndex).click(),
+  ]);
+  const savedPath2 = path.join(TMP, 'saved-again.bin');
+  await download2.saveAs(savedPath2);
+  assert.equal(sha(readFileSync(savedPath2)), files[0].sha, 'second save of the same file matches');
+  log('second save of the same file OK');
+
   // Save all as zip.
   const [zipDownload] = await Promise.all([
     phone.waitForEvent('download', { timeout: 30000 }),
@@ -229,8 +243,36 @@ try {
   await phone.screenshot({ path: path.join(TMP, 'settings.png') });
   await phone.keyboard.press('Escape');
 
+  // Deselecting a file survives a reload.
+  const notesIndex = names.indexOf(files[1].name);
+  await phone.locator('.torrent .file input[type="checkbox"]').nth(notesIndex).uncheck();
+  assert.equal(await phone.evaluate((i) => window.__phoneTorrent.views.values().next().value.record.deselected.includes(i), notesIndex), true);
+  await phone.evaluate(() => window.__phoneTorrent.views.values().next().value.persisted);
+  await phone.reload();
+  await phone.waitForSelector('.torrent .file', { timeout: 15000 });
+  const restoredRecord = await phone.evaluate(() => { const r = window.__phoneTorrent.views.values().next().value.record; return { deselected: r?.deselected, source: r?.source?.type, paused: r?.paused }; });
+  log('restored record:', JSON.stringify(restoredRecord));
+  const namesAfter = await phone.$$eval('.torrent .file .file-name', (els) => els.map((e) => e.textContent));
+  assert.equal(await phone.locator('.torrent .file input[type="checkbox"]').nth(namesAfter.indexOf(files[1].name)).isChecked(), false, 'deselection restored');
+  assert.equal(await phone.$eval('.torrent .zip-btn', (e) => e.textContent), 'Save 1 selected as .zip');
+  await phone.locator('.torrent .file input[type="checkbox"]').nth(namesAfter.indexOf(files[1].name)).check();
+  log('file selection persisted across reload');
+
+  // "Delete all stored torrent data", then adding a torrent again must still persist.
+  await phone.click('#settings-btn');
+  await phone.waitForSelector('#settings-dialog[open]');
+  await phone.click('#clear-storage-btn');
+  await waitFor(() => phone.$$('.torrent').then((l) => l.length === 0), { label: 'delete all' });
+  await phone.setInputFiles('#torrent-file-input', { name: 'test.torrent', mimeType: 'application/x-bittorrent', buffer: Buffer.from(torrentFile) });
+  await phone.waitForSelector('.torrent .file', { timeout: 15000 });
+  await waitFor(() => phone.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 're-download after delete all', timeout: 90000 });
+  await waitFor(() => phone.evaluate(() => window.__phoneTorrent.views.values().next().value.record?.infoHash), { label: 'record persisted after delete all' });
+  await phone.reload();
+  await phone.waitForSelector('.torrent .file', { timeout: 15000 });
+  await waitFor(() => phone.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 'restore after delete-all cycle', timeout: 30000 });
+  log('delete-all then re-add persists OK');
+
   // Removing deletes it from the list and from the persisted set.
-  phone.once('dialog', (d) => d.accept());
   await phone.click('.torrent .remove-btn');
   await waitFor(() => phone.$$('.torrent').then((l) => l.length === 0), { label: 'torrent removal' });
   await waitFor(() => phone.evaluate(() => window.__phoneTorrent.client.torrents.length === 0), { label: 'client to drop the torrent' });

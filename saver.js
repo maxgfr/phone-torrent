@@ -13,6 +13,9 @@ let registration = null;
 let keepAliveTimer = null;
 let activeStreams = 0;
 
+const IS_IOS = /iP(hone|ad|od)/.test(navigator.userAgent) && !window.MSStream;
+const isStandalone = () => window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+
 export const saver = {
   mode: 'blob',
   reason: '',
@@ -30,7 +33,13 @@ export const saver = {
       registration = await navigator.serviceWorker.register('./sw.js', { scope: './' });
       await waitForActive(registration);
       navigator.serviceWorker.addEventListener('message', onWorkerMessage);
-      this.mode = 'stream';
+      if (IS_IOS) {
+        // Safari, and especially home-screen web apps, do not hand a streamed attachment to a
+        // download manager. Keep the worker (offline shell, share target) but save via memory.
+        this.reason = 'On iOS files are prepared in memory, then saved through the share sheet.';
+      } else {
+        this.mode = 'stream';
+      }
     } catch (err) {
       this.reason = `Service worker failed: ${err.message}`;
     }
@@ -114,19 +123,14 @@ function onWorkerMessage(event) {
         finish();
         return;
       }
-      const chunk = toTransferable(value);
-      port.postMessage(chunk, [chunk.buffer]);
+      // Copy, never transfer: the chunk may be WebTorrent's cached piece buffer, and
+      // transferring would detach it for every later read (second save, zip, uploads).
+      port.postMessage(value.slice());
     } catch (err) {
       port.postMessage({ type: 'error', message: err.message });
       finish(err);
     }
   };
-}
-
-function toTransferable(value) {
-  // Only transfer a buffer we own outright; otherwise copy the view.
-  if (value.byteOffset === 0 && value.byteLength === value.buffer.byteLength) return value;
-  return value.slice();
 }
 
 function saveViaWorker(item) {
@@ -165,6 +169,18 @@ async function saveViaBlob(item) {
     chunks.push(value);
   }
   const blob = new Blob(chunks, { type: 'application/octet-stream' });
+  if (IS_IOS && isStandalone() && navigator.canShare) {
+    const file = new File([blob], item.name, { type: 'application/octet-stream' });
+    if (navigator.canShare({ files: [file] })) {
+      try {
+        await navigator.share({ files: [file], title: item.name });
+        return;
+      } catch (err) {
+        if (err && err.name === 'AbortError') throw new Error('Save cancelled');
+        // fall through to the download link
+      }
+    }
+  }
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;

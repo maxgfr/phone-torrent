@@ -134,5 +134,6 @@ Recent Chrome/Edge/Firefox on Android and desktop, and Safari 16.4+ on iOS. Ever
 gracefully: without OPFS the pieces are kept in memory, and without a service worker files are
 assembled in memory before saving, which limits the practical file size on phones. Share Target and
 `magnet:` protocol handling are Android/Chromium features; iOS Safari does not offer them, so use the
-file picker or paste the link there. Keep the tab in the foreground while downloading: mobile
+file picker or paste the link there. On iOS, saved files are assembled in memory and handed to the
+share sheet (choose "Save to Files"), because Safari has no download manager for streamed files. Keep the tab in the foreground while downloading: mobile
 browsers throttle or suspend background pages, which is why the wake lock option exists.

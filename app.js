@@ -144,44 +144,64 @@ function applySpeedLimits() {
 
 /* ---------- persistence of added torrents (so a reload restores them) ---------- */
 
+let dbPromise = null;
+
 function openDb() {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, 1);
-    req.onupgradeneeded = () => req.result.createObjectStore(DB_STORE, { keyPath: 'infoHash' });
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
+  if (!dbPromise) {
+    dbPromise = new Promise((resolve, reject) => {
+      const req = indexedDB.open(DB_NAME, 1);
+      req.onupgradeneeded = () => req.result.createObjectStore(DB_STORE, { keyPath: 'infoHash' });
+      req.onsuccess = () => {
+        const db = req.result;
+        db.onversionchange = () => { db.close(); dbPromise = null; };
+        db.onclose = () => { dbPromise = null; };
+        resolve(db);
+      };
+      req.onerror = () => { dbPromise = null; reject(req.error); };
+    });
+  }
+  return dbPromise;
+}
+
+function runTx(mode, fn) {
+  return openDb().then((db) => new Promise((resolve, reject) => {
+    const tx = db.transaction(DB_STORE, mode);
+    const req = fn(tx.objectStore(DB_STORE));
+    tx.oncomplete = () => resolve(req && req.result);
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+  }));
 }
 
 async function dbAll() {
-  try {
-    const db = await openDb();
-    return await new Promise((resolve, reject) => {
-      const req = db.transaction(DB_STORE).objectStore(DB_STORE).getAll();
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = () => reject(req.error);
-    });
-  } catch {
-    return [];
-  }
+  try { return (await runTx('readonly', (store) => store.getAll())) || []; } catch { return []; }
 }
 
 async function dbPut(record) {
-  try {
-    const db = await openDb();
-    db.transaction(DB_STORE, 'readwrite').objectStore(DB_STORE).put(record);
-  } catch { /* ignore */ }
+  try { await runTx('readwrite', (store) => store.put(record)); } catch { /* ignore */ }
 }
 
 async function dbDelete(infoHash) {
+  try { await runTx('readwrite', (store) => store.delete(infoHash)); } catch { /* ignore */ }
+}
+
+async function dbClear() {
+  try { await runTx('readwrite', (store) => store.clear()); } catch { /* ignore */ }
+}
+
+/** Our OPFS store directories are named "<torrent name> - <first 8 hex of info hash>". */
+const STORE_DIR_RE = / - ([a-f0-9]{8})$/;
+
+/** Remove OPFS directories that belong to no remembered torrent (closed seeds, failed removals). */
+async function cleanOrphanStores(records) {
+  if (!navigator.storage?.getDirectory) return;
   try {
-    const db = await openDb();
-    await new Promise((resolve, reject) => {
-      const tx = db.transaction(DB_STORE, 'readwrite');
-      tx.objectStore(DB_STORE).delete(infoHash);
-      tx.oncomplete = resolve;
-      tx.onerror = () => reject(tx.error);
-    });
+    const root = await navigator.storage.getDirectory();
+    const known = new Set(records.map((r) => String(r.infoHash).slice(0, 8)));
+    for await (const name of root.keys()) {
+      const m = name.match(STORE_DIR_RE);
+      if (m && !known.has(m[1])) await root.removeEntry(name, { recursive: true }).catch(() => {});
+    }
   } catch { /* ignore */ }
 }
 
@@ -227,6 +247,25 @@ function parseTorrentText(text) {
   const embedded = t.match(/magnet:\?\S+/i);
   if (embedded) return embedded[0];
   return null;
+}
+
+function safeDecode(text) {
+  try { return decodeURIComponent(text); } catch { return text; }
+}
+
+function describeTorrentId(id) {
+  if (typeof id !== 'string') return 'a .torrent file';
+  if (/^magnet:/i.test(id)) {
+    const dn = new URLSearchParams(id.slice(id.indexOf('?') + 1)).get('dn');
+    const hash = id.match(/btih:([a-z0-9]+)/i);
+    return dn ? `"${dn}"` : hash ? `info hash ${hash[1]}` : 'a magnet link';
+  }
+  return id;
+}
+
+/** Torrents that arrive from outside the app (shared, magnet: handler, URL) need a tap first. */
+function confirmExternalAdd(label) {
+  return confirm(`Add ${label} to Phone Torrent and start downloading it?`);
 }
 
 async function copyText(text) {
@@ -296,13 +335,25 @@ async function addTorrent(id, { record } = {}) {
     deselect: Boolean(record && record.deselected && record.deselected.length),
   });
 
-  attachTorrent(torrent, { record, seeding: false });
+  // Remember what the user gave us (not the tracker-augmented file WebTorrent builds) for restores.
+  const source = record?.source || (typeof id === 'string'
+    ? { type: 'magnet', uri: id }
+    : { type: 'torrent', bytes: new Uint8Array(id) });
+  const view = attachTorrent(torrent, { record, seeding: false });
+  view.source = source;
   return torrent;
+}
+
+function sourceToId(record) {
+  if (record.source?.type === 'magnet') return record.source.uri;
+  if (record.source?.type === 'torrent') return new Uint8Array(record.source.bytes);
+  return new Uint8Array(record.torrentFile);
 }
 
 function seedFiles(files, { name } = {}) {
   if (!files.length) return;
-  const opts = { announce: effectiveTrackers() };
+  // Seeds copy the files into OPFS; drop that copy when the seed is removed.
+  const opts = { announce: effectiveTrackers(), destroyStoreOnDestroy: true };
   if (name) opts.name = name;
   const torrent = client.seed(files, opts);
   attachTorrent(torrent, { seeding: true });
@@ -329,8 +380,17 @@ function attachTorrent(torrent, { record, seeding }) {
   const view = createTorrentView(torrent, record, seeding);
   torrent.on('error', (err) => {
     toast(`${torrent.name || 'Torrent'}: ${err.message || err}`, { error: true });
+    if (torrent.infoHash && !seeding) dbDelete(torrent.infoHash);
     removeView(torrent);
     updateEmptyState();
+  });
+  // A torrent can be destroyed without an error (e.g. seeding files that are already seeded).
+  torrent.on('close', () => {
+    if (views.has(torrent)) {
+      removeView(torrent);
+      updateEmptyState();
+      updateWakeLock();
+    }
   });
   torrent.on('warning', (err) => logEvent(view, `warning: ${err.message || err}`));
   torrent.on('wire', (wire, addr) => logEvent(view, `peer connected ${addr || wire.type || ''}`.trim()));
@@ -377,7 +437,10 @@ function createTorrentView(torrent, record, seeding) {
     el.classList.add('done');
     if (!view.seeding) {
       toast(`"${torrent.name}" finished downloading.`);
-      if (!settings.seedAfterDone) stopTransfer(torrent);
+      if (!settings.seedAfterDone) {
+        view.autoStopped = true; // finished and idle by policy, not paused by the user
+        stopTransfer(torrent);
+      }
     }
     logEvent(view, 'download complete');
     refreshView(view);
@@ -459,19 +522,22 @@ function setAllSelected(torrent, selected) {
 
 function persistTorrent(view) {
   const { torrent } = view;
-  if (view.seeding || !torrent.torrentFile) return;
+  if (view.seeding || !torrent.infoHash || torrent.destroyed) return;
   const deselected = [];
   view.fileEls.forEach((li, i) => {
     if (!$('input[type="checkbox"]', li).checked) deselected.push(i);
   });
   view.record = {
     infoHash: torrent.infoHash,
-    torrentFile: new Uint8Array(torrent.torrentFile),
+    source: view.source || (view.record && view.record.source) || null,
+    // Only a torrent with metadata has a restorable .torrent file; a bare magnet does not.
+    torrentFile: torrent.metadata ? new Uint8Array(torrent.torrentFile) : null,
     deselected,
-    paused: Boolean(torrent.paused),
+    paused: Boolean(torrent.paused) && !view.autoStopped,
     addedAt: (view.record && view.record.addedAt) || Date.now(),
   };
-  dbPut(view.record);
+  view.persisted = dbPut(view.record);
+  return view.persisted;
 }
 
 function refreshView(view) {
@@ -482,7 +548,7 @@ function refreshView(view) {
   const selectedBytes = selected.reduce((n, f) => n + f.length, 0);
   const selectedDownloaded = selected.reduce((n, f) => n + f.downloaded, 0);
   const progress = torrent.files.length
-    ? (selectedBytes ? selectedDownloaded / selectedBytes : 1)
+    ? (selectedBytes ? selectedDownloaded / selectedBytes : 0)
     : torrent.progress;
   const pct = Math.min(100, Math.floor(progress * 100));
 
@@ -496,7 +562,8 @@ function refreshView(view) {
   el.classList.toggle('paused', Boolean(torrent.paused));
 
   let state;
-  if (torrent.paused) state = 'paused';
+  if (selected.length === 0 && torrent.files.length) state = 'nothing selected';
+  else if (torrent.paused && !view.autoStopped) state = 'paused';
   else if (view.seeding && !torrent.ready) state = 'hashing';
   else if (complete) state = torrent.numPeers ? `seeding to ${torrent.numPeers}` : (view.seeding ? 'seeding · waiting for peers' : 'complete');
   else if (!torrent.metadata) state = 'fetching metadata';
@@ -569,9 +636,11 @@ function togglePause(torrent) {
   const view = views.get(torrent);
   if (!view) return;
   if (torrent.paused) {
+    view.autoStopped = false;
     torrent.resume();
     logEvent(view, 'resumed');
   } else {
+    view.autoStopped = false;
     stopTransfer(torrent);
     logEvent(view, 'paused');
   }
@@ -616,13 +685,23 @@ async function removeTorrent(torrent) {
   removeView(torrent);
   // Forget it first so a quick reload cannot restore it while the store is being destroyed.
   if (infoHash) await dbDelete(infoHash);
-  try {
-    await client.remove(torrent, { destroyStore: true });
-  } catch (err) {
-    toast(err.message || String(err), { error: true });
-  }
+  await removeFromClient(torrent);
   updateEmptyState();
   updateWakeLock();
+}
+
+/** client.remove() resolves before the store is gone; wait for the destroy callback instead. */
+function removeFromClient(torrent) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (err) => {
+      if (settled) return;
+      settled = true;
+      if (err) toast(err.message || String(err), { error: true });
+      resolve();
+    };
+    client.remove(torrent, { destroyStore: true }, done).catch(done);
+  });
 }
 
 /* ---------- saving ---------- */
@@ -783,7 +862,7 @@ els.dropZone.addEventListener('drop', async (e) => {
 
 /* ---------- screen wake lock: phones suspend the page when the screen locks ---------- */
 
-let wakeLock = null;
+let wakeLock = null; // Promise<WakeLockSentinel> while requested or held
 
 function wantsWakeLock() {
   if (!settings.wakeLock) return false;
@@ -794,13 +873,18 @@ async function updateWakeLock() {
   if (!('wakeLock' in navigator)) return;
   const want = wantsWakeLock() && document.visibilityState === 'visible';
   if (want && !wakeLock) {
+    const pending = navigator.wakeLock.request('screen');
+    wakeLock = pending;
     try {
-      wakeLock = await navigator.wakeLock.request('screen');
-      wakeLock.addEventListener('release', () => { wakeLock = null; });
-    } catch { wakeLock = null; }
+      const sentinel = await pending;
+      sentinel.addEventListener('release', () => { if (wakeLock === pending) wakeLock = null; });
+    } catch {
+      if (wakeLock === pending) wakeLock = null;
+    }
   } else if (!want && wakeLock) {
-    try { await wakeLock.release(); } catch { /* ignore */ }
+    const pending = wakeLock;
     wakeLock = null;
+    try { (await pending).release(); } catch { /* ignore */ }
   }
 }
 
@@ -831,6 +915,7 @@ els.settingsBtn.addEventListener('click', async () => {
     const est = await navigator.storage.estimate();
     els.storageInfo.textContent = `Downloaded pieces are kept in the browser's private storage so you can reload the page without losing progress. Currently using ${formatBytes(est.usage)} of ${formatBytes(est.quota)} available.`;
   } catch { /* keep default text */ }
+  els.settingsDialog.returnValue = '';
   els.settingsDialog.showModal();
 });
 
@@ -900,17 +985,18 @@ els.settingsDialog.addEventListener('close', () => {
 
 els.clearStorageBtn.addEventListener('click', async () => {
   if (!confirm('Delete all torrents and their downloaded data from this browser?')) return;
+  await dbClear();
   for (const torrent of [...client.torrents]) {
     removeView(torrent);
-    await client.remove(torrent, { destroyStore: true }).catch(() => {});
+    await removeFromClient(torrent);
   }
+  // Only touch our own directories: on *.github.io every project page shares one origin.
   try {
     const root = await navigator.storage.getDirectory();
     for await (const name of root.keys()) {
-      await root.removeEntry(name, { recursive: true }).catch(() => {});
+      if (STORE_DIR_RE.test(name) || name === 'chunks') await root.removeEntry(name, { recursive: true }).catch(() => {});
     }
   } catch { /* OPFS unavailable */ }
-  try { indexedDB.deleteDatabase(DB_NAME); } catch { /* ignore */ }
   updateEmptyState();
   updateWakeLock();
   els.settingsDialog.close();
@@ -976,11 +1062,11 @@ async function takeSharedInbox() {
       await cache.delete(req);
       if (!res) continue;
       if (res.headers.get('X-Kind') === 'torrent') {
-        const name = decodeURIComponent(res.headers.get('X-Name') || 'shared.torrent');
-        await addTorrentFiles([new File([await res.blob()], name)]);
+        const name = safeDecode(res.headers.get('X-Name') || 'shared.torrent');
+        if (confirmExternalAdd(`the shared file "${name}"`)) await addTorrentFiles([new File([await res.blob()], name)]);
       } else {
         const id = parseTorrentText(await res.text());
-        if (id) await addTorrent(id);
+        if (id && confirmExternalAdd(describeTorrentId(id))) await addTorrent(id);
       }
     }
   } catch { /* ignore */ }
@@ -1034,9 +1120,10 @@ function maybeShowIosInstallHint() {
 
   const records = await dbAll();
   records.sort((a, b) => a.addedAt - b.addedAt);
+  await cleanOrphanStores(records);
   for (const record of records) {
     try {
-      const torrent = await addTorrent(new Uint8Array(record.torrentFile), { record });
+      const torrent = await addTorrent(sourceToId(record), { record });
       if (record.paused) {
         torrent.pause();
         const view = views.get(torrent);
@@ -1049,12 +1136,15 @@ function maybeShowIosInstallHint() {
 
   const params = new URLSearchParams(location.search);
   const fromQuery = parseTorrentText(params.get('magnet') || '');
-  const fromHash = parseTorrentText(decodeURIComponent(location.hash.slice(1)));
+  const fromHash = parseTorrentText(safeDecode(location.hash.slice(1)));
   if (fromQuery || fromHash || params.has('shared')) {
     history.replaceState(null, '', location.pathname);
   }
-  if (fromQuery) await addTorrent(fromQuery);
-  if (fromHash) await addTorrent(fromHash);
+  // Anything a link or another app handed us gets a confirmation: a web page must not be able to
+  // make this app download and seed something just by opening a URL.
+  for (const id of [fromQuery, fromHash]) {
+    if (id && confirmExternalAdd(describeTorrentId(id))) await addTorrent(id);
+  }
   await takeSharedInbox();
 
   updateEmptyState();

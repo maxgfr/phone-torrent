@@ -32,12 +32,9 @@ const SHELL_FILES = [
 
 self.addEventListener('install', (event) => {
   event.waitUntil((async () => {
-    try {
-      const cache = await caches.open(SHELL_CACHE);
-      await cache.addAll(SHELL_FILES);
-    } catch (err) {
-      console.warn('shell precache failed', err);
-    }
+    // One file at a time so a single 404 does not void the whole precache.
+    const cache = await caches.open(SHELL_CACHE);
+    await Promise.all(SHELL_FILES.map((f) => cache.add(f).catch((err) => console.warn('precache skipped', f, err))));
     await self.skipWaiting();
   })());
 });
@@ -60,9 +57,11 @@ function isShellRequest(url) {
 
 async function networkFirst(request) {
   const cache = await caches.open(SHELL_CACHE);
+  const url = new URL(request.url);
   try {
     const fresh = await fetch(request);
-    if (fresh.ok) cache.put(request, fresh.clone()).catch(() => {});
+    // Only store canonical shell URLs, never query-string variants (?magnet=…, ?shared=1).
+    if (fresh.ok && url.search === '' && isShellRequest(url)) cache.put(request, fresh.clone()).catch(() => {});
     return fresh;
   } catch (err) {
     const cached = await cache.match(request, { ignoreSearch: true });
