@@ -41,10 +41,11 @@ trackers.
 
 ## Deploying to GitHub Pages
 
-`.github/workflows/deploy.yml` publishes the site automatically on every push to the repository's
-default branch (and on manual dispatch). It enables GitHub Pages with the "GitHub Actions" source on
-first run, so normally there is nothing to configure. If the first run fails on the enablement step,
-open **Settings → Pages** once and set **Source** to **GitHub Actions**, then re‑run the workflow.
+`.github/workflows/deploy.yml` publishes the site automatically on every push to `main` (and on
+manual dispatch). One‑time setup: open **Settings → Pages** and set **Source** to **GitHub Actions**.
+GitHub does not let a workflow token create the Pages site itself, so the first deploy run fails at
+the "configure-pages" step until that switch is flipped; after that every push to `main` goes live at
+`https://<user>.github.io/<repo>/`.
 
 No build step is needed. The site is plain HTML, CSS and ES modules; the two libraries it uses
 (WebTorrent and client‑zip) are vendored in `vendor/`.
