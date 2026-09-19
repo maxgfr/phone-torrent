@@ -967,8 +967,11 @@ function togglePause(torrent) {
   if (torrent.paused) {
     view.autoStopped = false;
     torrent.resume();
-    // resume() only lifts the pause flag; ask the trackers for peers again right away.
-    try { torrent.discovery?.tracker?.update?.(); } catch { /* ignore */ }
+    // resume() only lifts the pause flag; ask the trackers for peers again right away, and once
+    // more shortly after if nobody showed up (an announce can race the socket reconnect).
+    const reannounce = () => { try { torrent.discovery?.tracker?.update?.(); } catch { /* ignore */ } };
+    reannounce();
+    setTimeout(() => { if (!torrent.destroyed && !torrent.paused && torrent.numPeers === 0) reannounce(); }, 8000);
     logEvent(view, 'resumed');
   } else {
     view.autoStopped = false;

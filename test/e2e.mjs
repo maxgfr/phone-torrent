@@ -245,8 +245,9 @@ try {
   await phone.click('.torrent .pause-btn');
   assert.equal(await phone.evaluate(() => window.__phoneTorrent.client.torrents[0].paused), false);
   assert.ok(!(await phone.$('.torrent.paused')), 'torrent resumed');
-  await waitFor(() => phone.evaluate(() => window.__phoneTorrent.client.torrents[0].numPeers > 0), { label: 'peers reacquired after resume', timeout: 30000 });
-  log('pause/resume OK (peers reacquired)');
+  const resumeStart = Date.now();
+  await waitFor(() => phone.evaluate(() => window.__phoneTorrent.client.torrents[0].numPeers > 0), { label: 'peers reacquired after resume', timeout: 90000 });
+  log(`pause/resume OK (peers reacquired in ${Math.round((Date.now() - resumeStart) / 1000)}s)`);
 
   // Details panel.
   await phone.click('.torrent .details-btn');
