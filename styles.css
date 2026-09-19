@@ -322,3 +322,11 @@ body {
 .netcheck .ok { color: var(--accent); }
 .netcheck .bad { color: var(--danger); }
 .netcheck .warn { color: #d97706; }
+
+/* ---- iOS: second tap to share a prepared file ---- */
+.save-ready {
+  position: fixed; left: 50%; bottom: calc(16px + env(safe-area-inset-bottom)); transform: translateX(-50%);
+  display: flex; gap: 8px; align-items: center; width: min(92vw, 480px); padding: 10px;
+  background: var(--card); border: 1px solid var(--border); border-radius: 14px; box-shadow: 0 8px 30px rgba(0,0,0,0.25); z-index: 11;
+}
+.save-ready .primary { flex: 1; }

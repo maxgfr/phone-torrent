@@ -14,9 +14,14 @@ requests. Two features need that and usually don't get it from the origin server
 npm i -g wrangler
 wrangler login
 wrangler deploy proxy/cloudflare-worker.js --name phone-torrent-proxy
-# optional but recommended: only let your own site use it
+# required: the worker refuses every request until this is set
 wrangler secret put ALLOWED_ORIGINS   # e.g. https://<user>.github.io
+# optional: per-request size cap in bytes (default 4 GiB)
+wrangler secret put MAX_BYTES
 ```
+
+The origin check keeps browsers on other sites from using your worker; a scripted client can still
+forge the header, which is why the size cap exists. Keep the worker URL to yourself.
 
 Then in the app open **Settings → CORS proxy** and enter
 `https://phone-torrent-proxy.<you>.workers.dev/?url={url}`.

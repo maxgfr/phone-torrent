@@ -177,13 +177,10 @@ async function saveViaBlob(item) {
   if (IS_IOS && isStandalone() && navigator.canShare) {
     const file = new File([blob], item.name, { type: 'application/octet-stream' });
     if (navigator.canShare({ files: [file] })) {
-      try {
-        await navigator.share({ files: [file], title: item.name });
-        return;
-      } catch (err) {
-        if (err && err.name === 'AbortError') throw new Error('Save cancelled');
-        // fall through to the download link
-      }
+      // Reading the stream took time, so the tap that started the save no longer counts as a user
+      // activation for navigator.share. Ask for one more tap on a button that is ready to share.
+      await shareWithFreshTap(file);
+      return;
     }
   }
   const url = URL.createObjectURL(blob);
@@ -195,6 +192,33 @@ async function saveViaBlob(item) {
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+
+function shareWithFreshTap(file) {
+  return new Promise((resolve, reject) => {
+    const bar = document.createElement('div');
+    bar.className = 'save-ready';
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'btn primary';
+    btn.textContent = `Tap to save ${file.name}`;
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.className = 'btn ghost small';
+    cancel.textContent = 'Cancel';
+    bar.append(btn, cancel);
+    document.body.appendChild(bar);
+    const finish = (err) => { bar.remove(); err ? reject(err) : resolve(); };
+    btn.addEventListener('click', async () => {
+      try {
+        await navigator.share({ files: [file], title: file.name });
+        finish();
+      } catch (err) {
+        finish(new Error(err && err.name === 'AbortError' ? 'Save cancelled' : `Share failed: ${err.message}`));
+      }
+    });
+    cancel.addEventListener('click', () => finish(new Error('Save cancelled')));
+  });
 }
 
 function startKeepAlive() {

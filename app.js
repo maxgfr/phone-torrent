@@ -205,7 +205,7 @@ async function dohLookup(host) {
     if (!res.ok) return 'unknown';
     const data = await res.json();
     if (data.Status === 3) return 'nxdomain';
-    if (data.Status === 0) return Array.isArray(data.Answer) && data.Answer.length ? 'exists' : 'nxdomain';
+    if (data.Status === 0) return Array.isArray(data.Answer) && data.Answer.length ? 'exists' : 'unknown';
     return 'unknown';
   } catch {
     return 'unknown';
@@ -441,6 +441,15 @@ function describeTorrentId(id) {
   return id;
 }
 
+/** Complete for the user's purposes: every selected file is done (WebTorrent's `done` needs every file). */
+function isComplete(torrent) {
+  if (torrent.done) return true;
+  const view = views.get(torrent);
+  if (!view || !torrent.files.length) return false;
+  const selected = selectedFiles(view);
+  return selected.length > 0 && selected.every((f) => f.done || f.progress >= 1);
+}
+
 /** Torrents that arrive from outside the app (shared, magnet: handler, URL) need a tap first. */
 function confirmExternalAdd(label) {
   return confirm(`Add ${label} to Phone Torrent and start downloading it?`);
@@ -508,17 +517,26 @@ function findInfoSpan(bytes) {
   }
   if (bytes[pos] !== 0x64) fail();
   pos++;
+  let span = null;
+  let prevKey = null;
   while (bytes[pos] !== 0x65) {
+    if (pos >= bytes.length) fail();
     const colon = bytes.indexOf(0x3a, pos);
     if (colon < 0) fail();
     const len = Number(dec.decode(bytes.subarray(pos, colon)));
+    if (!Number.isFinite(len)) fail();
     const key = dec.decode(bytes.subarray(colon + 1, colon + 1 + len));
+    // Bencode dictionaries must have unique, sorted keys; a decoder would let a second "info"
+    // override the first, so anything ambiguous is rejected instead of hashed.
+    if (prevKey !== null && key <= prevKey) throw new Error('malformed .torrent (duplicate or unsorted keys)');
+    prevKey = key;
     pos = colon + 1 + len;
     const start = pos;
     skip();
-    if (key === 'info') return [start, pos];
+    if (key === 'info') span = [start, pos];
   }
-  fail();
+  if (!span) fail();
+  return span;
 }
 
 async function verifyTorrentBytes(bytes, expectedInfoHash) {
@@ -616,9 +634,11 @@ async function addTorrent(id, { record } = {}) {
 }
 
 function sourceToId(record) {
-  if (record.source?.type === 'magnet') return record.source.uri;
+  // A stored .torrent (real metadata) restores instantly and without peers; trackers are re-merged anyway.
+  if (record.torrentFile && record.torrentFile.byteLength) return new Uint8Array(record.torrentFile);
   if (record.source?.type === 'torrent') return new Uint8Array(record.source.bytes);
-  return new Uint8Array(record.torrentFile);
+  if (record.source?.type === 'magnet') return record.source.uri;
+  return null;
 }
 
 async function seedFiles(files, { name } = {}) {
@@ -638,7 +658,7 @@ async function seedFiles(files, { name } = {}) {
 
 async function seedRemoteUrl(url) {
   toast('Fetching the remote file…');
-  const res = await fetch(url);
+  const res = await fetch(proxied(url));
   if (!res.ok) throw new Error(`HTTP ${res.status} from ${new URL(url).host}`);
   const blob = await res.blob();
   let name = decodeURIComponent(new URL(url).pathname.split('/').pop() || '') || 'file';
@@ -651,8 +671,13 @@ async function seedRemoteUrl(url) {
 function attachTorrent(torrent, { record, seeding }) {
   const view = createTorrentView(torrent, record, seeding);
   torrent.on('error', (err) => {
-    toast(`${torrent.name || 'Torrent'}: ${err.message || err}`, { error: true });
-    if (torrent.infoHash && !seeding) dbDelete(torrent.infoHash);
+    const msg = String(err && err.message || err);
+    toast(`${torrent.name || 'Torrent'}: ${msg}`, { error: true });
+    // Forget the record only when this torrent could not even be set up (unparseable source).
+    // A duplicate-add error belongs to another live torrent, and a runtime store error must not
+    // orphan data that is still on disk.
+    const isDuplicate = /duplicate/i.test(msg);
+    if (torrent.infoHash && !seeding && !isDuplicate && !torrent.ready && !torrent.metadata) dbDelete(torrent.infoHash);
     removeView(torrent);
     updateEmptyState();
   });
@@ -712,7 +737,10 @@ function createTorrentView(torrent, record, seeding) {
   torrent.on('infoHash', () => {
     if (!torrent.name) $('.name', el).textContent = torrent.infoHash;
     logEvent(view, `info hash ${torrent.infoHash}`);
-    if (!torrent.metadata && !view.seeding) scheduleMetadataFallback(view);
+    if (!torrent.metadata && !view.seeding) {
+      scheduleMetadataFallback(view);
+      persistTorrent(view); // a pending magnet must survive a reload too
+    }
   });
   torrent.on('metadata', () => {
     logEvent(view, `metadata received: ${torrent.files.length} file${torrent.files.length === 1 ? '' : 's'}, ${formatBytes(torrent.length)}`);
@@ -720,15 +748,7 @@ function createTorrentView(torrent, record, seeding) {
   });
   torrent.on('done', () => {
     el.classList.add('done');
-    if (!view.seeding) {
-      toast(`"${torrent.name}" finished downloading.`);
-      if (!settings.seedAfterDone) {
-        view.autoStopped = true; // finished and idle by policy, not paused by the user
-        stopTransfer(torrent);
-      }
-    }
-    logEvent(view, 'download complete');
-    refreshView(view);
+    refreshView(view); // completion (all files, or all selected files) is handled there
     updateWakeLock();
   });
   torrent.on('noPeers', (source) => logEvent(view, `no peers from ${source}`));
@@ -808,10 +828,10 @@ function setAllSelected(torrent, selected) {
 function persistTorrent(view) {
   const { torrent } = view;
   if (view.seeding || !torrent.infoHash || torrent.destroyed) return;
-  const deselected = [];
-  view.fileEls.forEach((li, i) => {
-    if (!$('input[type="checkbox"]', li).checked) deselected.push(i);
-  });
+  // Before the file list exists (pending magnet, or metadata not yet processed) keep the saved selection.
+  const deselected = view.fileEls.length
+    ? view.fileEls.flatMap((li, i) => ($('input[type="checkbox"]', li).checked ? [] : [i]))
+    : [...((view.record && view.record.deselected) || [])];
   view.record = {
     infoHash: torrent.infoHash,
     source: view.source || (view.record && view.record.source) || null,
@@ -843,6 +863,18 @@ function refreshView(view) {
 
   const allSelectedDone = selected.length > 0 && selected.every((f) => f.done || f.progress >= 1);
   const complete = torrent.done || allSelectedDone;
+  if (!complete && torrent.metadata) view.sawIncomplete = true;
+  if (complete && !view.completed && torrent.metadata) {
+    view.completed = true;
+    logEvent(view, 'download complete');
+    if (!view.seeding && view.sawIncomplete) toast(`"${torrent.name}" finished downloading.`);
+    if (!view.seeding && !settings.seedAfterDone && !torrent.paused) {
+      view.autoStopped = true; // finished and idle by policy, not paused by the user
+      stopTransfer(torrent);
+    }
+  } else if (!complete) {
+    view.completed = false;
+  }
   el.classList.toggle('done', complete);
   el.classList.toggle('paused', Boolean(torrent.paused));
 
@@ -935,6 +967,8 @@ function togglePause(torrent) {
   if (torrent.paused) {
     view.autoStopped = false;
     torrent.resume();
+    // resume() only lifts the pause flag; ask the trackers for peers again right away.
+    try { torrent.discovery?.tracker?.update?.(); } catch { /* ignore */ }
     logEvent(view, 'resumed');
   } else {
     view.autoStopped = false;
@@ -957,7 +991,17 @@ function scheduleMetadataFallback(view) {
       logEvent(view, err ? `fallback ${new URL(url).host}: ${err.message}` : `fallback ${new URL(url).host}: got .torrent`);
     });
     if (!bytes || torrent.destroyed || torrent.metadata || !views.has(torrent)) return;
-    await replaceTorrent(torrent, bytes, 'metadata from fallback source');
+    const expected = torrent.infoHash;
+    const next = await replaceTorrent(torrent, bytes, 'metadata from fallback source');
+    if (next && next.infoHash && next.infoHash !== expected) {
+      // Belt and braces: the hash check should make this impossible.
+      toast('Fallback source returned a different torrent; ignored.', { error: true });
+      const nv = views.get(next);
+      if (nv) removeView(next);
+      await removeFromClient(next);
+      dbDelete(next.infoHash);
+      await addTorrent(`magnet:?xt=urn:btih:${expected}`);
+    }
   }, fallbackDelayMs());
 }
 
@@ -1004,7 +1048,7 @@ async function retryDiscovery(torrent) {
   await refreshTrackerList({ force: true });
   const now = effectiveTrackers();
   const added = now.filter((t) => !before.has(t));
-  const id = view.source?.type === 'magnet' ? view.source.uri : torrent.metadata ? new Uint8Array(torrent.torrentFile) : torrent.magnetURI;
+  const id = torrent.metadata ? new Uint8Array(torrent.torrentFile) : (view.source?.type === 'magnet' ? view.source.uri : torrent.magnetURI);
   toast(added.length ? `Re-announcing with ${added.length} new tracker${added.length === 1 ? '' : 's'}.` : 'No new trackers found; re-announcing to the current ones.');
   const next = await replaceTorrent(torrent, id, `re-announced (${added.length} new trackers)`);
   if (next) {
@@ -1022,7 +1066,9 @@ function addWebSeedPrompt(torrent) {
   }
   const view = views.get(torrent);
   try {
-    torrent.addWebSeed(proxied(url.trim()));
+    // WebTorrent appends "/<file path>" to a web seed for multi-file torrents; that cannot go through
+    // a ?url= proxy template, so the proxy is only used for single-file torrents.
+    torrent.addWebSeed(torrent.files.length > 1 ? url.trim() : proxied(url.trim()));
     if (view) logEvent(view, `web seed added: ${url.trim()}`);
     toast('Web seed added.');
   } catch (err) {
@@ -1142,7 +1188,7 @@ async function saveZip(torrent) {
 }
 
 async function saveTorrentFile(torrent) {
-  if (!torrent.torrentFile) {
+  if (!torrent.metadata || !torrent.torrentFile) {
     toast('The .torrent file is not available until metadata arrives.');
     return;
   }
@@ -1247,7 +1293,7 @@ let wakeLock = null; // Promise<WakeLockSentinel> while requested or held
 
 function wantsWakeLock() {
   if (!settings.wakeLock) return false;
-  return client.torrents.some((t) => !t.paused && (!t.done || t.numPeers > 0 || views.get(t)?.seeding));
+  return client.torrents.some((t) => !t.paused && (!isComplete(t) || t.numPeers > 0 || views.get(t)?.seeding));
 }
 
 async function updateWakeLock() {
@@ -1286,7 +1332,13 @@ els.settingsBtn.addEventListener('click', async () => {
   els.seedAfterToggle.checked = Boolean(settings.seedAfterDone);
   els.strategySelect.value = settings.strategy === 'rarest' ? 'rarest' : 'sequential';
   els.metaSourcesInput.value = (settings.metadataSources || []).join('\n');
-  if ([...els.dohSelect.options].some((o) => o.value === settings.dohResolver)) els.dohSelect.value = settings.dohResolver;
+  if (settings.dohResolver && ![...els.dohSelect.options].some((o) => o.value === settings.dohResolver)) {
+    const opt = document.createElement('option');
+    opt.value = settings.dohResolver;
+    opt.textContent = `Custom: ${settings.dohResolver}`;
+    els.dohSelect.appendChild(opt);
+  }
+  els.dohSelect.value = settings.dohResolver || DEFAULT_DOH;
   els.netcheckResults.hidden = true;
   els.netcheckBtn.disabled = false;
   els.netcheckBtn.textContent = 'Check tracker connectivity';
@@ -1514,6 +1566,14 @@ function maybeShowIosInstallHint() {
   toast('Tip: tap Share, then "Add to Home Screen" to install this app.', { timeout: 9000 });
 }
 
+// A magnet pasted into the address bar of the already open app arrives as a hash change.
+window.addEventListener('hashchange', async () => {
+  const id = parseTorrentText(safeDecode(location.hash.slice(1)));
+  if (!id) return;
+  history.replaceState(null, '', location.pathname);
+  if (confirmExternalAdd(describeTorrentId(id))) await addTorrent(id);
+});
+
 /* ---------- startup ---------- */
 
 (async function start() {
@@ -1535,7 +1595,9 @@ function maybeShowIosInstallHint() {
 
   for (const record of records) {
     try {
-      const torrent = await addTorrent(sourceToId(record), { record });
+      const id = sourceToId(record);
+      if (!id) { dbDelete(record.infoHash); continue; }
+      const torrent = await addTorrent(id, { record });
       if (record.paused) {
         torrent.pause();
         const view = views.get(torrent);
@@ -1564,4 +1626,4 @@ function maybeShowIosInstallHint() {
 })();
 
 // Expose for debugging and tests.
-window.__phoneTorrent = { client, views, saver, addTorrent, seedFiles, effectiveTrackers, refreshTrackerList, fetchMetadataFallback, verifyTorrentBytes, runNetworkCheck, cleanOrphanStores, get opfsOk() { return opfsOk; } };
+window.__phoneTorrent = { client, views, saver, addTorrent, seedFiles, effectiveTrackers, refreshTrackerList, fetchMetadataFallback, verifyTorrentBytes, findInfoSpan, runNetworkCheck, cleanOrphanStores, isComplete, get opfsOk() { return opfsOk; } };

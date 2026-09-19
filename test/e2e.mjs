@@ -137,7 +137,8 @@ try {
   });
   const phone = await phoneCtx.newPage();
   phone.on('pageerror', (e) => console.error('phone page error:', e));
-  phone.on('dialog', (d) => d.accept());
+  let dialogs = 0;
+  phone.on('dialog', (d) => { dialogs++; d.accept(); });
   // The phone only knows a dead tracker; the real one must come from the fetched tracker list
   // (the qBittorrent-style "automatically add trackers" feature).
   writeFileSync(path.join(TMP, 'trackers.txt'), `udp://tracker.example.org:1337/announce\n\nhttp://ignored.example/announce\n${trackerUrl}\nwss://also-dead.example\n`);
@@ -240,10 +241,12 @@ try {
   assert.ok(await phone.$('.torrent.paused'), 'torrent shows paused');
   assert.equal(await phone.$eval('.torrent .state', (e) => e.textContent), 'paused');
   assert.equal(await phone.evaluate(() => window.__phoneTorrent.client.torrents[0].paused), true);
+  assert.equal(await phone.evaluate(() => window.__phoneTorrent.client.torrents[0].numPeers), 0, 'pause drops connections');
   await phone.click('.torrent .pause-btn');
   assert.equal(await phone.evaluate(() => window.__phoneTorrent.client.torrents[0].paused), false);
   assert.ok(!(await phone.$('.torrent.paused')), 'torrent resumed');
-  log('pause/resume OK');
+  await waitFor(() => phone.evaluate(() => window.__phoneTorrent.client.torrents[0].numPeers > 0), { label: 'peers reacquired after resume', timeout: 30000 });
+  log('pause/resume OK (peers reacquired)');
 
   // Details panel.
   await phone.click('.torrent .details-btn');
@@ -303,10 +306,17 @@ try {
   log('zip save OK:', zipDownload.suggestedFilename());
 
   // Reload: the torrent must come back from storage, already complete (with OPFS) or re-downloaded (memory).
+  // With OPFS the seeder is paused first, so a pass proves the pieces really came from disk.
+  const seederPause = () => seeder.click('.torrent .pause-btn');
+  if (opfs) await seederPause();
   await phone.reload();
   await phone.waitForSelector('.torrent .file', { timeout: 15000 });
   await waitFor(() => phone.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 'restored torrent to verify', timeout: 90000 });
-  log(opfs ? 'restored after reload with all pieces intact' : 'restored after reload and re-downloaded (memory store)');
+  if (opfs) {
+    assert.equal(await phone.evaluate(() => window.__phoneTorrent.client.torrents[0].received), 0, 'nothing re-downloaded: restored from OPFS');
+    await seederPause(); // resume
+  }
+  log(opfs ? 'restored after reload with all pieces intact (seeder was paused)' : 'restored after reload and re-downloaded (memory store)');
 
   await phone.screenshot({ path: path.join(TMP, 'phone.png'), fullPage: true });
   await phone.click('#settings-btn');
@@ -357,19 +367,61 @@ try {
   await phone.setContent(`<form id="f" method="POST" enctype="multipart/form-data" action="${site.url}share">
     <input type="file" name="torrents" id="file"><input name="title" value="Phone Torrent Test"></form>`);
   await phone.setInputFiles('#file', { name: 'shared.torrent', mimeType: 'application/x-bittorrent', buffer: Buffer.from(torrentFile) });
+  const dialogsBeforeShare = dialogs;
   await Promise.all([phone.waitForNavigation(), phone.evaluate(() => document.getElementById('f').submit())]);
   assert.equal(new URL(phone.url()).pathname, new URL(site.url).pathname, 'share target redirects back to the app');
   await phone.waitForSelector('.torrent .file', { timeout: 15000 });
+  assert.ok(dialogs > dialogsBeforeShare, 'shared torrent asked for confirmation before being added');
   assert.equal(await phone.$eval('.torrent .name', (e) => e.textContent), 'Phone Torrent Test');
   await waitFor(() => phone.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 'shared torrent download', timeout: 90000 });
   log('share target OK');
 
   // Opening the app with a magnet in the URL adds it (protocol handler / shared link).
+  const dialogsBeforeUrl = dialogs;
   await phone.goto(`${site.url}?magnet=${encodeURIComponent('magnet:?xt=urn:btih:' + '0'.repeat(40) + '&dn=fake')}`);
   await phone.waitForSelector('.torrent', { timeout: 15000 });
   await waitFor(() => phone.$$('.torrent').then((l) => l.length === 2), { label: 'magnet from URL to be added' });
   assert.equal(new URL(phone.url()).search, '', 'query string is cleaned up');
-  log('magnet from URL OK');
+  assert.ok(dialogs > dialogsBeforeUrl, 'URL magnet asked for confirmation');
+  // Fragment form as well (app links / #magnet:…): as a fresh load, and as a hash change on the open app.
+  await phone.goto('about:blank');
+  await phone.goto(`${site.url}#magnet:?xt=urn:btih:${'1'.repeat(40)}&dn=fragment`);
+  await waitFor(() => phone.$$('.torrent').then((l) => l.length === 3), { label: 'magnet from fragment to be added (pending magnets survive reload)' });
+  assert.equal(new URL(phone.url()).hash, '', 'fragment is cleaned up');
+  await phone.evaluate((h) => { location.hash = h; }, `#magnet:?xt=urn:btih:${'2'.repeat(40)}&dn=hashchange`);
+  await waitFor(() => phone.$$('.torrent').then((l) => l.length === 4), { label: 'magnet from hashchange to be added' });
+  log('magnet from URL and fragment OK');
+
+  /* ---------- magnet-sourced torrent: restored from stored metadata, retry keeps it ---------- */
+  for (const t of await phone.$$('.torrent .remove-btn')) await t.click();
+  await waitFor(() => phone.$$('.torrent').then((l) => l.length === 0), { label: 'clean slate for magnet test' });
+  const mainHash = await seeder.evaluate(() => window.__phoneTorrent.client.torrents[0].infoHash);
+  await phone.fill('#magnet-input', `magnet:?xt=urn:btih:${mainHash}`);
+  await phone.click('#magnet-form button[type="submit"]');
+  await phone.waitForSelector('.torrent .file', { timeout: 30000 });
+  await waitFor(() => phone.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 'magnet download', timeout: 90000 });
+  await phone.evaluate(() => Promise.race([window.__phoneTorrent.views.values().next().value.persisted, new Promise((r) => setTimeout(r, 5000))]));
+  await seederPause(); // no peers available from here on
+  await phone.reload();
+  await phone.waitForSelector('.torrent .file', { timeout: 10000 });
+  const magnetRestore = await phone.evaluate(() => {
+    const t = window.__phoneTorrent.client.torrents[0];
+    const r = window.__phoneTorrent.views.get(t).record;
+    return { hasMetadata: Boolean(t.metadata), name: t.name, sourceType: r?.source?.type, peers: t.numPeers };
+  });
+  assert.deepEqual({ hasMetadata: magnetRestore.hasMetadata, name: magnetRestore.name, sourceType: magnetRestore.sourceType },
+    { hasMetadata: true, name: 'Phone Torrent Test', sourceType: 'magnet' }, 'magnet torrent restored from its stored metadata without peers');
+  if (opfs) {
+    await waitFor(() => phone.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 'magnet torrent verified from disk', timeout: 30000 });
+    assert.equal(await phone.evaluate(() => window.__phoneTorrent.client.torrents[0].received), 0, 'magnet torrent data came from OPFS');
+  }
+  await phone.click('.torrent .details-btn');
+  await phone.click('.torrent .retry-btn');
+  await waitFor(() => phone.$$eval('.torrent .log li', (els) => els.some((e) => /re-announced/.test(e.textContent))), { label: 'retry on magnet torrent', timeout: 15000 });
+  assert.equal(await phone.evaluate(() => Boolean(window.__phoneTorrent.client.torrents[0].metadata)), true, 'retry keeps metadata on a magnet torrent');
+  assert.equal(await phone.$eval('.torrent .name', (e) => e.textContent), 'Phone Torrent Test');
+  await seederPause(); // resume seeder
+  log('magnet torrent restore + retry OK');
 
   /* ---------- fallback "resolvers": metadata from a torrent cache, retry with fresh trackers ---------- */
   // A torrent nobody seeds: created on the seeder, then dropped there, so only its .torrent bytes exist.
@@ -393,15 +445,28 @@ try {
   log('orphan torrent created');
   writeFileSync(path.join(TMP, `${orphan.infoHash}.torrent`), Buffer.from(orphan.torrentFile));
 
-  // Tampered .torrent must be rejected by the info-hash check.
+  // The info-hash check must reject: another valid torrent, a corrupted info dict, and a duplicate info key.
+  const verify = (bytes, hash) => phone.evaluate(async ({ bytes, hash }) => {
+    try { await window.__phoneTorrent.verifyTorrentBytes(new Uint8Array(bytes), hash); return 'accepted'; } catch (e) { return e.message; }
+  }, { bytes: Array.from(bytes), hash });
+  assert.match(await verify(Buffer.from(torrentFile), orphan.infoHash), /info hash mismatch/, 'a different valid torrent is rejected by hash');
   const tampered = Buffer.from(orphan.torrentFile);
   const infoAt = tampered.indexOf('4:infod');
   assert.ok(infoAt > 0, 'torrent has an info dictionary');
   tampered[infoAt + 12] ^= 0xff; // inside the info dictionary
-  const rejected = await phone.evaluate(async ({ bytes, hash }) => {
-    try { await window.__phoneTorrent.verifyTorrentBytes(new Uint8Array(bytes), hash); return null; } catch (e) { return e.message; }
-  }, { bytes: Array.from(tampered), hash: orphan.infoHash });
-  assert.ok(rejected, 'tampered .torrent is rejected');
+  assert.notEqual(await verify(tampered, orphan.infoHash), 'accepted', 'corrupted info dictionary is rejected');
+  const duplicated = await phone.evaluate(({ real, other }) => {
+    const enc = new TextEncoder();
+    const a = new Uint8Array(real); const b = new Uint8Array(other);
+    const [as, ae] = window.__phoneTorrent.findInfoSpan(a);
+    const [bs, be] = window.__phoneTorrent.findInfoSpan(b);
+    // d 4:info <real info> 4:info <other info> e  → a decoder keeps the last one, a naive check hashes the first
+    const parts = [enc.encode('d4:info'), a.subarray(as, ae), enc.encode('4:info'), b.subarray(bs, be), enc.encode('e')];
+    const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+    let o = 0; for (const p of parts) { out.set(p, o); o += p.length; }
+    return Array.from(out);
+  }, { real: orphan.torrentFile, other: torrentFile });
+  assert.match(await verify(Buffer.from(duplicated), orphan.infoHash), /duplicate|malformed/, 'duplicate info key is rejected');
   const accepted = await phone.evaluate(async ({ bytes, hash }) => {
     await window.__phoneTorrent.verifyTorrentBytes(new Uint8Array(bytes), hash); return true;
   }, { bytes: orphan.torrentFile, hash: orphan.infoHash });

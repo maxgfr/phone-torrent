@@ -34,7 +34,8 @@ self.addEventListener('install', (event) => {
   event.waitUntil((async () => {
     // One file at a time so a single 404 does not void the whole precache.
     const cache = await caches.open(SHELL_CACHE);
-    await Promise.all(SHELL_FILES.map((f) => cache.add(f).catch((err) => console.warn('precache skipped', f, err))));
+    // Bypass the HTTP cache so a new worker never precaches the previous deploy's files.
+    await Promise.all(SHELL_FILES.map((f) => cache.add(new Request(f, { cache: 'reload' })).catch((err) => console.warn('precache skipped', f, err))));
     await self.skipWaiting();
   })());
 });

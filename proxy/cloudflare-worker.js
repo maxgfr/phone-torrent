@@ -18,9 +18,12 @@ export default {
   async fetch(request, env) {
     const origin = request.headers.get('Origin') || '';
     const allowed = (env && env.ALLOWED_ORIGINS ? env.ALLOWED_ORIGINS.split(',') : []).map((s) => s.trim()).filter(Boolean);
-    if (allowed.length && !allowed.includes(origin)) return new Response('origin not allowed', { status: 403 });
+    // Fail closed: without an allow-list this would be an open proxy for anyone on the internet.
+    if (!allowed.length) return new Response('ALLOWED_ORIGINS is not configured; refusing to act as an open proxy', { status: 403 });
+    if (!allowed.includes(origin)) return new Response('origin not allowed', { status: 403 });
+    const maxBytes = Number(env && env.MAX_BYTES) || 4 * 1024 * 1024 * 1024; // 4 GiB per request by default
     const cors = {
-      'Access-Control-Allow-Origin': allowed.length ? origin : '*',
+      'Access-Control-Allow-Origin': origin,
       'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
       'Access-Control-Allow-Headers': 'Range, Accept, If-None-Match, If-Modified-Since',
       'Access-Control-Expose-Headers': PASS_RESPONSE_HEADERS.join(', '),
@@ -46,12 +49,27 @@ export default {
       return new Response(`upstream fetch failed: ${err.message}`, { status: 502, headers: cors });
     }
 
+    const declared = Number(upstream.headers.get('content-length'));
+    if (Number.isFinite(declared) && declared > maxBytes) return new Response('upstream file exceeds the size limit', { status: 413, headers: cors });
+
     const out = new Headers(cors);
     for (const h of PASS_RESPONSE_HEADERS) {
       const v = upstream.headers.get(h);
       if (v) out.set(h, v);
     }
+    // Workers hand us a decoded body when the upstream was compressed; the original length would lie.
+    if (upstream.headers.get('content-encoding')) out.delete('content-length');
     out.set('Cache-Control', 'no-store');
-    return new Response(upstream.body, { status: upstream.status, headers: out });
+
+    // Enforce the byte cap on streamed bodies without a declared length.
+    let seen = 0;
+    const capped = upstream.body && upstream.body.pipeThrough(new TransformStream({
+      transform(chunk, controller) {
+        seen += chunk.byteLength;
+        if (seen > maxBytes) controller.error(new Error('size limit exceeded'));
+        else controller.enqueue(chunk);
+      },
+    }));
+    return new Response(capped, { status: upstream.status, headers: out });
   },
 };
