@@ -246,22 +246,31 @@
       </label>
 
       <div class="field">
-        <span>Cloud fetch (TorBox and compatible APIs)</span>
+        <span>Cloud fetch (TorBox or put.io)</span>
         <p class="hint">A browser cannot reach a private tracker, an <code>http(s)://</code>‑only tracker or a
-          swarm without WebRTC peers. With an API key, the torrent is handed to your cloud account — a real
-          BitTorrent client in a data centre — and your phone then downloads the finished file over HTTPS,
-          straight from the link, with no size limit. Your key is stored on this device only.</p>
+          swarm without WebRTC peers. With a TorBox API key or a put.io OAuth token, the torrent is handed to
+          your account there — a real BitTorrent client in a data centre — and your phone then downloads the
+          finished file over HTTPS, straight from the link, with no size limit. Your key is stored on this
+          device only.</p>
+        <label class="field">
+          <span>Service</span>
+          <select id="cloud-provider">
+            <option value="torbox">TorBox</option>
+            <option value="putio">put.io</option>
+          </select>
+        </label>
         <label class="field">
           <span>API key</span>
           <input id="cloud-key" type="password" spellcheck="false" autocomplete="off" placeholder="TorBox API key" />
         </label>
         <label class="field">
-          <span>API base URL</span>
+          <span>API base URL (optional)</span>
           <input id="cloud-base" type="url" spellcheck="false" placeholder="https://api.torbox.app" />
+          <span class="hint">Leave empty for the service's own API. Set it only for a self‑hosted clone.</span>
         </label>
         <label class="toggle">
           <input id="cloud-proxy-toggle" type="checkbox" />
-          <span>Route cloud API calls through my CORS proxy (only if the API refuses browser requests — your key then passes through the proxy)</span>
+          <span>Always route cloud API calls through my CORS proxy. Leave off: a call the browser cannot make is retried through the proxy by itself. Either way the key passes through it.</span>
         </label>
         <button id="cloud-test-btn" class="btn small" type="button">Test the key</button>
         <span class="hint" id="cloud-info"></span>

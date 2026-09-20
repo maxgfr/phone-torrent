@@ -2,7 +2,7 @@ import WebTorrent from './vendor/webtorrent.min.js';
 import { makeZip, predictLength } from './vendor/client-zip.js';
 import { saver } from './saver.js';
 
-const DEFAULT_CLOUD_BASE = 'https://api.torbox.app';
+const DEFAULT_CLOUD_PROVIDER = 'torbox';
 const CLOUD_POLL_MS = 5000;
 
 const DEFAULT_TRACKERS = [
@@ -62,6 +62,7 @@ const els = {
   netcheckBtn: $('#netcheck-btn'),
   netcheckResults: $('#netcheck-results'),
   corsProxyInput: $('#corsproxy-input'),
+  cloudProviderSelect: $('#cloud-provider'),
   cloudKeyInput: $('#cloud-key'),
   cloudBaseInput: $('#cloud-base'),
   cloudProxyToggle: $('#cloud-proxy-toggle'),
@@ -99,7 +100,7 @@ function loadSettings() {
     corsProxy: '',
     // Cloud fetch: a remote client (TorBox and anything speaking its API) downloads what a browser
     // cannot reach — private trackers, http(s)-only trackers, swarms without a single WebRTC peer.
-    cloud: { apiKey: '', apiBase: DEFAULT_CLOUD_BASE, viaProxy: false },
+    cloud: { provider: DEFAULT_CLOUD_PROVIDER, apiKey: '', apiBase: '', viaProxy: false },
     fallbackDelay: 20, // seconds
     dohResolver: DEFAULT_DOH,
   };
@@ -675,106 +676,193 @@ async function fetchMetadataFallback(infoHash, onAttempt = () => {}) {
  * centre and hand the finished file back over HTTPS — the one protocol a browser is good at.
  *
  * So: submit the .torrent (or magnet) to the account's API, watch it download there, then let the
- * phone pull the file straight from the CDN link. Nothing of the payload goes through this app.
+ * phone pull the file straight from the link. Nothing of the payload goes through this app.
  */
 
-function cloudReady() {
-  return Boolean(settings.cloud && settings.cloud.apiKey);
-}
-
-function cloudBase() {
-  return ((settings.cloud && settings.cloud.apiBase) || DEFAULT_CLOUD_BASE).replace(/\/+$/, '');
-}
-
-/**
- * One call to the cloud API. The key travels in an Authorization header, so the request is not a
- * simple one and needs CORS — hence the "route through my proxy" setting for when it is refused.
- */
-async function cloudApi(path, { method = 'GET', body, query } = {}) {
-  if (!cloudReady()) throw new Error('No cloud API key: add one in Settings → Cloud fetch.');
-  const url = new URL(`${cloudBase()}/v1/api/${path}`);
-  for (const [k, v] of Object.entries(query || {})) if (v !== undefined && v !== null) url.searchParams.set(k, String(v));
-  const direct = url.toString();
-  const target = settings.cloud.viaProxy ? proxied(direct) : direct;
-  if (settings.cloud.viaProxy && target === direct) throw new Error('Set a CORS proxy in Settings, or turn off "route cloud calls through it".');
-  let res;
-  try {
-    res = await fetch(target, {
-      method,
-      headers: { Authorization: `Bearer ${settings.cloud.apiKey}` },
-      body,
-      cache: 'no-store',
-    });
-  } catch {
-    // Any network-level rejection looks the same from script: almost always CORS in practice.
-    throw new Error(settings.cloud.viaProxy
-      ? 'The proxy did not answer. Check that it is deployed and allows your origin.'
-      : 'The browser could not reach the API (CORS or network). Settings → Cloud fetch can route calls through your proxy.');
-  }
-  const text = await res.text();
-  let json = null;
-  try { json = JSON.parse(text); } catch { /* an error page, not JSON */ }
-  if (!res.ok || (json && json.success === false)) {
-    const detail = (json && (json.detail || json.error)) || text.slice(0, 120) || `HTTP ${res.status}`;
-    throw new Error(String(detail));
-  }
-  return json && 'data' in json ? json.data : json;
-}
-
-/** Accepts both the documented snake_case wire format and the camelCase the SDKs use. */
+/** Accepts both the snake_case wire format and the camelCase some SDKs document. */
 function pick(obj, ...names) {
   for (const n of names) if (obj && obj[n] !== undefined && obj[n] !== null) return obj[n];
   return undefined;
 }
 
-function normalizeCloudTorrent(raw) {
-  const files = Array.isArray(raw.files) ? raw.files : [];
-  return {
-    state: String(pick(raw, 'download_state', 'downloadState') || 'unknown'),
-    progress: Number(pick(raw, 'progress') || 0),
-    ready: Boolean(pick(raw, 'download_present', 'downloadPresent')) || Boolean(pick(raw, 'download_finished', 'downloadFinished')),
-    name: pick(raw, 'name') || '',
-    size: Number(pick(raw, 'size') || 0),
-    files: files.map((f) => ({
-      id: pick(f, 'id'),
-      name: String(pick(f, 'short_name', 'shortName', 'name') || 'file'),
-      size: Number(pick(f, 'size') || 0),
-    })),
-  };
+function cloudReady() {
+  return Boolean(settings.cloud && settings.cloud.apiKey);
 }
 
-/** A plain link the browser downloads by itself: no CORS, no memory ceiling, straight to Files. */
-function cloudFileLink(cloud, file) {
-  const url = new URL(`${cloudBase()}/v1/api/torrents/requestdl`);
-  url.searchParams.set('token', settings.cloud.apiKey);
-  url.searchParams.set('torrent_id', String(cloud.id));
-  if (file) url.searchParams.set('file_id', String(file.id));
-  else url.searchParams.set('zip_link', 'true');
-  url.searchParams.set('redirect', 'true');
-  return url.toString();
+/** Where a transfer lives: which API, at which base URL. Stored with the torrent so it survives a reload. */
+function cloudCtx(over = {}) {
+  const provider = CLOUD_PROVIDERS[over.provider] ? over.provider : (CLOUD_PROVIDERS[settings.cloud.provider] ? settings.cloud.provider : 'torbox');
+  const base = (over.base || settings.cloud.apiBase || CLOUD_PROVIDERS[provider].defaultBase).replace(/\/+$/, '');
+  return { provider, base, key: settings.cloud.apiKey, api: CLOUD_PROVIDERS[provider] };
 }
+
+/**
+ * One call to a cloud API. The key travels in an Authorization header, which makes this a request
+ * the API must allow with CORS; when it does not, the user's own proxy relays it instead.
+ */
+async function cloudFetch(url, { method = 'GET', body } = {}) {
+  const viaProxy = proxied(url);
+  const hasProxy = viaProxy !== url;
+  const targets = settings.cloud.viaProxy && hasProxy ? [viaProxy] : hasProxy ? [url, viaProxy] : [url];
+  let last = null;
+  for (const target of targets) {
+    try {
+      return await fetch(target, {
+        method,
+        body,
+        headers: { Authorization: `Bearer ${settings.cloud.apiKey}` },
+        cache: 'no-store',
+      });
+    } catch {
+      // A network-level rejection is indistinguishable from CORS in script; in practice it is CORS.
+      last = target === url ? 'the browser could not reach the API (CORS or network)' : 'the proxy did not answer';
+    }
+  }
+  throw new Error(hasProxy ? `${last}, and the proxy did not help` : `${last}. Set a CORS proxy in Settings to relay it.`);
+}
+
+async function cloudJson(url, opts) {
+  const res = await cloudFetch(url, opts);
+  const text = await res.text();
+  let json = null;
+  try { json = JSON.parse(text); } catch { /* an error page, not JSON */ }
+  const failed = !res.ok || (json && (json.success === false || json.status === 'ERROR'));
+  if (failed) {
+    const detail = (json && (json.detail || json.error_message || json.error)) || text.slice(0, 120) || `HTTP ${res.status}`;
+    throw new Error(String(detail));
+  }
+  return json || {};
+}
+
+const CLOUD_PROVIDERS = {
+  torbox: {
+    label: 'TorBox',
+    defaultBase: 'https://api.torbox.app',
+    keyPlaceholder: 'TorBox API key',
+
+    async check(ctx) {
+      const { data } = await cloudJson(`${ctx.base}/v1/api/user/me?settings=false`);
+      return pick(data || {}, 'email', 'customer', 'id');
+    },
+
+    async submit(ctx, { bytes, name, magnet }) {
+      const form = new FormData();
+      if (bytes) form.append('file', new Blob([bytes], { type: 'application/x-bittorrent' }), `${name}.torrent`);
+      else form.append('magnet', magnet);
+      const { data } = await cloudJson(`${ctx.base}/v1/api/torrents/createtorrent`, { method: 'POST', body: form });
+      const id = pick(data || {}, 'torrent_id', 'torrentId', 'queued_id', 'queuedId', 'id');
+      if (id === undefined) throw new Error('the API did not return a torrent id');
+      return id;
+    },
+
+    async status(ctx, id) {
+      const { data } = await cloudJson(`${ctx.base}/v1/api/torrents/mylist?id=${encodeURIComponent(id)}&bypass_cache=true`);
+      const raw = Array.isArray(data) ? data[0] : data;
+      if (!raw) throw new Error('the cloud no longer knows this transfer');
+      const ready = Boolean(pick(raw, 'download_present', 'downloadPresent')) || Boolean(pick(raw, 'download_finished', 'downloadFinished'));
+      return {
+        state: String(pick(raw, 'download_state', 'downloadState') || 'unknown'),
+        progress: Number(pick(raw, 'progress') || 0),
+        ready,
+        name: pick(raw, 'name') || '',
+        files: (Array.isArray(raw.files) ? raw.files : []).map((f) => ({
+          id: pick(f, 'id'),
+          name: String(pick(f, 'short_name', 'shortName', 'name') || 'file'),
+          size: Number(pick(f, 'size') || 0),
+        })),
+      };
+    },
+
+    // A permalink: the browser follows it by itself, so no CORS and no API call to render the list.
+    fileLink(ctx, id, file) {
+      const url = new URL(`${ctx.base}/v1/api/torrents/requestdl`);
+      url.searchParams.set('token', ctx.key);
+      url.searchParams.set('torrent_id', String(id));
+      if (file) url.searchParams.set('file_id', String(file.id));
+      else url.searchParams.set('zip_link', 'true');
+      url.searchParams.set('redirect', 'true');
+      return url.toString();
+    },
+    zipLink: true,
+  },
+
+  putio: {
+    label: 'put.io',
+    defaultBase: 'https://api.put.io',
+    keyPlaceholder: 'put.io OAuth token',
+
+    async check(ctx) {
+      const { info } = await cloudJson(`${ctx.base}/v2/account/info`);
+      return info && (info.username || info.mail);
+    },
+
+    async submit(ctx, { bytes, name, magnet }) {
+      let json;
+      if (bytes) {
+        const form = new FormData();
+        form.append('file', new Blob([bytes], { type: 'application/x-bittorrent' }), `${name}.torrent`);
+        // put.io takes uploads on upload.put.io; a custom base (a stand-in, a clone) keeps its host.
+        json = await cloudJson(`${ctx.base.replace('://api.', '://upload.')}/v2/files/upload`, { method: 'POST', body: form });
+      } else {
+        json = await cloudJson(`${ctx.base}/v2/transfers/add`, { method: 'POST', body: new URLSearchParams({ url: magnet }) });
+      }
+      const id = json.transfer && json.transfer.id;
+      if (id === undefined) throw new Error('put.io did not start a transfer for that torrent');
+      return id;
+    },
+
+    async status(ctx, id) {
+      const { transfer } = await cloudJson(`${ctx.base}/v2/transfers/${encodeURIComponent(id)}`);
+      if (!transfer) throw new Error('the cloud no longer knows this transfer');
+      const state = String(transfer.status || 'unknown').toLowerCase();
+      if (state === 'error') throw new Error(transfer.error_message || 'the transfer failed');
+      const ready = state === 'completed' || state === 'seeding';
+      const out = {
+        state,
+        progress: Number(transfer.percent_done || 0) / 100,
+        ready,
+        name: transfer.name || '',
+        files: [],
+      };
+      if (!ready || transfer.file_id === undefined || transfer.file_id === null) return out;
+      // A transfer points at one file, or at the folder holding them.
+      const { file } = await cloudJson(`${ctx.base}/v2/files/${encodeURIComponent(transfer.file_id)}`);
+      if (file && file.file_type !== 'FOLDER') {
+        out.files = [{ id: file.id, name: file.name, size: Number(file.size || 0) }];
+        return out;
+      }
+      const listed = await cloudJson(`${ctx.base}/v2/files/list?parent_id=${encodeURIComponent(transfer.file_id)}&per_page=1000`);
+      // A sub-folder keeps its own link: put.io serves a folder as a zip.
+      out.files = (listed.files || []).map((f) => ({
+        id: f.id,
+        name: f.file_type === 'FOLDER' ? `${f.name} (folder, .zip)` : f.name,
+        size: Number(f.size || 0),
+      }));
+      return out;
+    },
+
+    fileLink(ctx, id, file) {
+      if (!file) return '';
+      return `${ctx.base}/v2/files/${encodeURIComponent(file.id)}/download?oauth_token=${encodeURIComponent(ctx.key)}`;
+    },
+    zipLink: false,
+  },
+};
 
 async function cloudSubmit(view) {
   const { torrent } = view;
-  const form = new FormData();
-  if (torrent.metadata && torrent.torrentFile) {
-    const bytes = new Uint8Array(torrent.torrentFile);
-    form.append('file', new Blob([bytes], { type: 'application/x-bittorrent' }), `${torrent.name || torrent.infoHash}.torrent`);
-  } else {
-    form.append('magnet', torrent.magnetURI);
-  }
-  const data = await cloudApi('torrents/createtorrent', { method: 'POST', body: form });
-  const id = pick(data || {}, 'torrent_id', 'torrentId', 'queued_id', 'queuedId', 'id');
-  if (id === undefined) throw new Error('the API did not return a torrent id');
-  return { id, state: 'queued', progress: 0, ready: false, files: [] };
+  const ctx = cloudCtx();
+  const payload = torrent.metadata && torrent.torrentFile
+    ? { bytes: new Uint8Array(torrent.torrentFile), name: torrent.name || torrent.infoHash }
+    : { magnet: torrent.magnetURI };
+  const id = await ctx.api.submit(ctx, payload);
+  return { id, provider: ctx.provider, base: ctx.base, state: 'queued', progress: 0, ready: false, files: [] };
 }
 
 async function cloudRefresh(view) {
   if (!view.cloud || view.cloud.id === undefined) return null;
-  const data = await cloudApi('torrents/mylist', { query: { id: view.cloud.id, bypass_cache: 'true' } });
-  const raw = Array.isArray(data) ? data[0] : data;
-  if (!raw) throw new Error('the cloud no longer knows this torrent');
-  view.cloud = { ...view.cloud, ...normalizeCloudTorrent(raw) };
+  const ctx = cloudCtx(view.cloud);
+  view.cloud = { ...view.cloud, ...(await ctx.api.status(ctx, view.cloud.id)) };
   renderCloud(view);
   return view.cloud;
 }
@@ -822,7 +910,7 @@ async function startCloudFetch(view) {
   try {
     if (!view.cloud) {
       view.cloud = await cloudSubmit(view);
-      logEvent(view, `sent to the cloud (id ${view.cloud.id})`);
+      logEvent(view, `sent to ${cloudCtx(view.cloud).api.label} (transfer ${view.cloud.id})`);
       toast('Sent to the cloud. It downloads there, then you save it from the link.');
       persistTorrent(view);
     }
@@ -844,35 +932,30 @@ function renderCloud(view, error) {
   // One transfer per torrent: the buttons that start one go away once it exists.
   $$('.cloud-btn, .nopeers-cloud-btn', view.el).forEach((b) => { b.hidden = Boolean(cloud); });
   if (!cloud) return;
+  const ctx = cloudCtx(cloud);
   const pct = Math.min(100, Math.round((cloud.progress || 0) * 100));
   $('.cloud-state', box).textContent = error
-    ? `Cloud: ${error}`
+    ? `${ctx.api.label}: ${error}`
     : cloud.ready
-      ? 'Ready in the cloud — tap a file to download it to your phone.'
-      : `Cloud: ${cloud.state}${pct ? ` ${pct}%` : ''}…`;
+      ? `Ready on ${ctx.api.label} — tap a file to download it to your phone.`
+      : `${ctx.api.label}: ${cloud.state}${pct ? ` ${pct}%` : ''}…`;
   const list = $('.cloud-files', box);
   list.textContent = '';
   if (!cloud.ready) return;
-  for (const file of cloud.files) {
-    const li = document.createElement('li');
-    const a = document.createElement('a');
-    a.className = 'btn small';
-    a.href = cloudFileLink(cloud, file);
-    a.rel = 'noopener';
-    a.target = '_blank';
-    a.setAttribute('download', file.name);
-    a.textContent = `${file.name} · ${formatBytes(file.size)}`;
-    li.appendChild(a);
-    list.appendChild(li);
+  const entries = cloud.files.map((f) => ({ href: ctx.api.fileLink(ctx, cloud.id, f), text: `${f.name} · ${formatBytes(f.size)}` }));
+  if (ctx.api.zipLink && cloud.files.length > 1) {
+    entries.push({ href: ctx.api.fileLink(ctx, cloud.id, null), text: 'Everything as one .zip' });
   }
-  if (cloud.files.length > 1) {
+  for (const entry of entries) {
+    if (!entry.href) continue;
     const li = document.createElement('li');
     const a = document.createElement('a');
     a.className = 'btn small';
-    a.href = cloudFileLink(cloud, null);
+    a.href = entry.href;
     a.rel = 'noopener';
     a.target = '_blank';
-    a.textContent = 'Everything as one .zip';
+    a.setAttribute('download', '');
+    a.textContent = entry.text;
     li.appendChild(a);
     list.appendChild(li);
   }
@@ -1749,8 +1832,10 @@ els.settingsBtn.addEventListener('click', async () => {
   els.netcheckBtn.disabled = false;
   els.netcheckBtn.textContent = 'Check tracker connectivity';
   els.corsProxyInput.value = settings.corsProxy || '';
+  els.cloudProviderSelect.value = CLOUD_PROVIDERS[settings.cloud.provider] ? settings.cloud.provider : DEFAULT_CLOUD_PROVIDER;
   els.cloudKeyInput.value = settings.cloud.apiKey || '';
-  els.cloudBaseInput.value = settings.cloud.apiBase || DEFAULT_CLOUD_BASE;
+  els.cloudBaseInput.value = settings.cloud.apiBase || '';
+  applyCloudProviderFields();
   els.cloudProxyToggle.checked = Boolean(settings.cloud.viaProxy);
   els.cloudInfo.textContent = cloudReady()
     ? 'A key is set. Torrents no browser can reach offer "Fetch it in the cloud".'
@@ -1781,21 +1866,37 @@ els.netcheckBtn.addEventListener('click', () => {
   runNetworkCheck();
 });
 
+/** Keep the key placeholder and the base-URL hint in step with the chosen provider. */
+function applyCloudProviderFields() {
+  const api = CLOUD_PROVIDERS[els.cloudProviderSelect.value] || CLOUD_PROVIDERS[DEFAULT_CLOUD_PROVIDER];
+  els.cloudKeyInput.placeholder = api.keyPlaceholder;
+  els.cloudBaseInput.placeholder = api.defaultBase;
+}
+
+els.cloudProviderSelect.addEventListener('change', () => {
+  // A base URL typed for the other provider would not answer; only a custom one is worth keeping.
+  const known = Object.values(CLOUD_PROVIDERS).map((p) => p.defaultBase);
+  if (known.includes(els.cloudBaseInput.value.trim())) els.cloudBaseInput.value = '';
+  applyCloudProviderFields();
+  els.cloudInfo.textContent = '';
+});
+
 els.cloudTestBtn.addEventListener('click', async () => {
   // Use what is typed in the dialog, even before Save.
   settings = {
     ...settings,
     cloud: {
+      provider: els.cloudProviderSelect.value,
       apiKey: els.cloudKeyInput.value.trim(),
-      apiBase: /^https?:\/\//i.test(els.cloudBaseInput.value.trim()) ? els.cloudBaseInput.value.trim().replace(/\/+$/, '') : DEFAULT_CLOUD_BASE,
+      apiBase: /^https?:\/\//i.test(els.cloudBaseInput.value.trim()) ? els.cloudBaseInput.value.trim().replace(/\/+$/, '') : '',
       viaProxy: els.cloudProxyToggle.checked,
     },
   };
   els.cloudTestBtn.disabled = true;
   els.cloudInfo.textContent = 'Checking…';
   try {
-    const me = await cloudApi('user/me', { query: { settings: 'false' } });
-    const who = pick(me || {}, 'email', 'customer', 'id');
+    const ctx = cloudCtx();
+    const who = await ctx.api.check(ctx);
     els.cloudInfo.textContent = `Key accepted${who ? ` (${who})` : ''}. Save to keep it.`;
   } catch (err) {
     els.cloudInfo.textContent = `Key not usable: ${err.message}`;
@@ -1853,8 +1954,9 @@ els.settingsDialog.addEventListener('close', () => {
     metadataSources: els.metaSourcesInput.value.split('\n').map((s) => s.trim()).filter((s) => /^https?:\/\/.*\{infohash\}/i.test(s)),
     corsProxy: /^https?:\/\/.*\{url\}/i.test(els.corsProxyInput.value.trim()) ? els.corsProxyInput.value.trim() : '',
     cloud: {
+      provider: els.cloudProviderSelect.value,
       apiKey: els.cloudKeyInput.value.trim(),
-      apiBase: /^https?:\/\//i.test(els.cloudBaseInput.value.trim()) ? els.cloudBaseInput.value.trim().replace(/\/+$/, '') : DEFAULT_CLOUD_BASE,
+      apiBase: /^https?:\/\//i.test(els.cloudBaseInput.value.trim()) ? els.cloudBaseInput.value.trim().replace(/\/+$/, '') : '',
       viaProxy: els.cloudProxyToggle.checked,
     },
     fallbackDelay: Math.max(5, Number(els.fallbackDelayInput.value) || 20),
@@ -2066,4 +2168,4 @@ window.addEventListener('hashchange', async () => {
 })();
 
 // Expose for debugging and tests.
-window.__phoneTorrent = { client, views, saver, addTorrent, seedFiles, torrentReach, unreachableReason, cloudApi, cloudFileLink, effectiveTrackers, refreshTrackerList, fetchMetadataFallback, verifyTorrentBytes, findInfoSpan, runNetworkCheck, cleanOrphanStores, isComplete, get opfsOk() { return opfsOk; } };
+window.__phoneTorrent = { client, views, saver, addTorrent, seedFiles, torrentReach, unreachableReason, cloudCtx, CLOUD_PROVIDERS, effectiveTrackers, refreshTrackerList, fetchMetadataFallback, verifyTorrentBytes, findInfoSpan, runNetworkCheck, cleanOrphanStores, isComplete, get opfsOk() { return opfsOk; } };

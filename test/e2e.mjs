@@ -57,7 +57,7 @@ function bencode(v) {
 }
 
 /** A .torrent as a private tracker hands it out: private flag, https-only announce. */
-function privateTorrent(body) {
+function privateTorrent(body, name = 'private release.bin') {
   const pieceLength = 16384;
   const pieces = [];
   for (let off = 0; off < body.length; off += pieceLength) {
@@ -68,7 +68,7 @@ function privateTorrent(body) {
     'announce-list': [['https://private.example/announce/passkey']],
     info: {
       length: body.length,
-      name: 'private release.bin',
+      name,
       'piece length': pieceLength,
       pieces: Buffer.concat(pieces),
       private: 1,
@@ -162,6 +162,68 @@ function startCloudApi() {
   });
 }
 
+/** The same idea for put.io: its own paths, its own envelopes (transfer/file/files). */
+function startPutioApi() {
+  const state = { polls: 0, key: 'putio-token', payload: Buffer.alloc(0) };
+  const cors = {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Headers': 'Authorization, Content-Type',
+    'Content-Type': 'application/json',
+    'Cache-Control': 'no-store',
+  };
+  const server = http.createServer(async (req, res) => {
+    const url = new URL(req.url, 'http://putio.test');
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204, { ...cors, 'Access-Control-Allow-Methods': 'GET, HEAD, POST, OPTIONS' }).end();
+      return;
+    }
+    const send = (body, status = 200) => res.writeHead(status, cors).end(JSON.stringify(body));
+    const download = url.pathname.match(/^\/v2\/files\/(\d+)\/download$/);
+    if (download) {
+      if (url.searchParams.get('oauth_token') !== state.key) return send({ status: 'ERROR', error_message: 'bad token' }, 401);
+      state.downloadedId = download[1];
+      res.writeHead(200, {
+        'Content-Type': 'application/octet-stream',
+        'Content-Disposition': 'attachment; filename="cloud-putio.bin"',
+        'Content-Length': state.payload.length,
+      }).end(state.payload);
+      return;
+    }
+    if ((req.headers.authorization || '').replace(/^Bearer /, '') !== state.key) {
+      return send({ status: 'ERROR', error_message: 'bad token' }, 401);
+    }
+    if (url.pathname === '/v2/account/info') return send({ status: 'OK', info: { username: 'phone-user' } });
+    if (url.pathname === '/v2/files/upload') {
+      const chunks = [];
+      for await (const c of req) chunks.push(c);
+      state.uploaded = Buffer.concat(chunks);
+      return send({ status: 'OK', transfer: { id: 55, status: 'IN_QUEUE' } });
+    }
+    if (url.pathname === '/v2/transfers/55') {
+      state.polls++;
+      const ready = state.polls > 1;
+      return send({
+        status: 'OK',
+        transfer: {
+          id: 55,
+          name: 'putio release.bin',
+          status: ready ? 'COMPLETED' : 'DOWNLOADING',
+          percent_done: ready ? 100 : 40,
+          file_id: ready ? 1234 : null,
+          size: state.payload.length,
+        },
+      });
+    }
+    if (url.pathname === '/v2/files/1234') {
+      return send({ status: 'OK', file: { id: 1234, name: 'putio release.bin', file_type: 'VIDEO', size: state.payload.length } });
+    }
+    send({ status: 'ERROR', error_message: 'not found' }, 404);
+  });
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () => resolve({ server, state, url: `http://127.0.0.1:${server.address().port}` }));
+  });
+}
+
 const tracker = new TrackerServer({ udp: false, http: false, ws: true, stats: false });
 await new Promise((resolve) => tracker.listen(0, '127.0.0.1', resolve));
 const trackerUrl = `ws://127.0.0.1:${tracker.ws.address().port}`;
@@ -171,7 +233,8 @@ const site = await startServer(0);
 log('site at', site.url);
 
 const cloudApi = await startCloudApi();
-log('cloud API stub at', cloudApi.url);
+const putioApi = await startPutioApi();
+log('cloud API stubs at', cloudApi.url, 'and', putioApi.url);
 
 // BROWSER=webkit runs the same suite on Safari's engine (what every browser on iOS uses).
 const BROWSER = process.env.BROWSER || 'chromium';
@@ -698,8 +761,8 @@ try {
 
   const privateCard = ios.locator('.torrent', { has: ios.locator('.name', { hasText: 'private release.bin' }) }).first();
   await privateCard.locator('.nopeers-cloud-btn').click();
-  await waitFor(() => privateCard.locator('.cloud-state').textContent().then((t) => /Cloud: downloading 50%/.test(t)).catch(() => false), { label: 'cloud transfer progress', timeout: 20000 });
-  await waitFor(() => privateCard.locator('.cloud-state').textContent().then((t) => /Ready in the cloud/.test(t)).catch(() => false), { label: 'cloud transfer ready', timeout: 30000 });
+  await waitFor(() => privateCard.locator('.cloud-state').textContent().then((t) => /TorBox: downloading 50%/.test(t)).catch(() => false), { label: 'cloud transfer progress', timeout: 20000 });
+  await waitFor(() => privateCard.locator('.cloud-state').textContent().then((t) => /Ready on TorBox/.test(t)).catch(() => false), { label: 'cloud transfer ready', timeout: 30000 });
   assert.ok(cloudApi.state.submitted && cloudApi.state.submitted.includes('private release.bin'), 'the .torrent itself was uploaded to the API');
   const cloudLinkText = await privateCard.locator('.cloud-files a').first().textContent();
   assert.match(cloudLinkText, /^private release\.bin · /);
@@ -726,8 +789,49 @@ try {
   await ios.reload();
   await ios.waitForFunction(() => window.__phoneTorrent?.client);
   const restoredCard = ios.locator('.torrent', { has: ios.locator('.name', { hasText: 'private release.bin' }) }).first();
-  await waitFor(() => restoredCard.locator('.cloud-state').textContent().then((t) => /Ready in the cloud/.test(t)).catch(() => false), { label: 'cloud transfer restored', timeout: 30000 });
+  await waitFor(() => restoredCard.locator('.cloud-state').textContent().then((t) => /Ready on TorBox/.test(t)).catch(() => false), { label: 'cloud transfer restored', timeout: 30000 });
   log('cloud transfer restored after reload');
+
+  /* ---------- the same round trip on put.io, whose API looks nothing like TorBox's ---------- */
+  putioApi.state.payload = rnd(30000, 31);
+  await ios.setInputFiles('#torrent-file-input', {
+    name: 'putio.torrent',
+    mimeType: 'application/x-bittorrent',
+    buffer: privateTorrent(putioApi.state.payload, 'putio release.bin'),
+  });
+  await waitFor(() => ios.$$eval('.torrent .name', (els) => els.some((e) => e.textContent === 'putio release.bin')), { label: 'second private torrent listed', timeout: 15000 });
+
+  await ios.click('#settings-btn');
+  await ios.waitForSelector('#settings-dialog[open]');
+  await ios.selectOption('#cloud-provider', 'putio');
+  await ios.fill('#cloud-key', 'putio-token');
+  await ios.fill('#cloud-base', putioApi.url);
+  await ios.click('#cloud-test-btn');
+  await waitFor(() => ios.$eval('#cloud-info', (e) => /Key accepted \(phone-user\)/.test(e.textContent)), { label: 'put.io token accepted', timeout: 15000 });
+  await ios.click('#settings-dialog button[type="submit"]');
+  await ios.waitForSelector('#settings-dialog[open]', { state: 'detached', timeout: 5000 }).catch(() => {});
+
+  const putioCard = ios.locator('.torrent', { has: ios.locator('.name', { hasText: 'putio release.bin' }) }).first();
+  await putioCard.locator('.nopeers-cloud-btn').click();
+  await waitFor(() => putioCard.locator('.cloud-state').textContent().then((t) => /put\.io: downloading 40%/.test(t)).catch(() => false), { label: 'put.io transfer progress', timeout: 20000 });
+  await waitFor(() => putioCard.locator('.cloud-state').textContent().then((t) => /Ready on put\.io/.test(t)).catch(() => false), { label: 'put.io transfer ready', timeout: 30000 });
+  assert.ok(putioApi.state.uploaded && putioApi.state.uploaded.includes('putio release.bin'), 'the .torrent was uploaded to put.io');
+
+  const [putioDownload] = await Promise.all([
+    ios.waitForEvent('download', { timeout: 30000 }),
+    putioCard.locator('.cloud-files a').first().click(),
+  ]);
+  const putioPath = path.join(TMP, 'cloud-putio.bin');
+  await putioDownload.saveAs(putioPath);
+  assert.equal(sha(readFileSync(putioPath)), sha(putioApi.state.payload), 'the file saved from put.io matches the payload');
+  assert.equal(putioApi.state.downloadedId, '1234', 'the link pointed at the file the transfer produced');
+  log('put.io round trip OK');
+
+  // Switching the service does not break a transfer that belongs to the other one: each card keeps
+  // the API it was started on.
+  const torboxLink = await restoredCard.locator('.cloud-files a').first().getAttribute('href');
+  assert.ok(torboxLink.startsWith(cloudApi.url), 'the TorBox transfer still links to TorBox after switching provider');
+  log('per-transfer service kept across a provider switch');
   await iosCtx.close();
 
   /* ---------- fallback: browser without service workers ---------- */
@@ -761,6 +865,7 @@ try {
   await browser.close();
   site.server.close();
   cloudApi.server.close();
+  putioApi.server.close();
   tracker.close();
   process.exit(failed ? 1 : 0);
 }
