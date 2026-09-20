@@ -224,7 +224,10 @@ function startPutioApi() {
   });
 }
 
-const tracker = new TrackerServer({ udp: false, http: false, ws: true, stats: false });
+// A WebSocket tracker tells clients to re-announce every fifth of its interval, and the default is
+// ten minutes — so a WebRTC handshake that misses (pause/resume, a fresh magnet) waits two minutes
+// for the next try, longer than any wait here. Thirty seconds means a retry every six.
+const tracker = new TrackerServer({ udp: false, http: false, ws: true, stats: false, interval: 30000 });
 await new Promise((resolve) => tracker.listen(0, '127.0.0.1', resolve));
 const trackerUrl = `ws://127.0.0.1:${tracker.ws.address().port}`;
 log('tracker at', trackerUrl);
