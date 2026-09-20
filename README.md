@@ -11,6 +11,9 @@ your phone either file by file or as a single `.zip`.
   phone, paste the link, or open `https://…/#magnet:?xt=…`. The file picker is deliberately
   unfiltered — iOS's Files app greys out every `.torrent` when a filter is set — and whatever you
   pick is checked by its bytes, so a file that is not a torrent is refused with an explanation.
+  A link to a `.torrent` works too: paste the `https://…/x.torrent` address in the same box and the
+  app fetches it (through your CORS proxy if the host blocks browser requests), keeps the bytes so a
+  reload restores it offline, and tells you what went wrong if the address cannot be read.
   On Android you can also *share* a `.torrent` file or magnet link to the installed app, and
   `magnet:` links open in it once installed.
 - **Choose the files you want.** Untick a file and its pieces are not downloaded.
@@ -134,8 +137,9 @@ save (twice), zip save (byte‑for‑byte against the seeded data), restore afte
 persistence, the delete‑all cycle, removal, the Web Share Target flow, magnet links passed in the
 URL, the tracker‑list merge, the network check, metadata from a fallback source with a tampered file
 rejected, the no‑peers retry, an iPhone‑emulated context (unfiltered file picker, a non‑torrent file
-refused, a private‑tracker torrent explained and kept off the public trackers), and the in‑memory
-fallback when service workers are blocked. CI runs it on Chromium and on WebKit (`BROWSER=webkit npm test`).
+refused, a `.torrent` added from a URL and an unreachable URL reported, a private‑tracker torrent
+explained and kept off the public trackers), and the in‑memory fallback when service workers are
+blocked. CI runs it on Chromium and on WebKit (`BROWSER=webkit npm test`).
 
 To try it against the real network, seed something with the app on one device (or with any
 WebTorrent‑compatible client) and open the shared link on your phone; public trackers are not

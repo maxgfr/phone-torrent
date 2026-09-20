@@ -691,8 +691,35 @@ function logEvent(view, message) {
   while (logEl.children.length > LOG_LIMIT) logEl.firstElementChild.remove();
 }
 
+/** Download a .torrent from an http(s) URL, through the CORS proxy if the direct fetch is blocked. */
+async function fetchTorrentUrl(url) {
+  const targets = [url];
+  const viaProxy = proxied(url);
+  if (viaProxy !== url) targets.push(viaProxy);
+  let last = new Error('unreachable');
+  for (const target of targets) {
+    try {
+      const res = await fetch(target, { cache: 'no-store' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const bytes = new Uint8Array(await res.arrayBuffer());
+      if (!torrentReach(bytes)) throw new Error('that address did not return a .torrent file');
+      return bytes;
+    } catch (err) {
+      // A TypeError from fetch almost always means the server does not allow browser (CORS) requests.
+      last = err instanceof TypeError ? new Error('blocked by CORS or unreachable') : err;
+    }
+  }
+  throw new Error(`Could not fetch that .torrent: ${last.message}${proxied(url) === url ? '. A CORS proxy can be set in Settings.' : ''}`);
+}
+
 async function addTorrent(id, { record } = {}) {
   await storageReady;
+  // A .torrent URL is fetched here rather than inside WebTorrent: the proxy can help, the error is
+  // a real message, and the rules below get to see the bytes before anything is announced.
+  if (typeof id === 'string' && /^https?:\/\//i.test(id)) {
+    toast('Fetching that .torrent…');
+    return addTorrent(await fetchTorrentUrl(id), { record });
+  }
   const existing = await client.get(id).catch(() => null);
   if (existing) {
     toast(`"${existing.name || existing.infoHash}" is already in the list.`);
@@ -837,6 +864,15 @@ function createTorrentView(torrent, record, seeding) {
   });
   torrent.on('metadata', () => {
     logEvent(view, `metadata received: ${torrent.files.length} file${torrent.files.length === 1 ? '' : 's'}, ${formatBytes(torrent.length)}`);
+    // A magnet only reveals what it is here; a torrent added from bytes was judged before it started.
+    if (!view.reach && torrent.torrentFile) {
+      view.reach = torrentReach(new Uint8Array(torrent.torrentFile));
+      const reason = unreachableReason(view.reach);
+      if (reason) {
+        logEvent(view, reason);
+        toast(reason, { error: true, timeout: 9000 });
+      }
+    }
     renderFiles(view);
   });
   torrent.on('done', () => {
@@ -1310,6 +1346,16 @@ async function saveTorrentFile(torrent) {
 
 /* ---------- inputs ---------- */
 
+/** addTorrent for ids handed to us by a link, a drop or another app: never throws, always explains. */
+async function tryAddTorrent(id) {
+  try {
+    return await addTorrent(id);
+  } catch (err) {
+    toast(err.message, { error: true, timeout: 9000 });
+    return null;
+  }
+}
+
 async function addTorrentFiles(fileList) {
   for (const f of fileList) {
     let buf;
@@ -1346,7 +1392,11 @@ els.magnetForm.addEventListener('submit', async (event) => {
     return;
   }
   els.magnetInput.value = '';
-  await addTorrent(id);
+  try {
+    await addTorrent(id);
+  } catch (err) {
+    toast(err.message, { error: true, timeout: 9000 });
+  }
 });
 
 els.seedFileInput.addEventListener('change', () => {
@@ -1399,7 +1449,7 @@ els.dropZone.addEventListener('drop', async (e) => {
   if (files.length) return seedFiles(files, { name: files.length > 1 ? 'Shared files' : undefined });
   const text = e.dataTransfer?.getData('text');
   const id = text && parseTorrentText(text);
-  if (id) await addTorrent(id);
+  if (id) await tryAddTorrent(id);
 });
 
 /* ---------- screen wake lock: phones suspend the page when the screen locks ---------- */
@@ -1638,7 +1688,7 @@ async function takeSharedInbox() {
         if (confirmExternalAdd(`the shared file "${name}"`)) await addTorrentFiles([new File([await res.blob()], name)]);
       } else {
         const id = parseTorrentText(await res.text());
-        if (id && confirmExternalAdd(describeTorrentId(id))) await addTorrent(id);
+        if (id && confirmExternalAdd(describeTorrentId(id))) await tryAddTorrent(id);
       }
     }
   } catch { /* ignore */ }
@@ -1686,7 +1736,7 @@ window.addEventListener('hashchange', async () => {
   const id = parseTorrentText(safeDecode(location.hash.slice(1)));
   if (!id) return;
   history.replaceState(null, '', location.pathname);
-  if (confirmExternalAdd(describeTorrentId(id))) await addTorrent(id);
+  if (confirmExternalAdd(describeTorrentId(id))) await tryAddTorrent(id);
 });
 
 /* ---------- startup ---------- */
@@ -1732,7 +1782,7 @@ window.addEventListener('hashchange', async () => {
   // Anything a link or another app handed us gets a confirmation: a web page must not be able to
   // make this app download and seed something just by opening a URL.
   for (const id of [fromQuery, fromHash]) {
-    if (id && confirmExternalAdd(describeTorrentId(id))) await addTorrent(id);
+    if (id && confirmExternalAdd(describeTorrentId(id))) await tryAddTorrent(id);
   }
   await takeSharedInbox();
 

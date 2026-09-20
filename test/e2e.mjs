@@ -568,6 +568,25 @@ try {
   assert.equal((await ios.$$('.torrent')).length, torrentsBefore, 'a non-torrent file is not added');
   log('non-torrent file refused with an explanation');
 
+  // A .torrent handed over as a link (what you get from a tracker on a phone) is fetched by the app.
+  const hostedTorrent = path.join(TMP, 'hosted.torrent');
+  writeFileSync(hostedTorrent, Buffer.from(torrentFile));
+  await ios.click('.torrent .remove-btn');
+  await waitFor(() => ios.$$('.torrent').then((l) => l.length === 0), { label: 'list cleared before the URL test' });
+  await ios.fill('#magnet-input', `${site.url}test/.tmp/hosted.torrent`);
+  await ios.click('#magnet-form button[type="submit"]');
+  await ios.waitForSelector('.torrent .file', { timeout: 20000 });
+  assert.equal(await ios.$eval('.torrent .name', (e) => e.textContent), 'Phone Torrent Test');
+  // Stored as bytes, so a reload restores it without fetching the URL again.
+  assert.equal(await ios.evaluate(() => window.__phoneTorrent.views.values().next().value.source?.type), 'torrent');
+  log('.torrent URL fetched and added');
+
+  // An unreachable .torrent URL explains itself instead of failing silently.
+  await ios.fill('#magnet-input', 'https://torrent.invalid/nope.torrent');
+  await ios.click('#magnet-form button[type="submit"]');
+  await waitFor(() => ios.$$eval('.toast', (els) => els.some((e) => /Could not fetch that \.torrent/.test(e.textContent))), { label: 'bad .torrent URL reported', timeout: 15000 });
+  log('unreachable .torrent URL reported');
+
   // A private-tracker .torrent parses and is listed, but says up front that no browser can reach it,
   // and its info hash must never be announced to the public trackers (BEP 27).
   await ios.setInputFiles('#torrent-file-input', { name: 'private.torrent', mimeType: 'application/x-bittorrent', buffer: privateTorrent(rnd(40000, 23)) });
