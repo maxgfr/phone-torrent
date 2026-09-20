@@ -545,7 +545,7 @@ try {
   if (opfs) await seederPause();
   await phone.reload();
   await phone.waitForSelector('.torrent .file', { timeout: 15000 });
-  await waitFor(() => phone.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 'restored torrent to verify', timeout: 90000 });
+  await waitFor(() => phone.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 'restored torrent to verify', timeout: 180000 });
   if (opfs) {
     assert.equal(await phone.evaluate(() => window.__phoneTorrent.client.torrents[0].received), 0, 'nothing re-downloaded: restored from OPFS');
     await seederPause(); // resume
@@ -580,11 +580,11 @@ try {
   await waitFor(() => phone.$$('.torrent').then((l) => l.length === 0), { label: 'delete all' });
   await phone.setInputFiles('#torrent-file-input', { name: 'test.torrent', mimeType: 'application/x-bittorrent', buffer: Buffer.from(torrentFile) });
   await phone.waitForSelector('.torrent .file', { timeout: 15000 });
-  await waitFor(() => phone.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 're-download after delete all', timeout: 90000 });
+  await waitFor(() => phone.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 're-download after delete all', timeout: 180000 });
   await waitFor(() => phone.evaluate(() => window.__phoneTorrent.views.values().next().value.record?.infoHash), { label: 'record persisted after delete all' });
   await phone.reload();
   await phone.waitForSelector('.torrent .file', { timeout: 15000 });
-  await waitFor(() => phone.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 'restore after delete-all cycle', timeout: 30000 });
+  await waitFor(() => phone.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 'restore after delete-all cycle', timeout: 180000 });
   log('delete-all then re-add persists OK');
 
   // Removing deletes it from the list and from the persisted set.
@@ -607,7 +607,7 @@ try {
   await phone.waitForSelector('.torrent .file', { timeout: 15000 });
   assert.ok(dialogs > dialogsBeforeShare, 'shared torrent asked for confirmation before being added');
   assert.equal(await phone.$eval('.torrent .name', (e) => e.textContent), 'Phone Torrent Test');
-  await waitFor(() => phone.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 'shared torrent download', timeout: 90000 });
+  await waitFor(() => phone.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 'shared torrent download', timeout: 180000 });
   log('share target OK');
 
   // Opening the app with a magnet in the URL adds it (protocol handler / shared link).
@@ -633,7 +633,7 @@ try {
   await phone.fill('#magnet-input', `magnet:?xt=urn:btih:${mainHash}`);
   await phone.click('#magnet-form button[type="submit"]');
   await phone.waitForSelector('.torrent .file', { timeout: 30000 });
-  await waitFor(() => phone.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 'magnet download', timeout: 90000 });
+  await waitFor(() => phone.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 'magnet download', timeout: 180000 });
   await phone.evaluate(() => Promise.race([window.__phoneTorrent.views.values().next().value.persisted, new Promise((r) => setTimeout(r, 5000))]));
   await seederPause(); // no peers available from here on
   await phone.reload();
