@@ -698,7 +698,13 @@ try {
   const ios = await iosCtx.newPage();
   ios.on('pageerror', (e) => console.error('ios page error:', e));
   ios.on('dialog', (d) => d.accept());
-  await ios.addInitScript((t) => localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], trackerList: false })), trackerUrl);
+  // This context saves settings from the app's own dialog later on, so the init script merges its
+  // tracker choice into whatever is stored instead of replacing it on every navigation.
+  await ios.addInitScript((t) => {
+    let current = {};
+    try { current = JSON.parse(localStorage.getItem('phone-torrent:settings') || '{}'); } catch { /* first load */ }
+    localStorage.setItem('phone-torrent:settings', JSON.stringify({ ...current, trackers: [t], trackerList: false }));
+  }, trackerUrl);
   await ios.goto(site.url);
   await ios.waitForFunction(() => window.__phoneTorrent?.client);
   const iosSaver = await waitSaver(ios);
@@ -809,12 +815,6 @@ try {
     return Boolean(view.record && view.record.cloud && view.record.cloud.id !== undefined);
   });
   assert.ok(cloudPersisted, 'the cloud transfer id is stored with the torrent');
-  // This context's first init script rewrites the settings on every navigation, so re-apply the
-  // cloud block on top of it (init scripts run in order) — otherwise the reload drops the key.
-  await iosCtx.addInitScript((cfg) => {
-    const current = JSON.parse(localStorage.getItem('phone-torrent:settings') || '{}');
-    localStorage.setItem('phone-torrent:settings', JSON.stringify({ ...current, cloud: cfg }));
-  }, { apiKey: 'test-api-key', apiBase: cloudApi.url, viaProxy: false });
   await ios.reload();
   await ios.waitForFunction(() => window.__phoneTorrent?.client);
   const restoredCard = ios.locator('.torrent', { has: ios.locator('.name', { hasText: 'private release.bin' }) }).first();
@@ -826,7 +826,7 @@ try {
       cards: [...document.querySelectorAll('.torrent .name')].map((e) => e.textContent),
       cloudStates: [...document.querySelectorAll('.cloud-state')].map((e) => e.textContent),
       views: [...window.__phoneTorrent.views.values()].map((v) => ({ name: v.torrent.name, cloud: v.cloud, record: v.record && v.record.cloud })),
-      key: Boolean(JSON.parse(localStorage.getItem('phone-torrent:settings') || '{}').cloud?.apiKey),
+      key: Boolean(JSON.parse(localStorage.getItem('phone-torrent:settings') || '{}').cloud?.apiKey), // no key → nothing polls
     }))));
     throw err;
   }
