@@ -333,6 +333,25 @@ try {
   await seeder.setInputFiles('#seed-file-input', files.map((f, i) => ({ name: f.name, mimeType: 'application/octet-stream', buffer: seedBuffers[i] })));
   await seeder.waitForSelector('.torrent.seeding .file', { timeout: 30000 });
   await waitFor(() => seeder.evaluate(() => window.__phoneTorrent.client.torrents[0]?.ready), { label: 'seeder ready' });
+
+  /**
+   * Wait for something that first needs a fresh connection to the seeder, nudging the seeder to
+   * re-announce along the way. Late in a run the seeder can fall out of the tracker's swarm — a
+   * WebKit page under memory pressure loses its socket — and then nobody can find it again until
+   * its next announce. The condition is unchanged; it just stops depending on that cadence.
+   */
+  const waitForFromSeeder = (fn, opts) => {
+    let nudged = 0;
+    return waitFor(async () => {
+      if (Date.now() - nudged > 15000) {
+        nudged = Date.now();
+        await seeder.evaluate(() => {
+          try { window.__phoneTorrent.client.torrents[0]?.discovery?.tracker?.update?.(); } catch { /* page may be gone */ }
+        }).catch(() => {});
+      }
+      return fn();
+    }, opts);
+  };
   const torrentFile = await seeder.evaluate(() => Array.from(window.__phoneTorrent.client.torrents[0].torrentFile));
   assert.equal(await seeder.$eval('.torrent .name', (e) => e.textContent), 'Phone Torrent Test');
   assert.ok(!(await seeder.$eval('.torrent .details', (e) => e.hidden)), 'details open automatically after seeding starts');
@@ -439,7 +458,7 @@ try {
   log('file list rendered:', names.join(', '));
 
   try {
-    await waitFor(() => phone.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 'download to finish', timeout: 180000 });
+    await waitForFromSeeder(() => phone.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 'download to finish', timeout: 180000 });
   } catch (err) {
     const dump = (page) => page.evaluate(() => window.__phoneTorrent.client.torrents.map((t) => ({
       name: t.name, peers: t.numPeers, progress: t.progress, paused: t.paused, ready: t.ready, done: t.done,
@@ -479,7 +498,7 @@ try {
   assert.equal(await phone.evaluate(() => window.__phoneTorrent.client.torrents[0].paused), false);
   assert.ok(!(await phone.$('.torrent.paused')), 'torrent resumed');
   const resumeStart = Date.now();
-  await waitFor(() => phone.evaluate(() => window.__phoneTorrent.client.torrents[0].numPeers > 0), { label: 'peers reacquired after resume', timeout: 120000 });
+  await waitForFromSeeder(() => phone.evaluate(() => window.__phoneTorrent.client.torrents[0].numPeers > 0), { label: 'peers reacquired after resume', timeout: 120000 });
   log(`pause/resume OK (peers reacquired in ${Math.round((Date.now() - resumeStart) / 1000)}s)`);
 
   // Details panel.
@@ -580,11 +599,11 @@ try {
   await waitFor(() => phone.$$('.torrent').then((l) => l.length === 0), { label: 'delete all' });
   await phone.setInputFiles('#torrent-file-input', { name: 'test.torrent', mimeType: 'application/x-bittorrent', buffer: Buffer.from(torrentFile) });
   await phone.waitForSelector('.torrent .file', { timeout: 15000 });
-  await waitFor(() => phone.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 're-download after delete all', timeout: 180000 });
+  await waitForFromSeeder(() => phone.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 're-download after delete all', timeout: 180000 });
   await waitFor(() => phone.evaluate(() => window.__phoneTorrent.views.values().next().value.record?.infoHash), { label: 'record persisted after delete all' });
   await phone.reload();
   await phone.waitForSelector('.torrent .file', { timeout: 15000 });
-  await waitFor(() => phone.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 'restore after delete-all cycle', timeout: 180000 });
+  await waitForFromSeeder(() => phone.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 'restore after delete-all cycle', timeout: 180000 });
   log('delete-all then re-add persists OK');
 
   // Removing deletes it from the list and from the persisted set.
@@ -607,7 +626,7 @@ try {
   await phone.waitForSelector('.torrent .file', { timeout: 15000 });
   assert.ok(dialogs > dialogsBeforeShare, 'shared torrent asked for confirmation before being added');
   assert.equal(await phone.$eval('.torrent .name', (e) => e.textContent), 'Phone Torrent Test');
-  await waitFor(() => phone.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 'shared torrent download', timeout: 180000 });
+  await waitForFromSeeder(() => phone.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 'shared torrent download', timeout: 180000 });
   log('share target OK');
 
   // Opening the app with a magnet in the URL adds it (protocol handler / shared link).
@@ -633,7 +652,7 @@ try {
   await phone.fill('#magnet-input', `magnet:?xt=urn:btih:${mainHash}`);
   await phone.click('#magnet-form button[type="submit"]');
   await phone.waitForSelector('.torrent .file', { timeout: 30000 });
-  await waitFor(() => phone.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 'magnet download', timeout: 180000 });
+  await waitForFromSeeder(() => phone.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 'magnet download', timeout: 180000 });
   await phone.evaluate(() => Promise.race([window.__phoneTorrent.views.values().next().value.persisted, new Promise((r) => setTimeout(r, 5000))]));
   await seederPause(); // no peers available from here on
   await phone.reload();
@@ -780,7 +799,7 @@ try {
   assert.equal(await ios.$eval('#torrent-file-input', (e) => e.getAttribute('accept')), null, 'no accept filter (it would hide .torrent files on iOS)');
   await ios.setInputFiles('#torrent-file-input', { name: 'test.torrent', mimeType: 'application/x-bittorrent', buffer: Buffer.from(torrentFile) });
   await ios.waitForSelector('.torrent .file', { timeout: 15000 });
-  await waitFor(() => ios.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 'iOS download', timeout: 180000 });
+  await waitForFromSeeder(() => ios.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 'iOS download', timeout: 180000 });
   const iosNames = await ios.$$eval('.torrent .file .file-name', (els) => els.map((e) => e.textContent));
   const [iosDownload] = await Promise.all([
     ios.waitForEvent('download', { timeout: 30000 }),
@@ -984,7 +1003,7 @@ try {
   assert.equal(legacyMode, 'blob', 'falls back to in-memory saving without a service worker');
   await legacy.setInputFiles('#torrent-file-input', { name: 'test.torrent', mimeType: 'application/x-bittorrent', buffer: Buffer.from(torrentFile) });
   await legacy.waitForSelector('.torrent .file', { timeout: 15000 });
-  await waitFor(() => legacy.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 'legacy download', timeout: 180000 });
+  await waitForFromSeeder(() => legacy.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 'legacy download', timeout: 180000 });
   const legacyNames = await legacy.$$eval('.torrent .file .file-name', (els) => els.map((e) => e.textContent));
   const [legacyDownload] = await Promise.all([
     legacy.waitForEvent('download', { timeout: 30000 }),
