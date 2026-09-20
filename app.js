@@ -1347,7 +1347,15 @@ function attachTorrent(torrent, { record, seeding }) {
     console.warn('torrent warning:', msg);
     logEvent(view, `warning: ${msg}`);
   });
-  torrent.on('wire', (wire, addr) => logEvent(view, `peer connected ${addr || wire.type || ''}`.trim()));
+  torrent.on('wire', (wire, addr) => {
+    // pause() stops us reaching out, but a handshake already in flight still lands a wire; a paused
+    // torrent must not start transferring again because of it.
+    if (torrent.paused) {
+      wire.destroy();
+      return;
+    }
+    logEvent(view, `peer connected ${addr || wire.type || ''}`.trim());
+  });
   updateEmptyState();
   updateWakeLock();
   return view;
