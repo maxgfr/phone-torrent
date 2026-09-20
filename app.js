@@ -912,7 +912,9 @@ async function startCloudFetch(view) {
       view.cloud = await cloudSubmit(view);
       logEvent(view, `sent to ${cloudCtx(view.cloud).api.label} (transfer ${view.cloud.id})`);
       toast('Sent to the cloud. It downloads there, then you save it from the link.');
-      persistTorrent(view);
+      // The transfer keeps going in the cloud even if this tab closes now, so make its id durable
+      // before anything else: without it the app cannot find the transfer again.
+      await persistTorrent(view);
     }
     renderCloud(view);
     startCloudPoll(view);

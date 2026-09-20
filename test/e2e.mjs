@@ -779,7 +779,14 @@ try {
   await ios.screenshot({ path: path.join(TMP, 'ios-cloud.png'), fullPage: true });
   log('cloud fetch OK: submitted, polled, downloaded through the API link');
 
-  // The transfer survives a reload: the app picks the cloud id back up from storage.
+  // The transfer survives a reload: the app picks the cloud id back up from storage. Wait for the
+  // write to land first — WebKit's IndexedDB is slow enough that a reload can outrun it.
+  const cloudPersisted = await ios.evaluate(async () => {
+    const view = [...window.__phoneTorrent.views.values()].find((v) => v.torrent.name === 'private release.bin');
+    await Promise.race([view.persisted, new Promise((r) => setTimeout(r, 10000))]);
+    return Boolean(view.record && view.record.cloud && view.record.cloud.id !== undefined);
+  });
+  assert.ok(cloudPersisted, 'the cloud transfer id is stored with the torrent');
   // This context's first init script rewrites the settings on every navigation, so re-apply the
   // cloud block on top of it (init scripts run in order) — otherwise the reload drops the key.
   await iosCtx.addInitScript((cfg) => {
@@ -789,7 +796,18 @@ try {
   await ios.reload();
   await ios.waitForFunction(() => window.__phoneTorrent?.client);
   const restoredCard = ios.locator('.torrent', { has: ios.locator('.name', { hasText: 'private release.bin' }) }).first();
-  await waitFor(() => restoredCard.locator('.cloud-state').textContent().then((t) => /Ready on TorBox/.test(t)).catch(() => false), { label: 'cloud transfer restored', timeout: 30000 });
+  try {
+    await waitFor(() => restoredCard.locator('.cloud-state').textContent().then((t) => /Ready on TorBox/.test(t)).catch(() => false), { label: 'cloud transfer restored', timeout: 30000 });
+  } catch (err) {
+    // Say what the app actually restored, so a failure here does not cost another CI round.
+    console.error('restore state:', JSON.stringify(await ios.evaluate(() => ({
+      cards: [...document.querySelectorAll('.torrent .name')].map((e) => e.textContent),
+      cloudStates: [...document.querySelectorAll('.cloud-state')].map((e) => e.textContent),
+      views: [...window.__phoneTorrent.views.values()].map((v) => ({ name: v.torrent.name, cloud: v.cloud, record: v.record && v.record.cloud })),
+      key: Boolean(JSON.parse(localStorage.getItem('phone-torrent:settings') || '{}').cloud?.apiKey),
+    }))));
+    throw err;
+  }
   log('cloud transfer restored after reload');
 
   /* ---------- the same round trip on put.io, whose API looks nothing like TorBox's ---------- */
