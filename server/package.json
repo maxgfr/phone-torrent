@@ -1,0 +1,21 @@
+{
+  "name": "phone-torrent-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A real BitTorrent client with an HTTP API, for the swarms a browser cannot reach.",
+  "type": "module",
+  "main": "app.mjs",
+  "scripts": {
+    "start": "node app.mjs"
+  },
+  "dependencies": {
+    "webtorrent": "^2.8.4"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "_overrides_note": "webtorrent 2.8 hands parse-torrent's hex-string info hash to uint8-util's arr2hex, which from 2.3 accepts only a typed array — a fresh install of the two therefore throws on the first add. 2.2.5 is the last one that works with it.",
+  "overrides": {
+    "uint8-util": "2.2.5"
+  }
+}

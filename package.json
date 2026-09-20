@@ -7,12 +7,18 @@
   "scripts": {
     "start": "node test/serve.mjs",
     "test": "node test/e2e.mjs",
-    "lint": "eslint app.js saver.js sw.js proxy/cloudflare-worker.js test/*.mjs"
+    "lint": "eslint app.js saver.js sw.js proxy/cloudflare-worker.js server/app.mjs cloudflare/worker.js test/*.mjs",
+    "test:server": "node test/server.mjs",
+    "test:all": "npm run test:server && npm test"
   },
   "devDependencies": {
     "bittorrent-tracker": "^11.0.0",
-    "playwright": "^1.63.0",
     "eslint": "^9.39.0",
-    "globals": "^15.0.0"
+    "globals": "^15.0.0",
+    "playwright": "^1.63.0",
+    "webtorrent": "^2.8.5"
+  },
+  "overrides": {
+    "uint8-util": "2.2.5"
   }
 }

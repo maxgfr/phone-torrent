@@ -1,0 +1,24 @@
+# Reach your own machine from anywhere, without a VPN and without opening a port
+# on your router.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.tunnel.yml up -d
+#   docker compose logs cloudflared | grep trycloudflare.com
+#
+# The second command prints the https address the tunnel got. Put that address
+# in the app: Settings → Cloud fetch → service "My own server".
+#
+# Read this before using it: a quick tunnel is a PUBLIC address. Anyone who has
+# it can drive your torrent client, on your connection. AUTH_TOKEN is therefore
+# not optional here — set it in docker-compose.yml first, and enter the same
+# value as the key in the app.
+#
+# The address also changes on every restart. That is the price of needing no
+# account; a named tunnel (a Cloudflare account and a domain you own) gives a
+# fixed one instead.
+services:
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    command: tunnel --no-autoupdate --url http://phone-torrent:8080
+    depends_on:
+      - phone-torrent
+    restart: unless-stopped

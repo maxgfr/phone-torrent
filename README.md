@@ -44,8 +44,9 @@ your phone either file by file or as a single `.zip`.
 - **Private by design.** Nothing is sent to any server other than the trackers and peers that
   BitTorrent itself needs.
 
-- **A cloud library, like a cloud torrent service.** With a key, the **Cloud** tab is a client for
-  your TorBox or put.io account: send a magnet or a `.torrent` straight there (no local torrent at
+- **A cloud library, like a cloud torrent service.** With a key — or with the address of the server
+  in [`server/`](server/), which is the same thing on a machine you own — the **Cloud** tab is a client for
+  your account: send a magnet or a `.torrent` straight there (no local torrent at
   all), watch the transfers, open a transfer's files, **play video and audio in the page**, save a
   file to the device, copy its link, or delete the transfer from the account — storage line included.
 - **Cloud fetch for what a browser cannot reach.** A private tracker, an `http(s)://`‑only tracker or
@@ -54,7 +55,44 @@ your phone either file by file or as a single `.zip`.
   it there, and the phone then saves the finished file straight from the HTTPS link: no peers, no
   memory ceiling, and on iOS it lands in Files like any download.
 
-## Important limitation: peers must speak WebRTC
+## Four ways to use it
+
+| | what you need | private / `http(s)` trackers | best for |
+|---|---|---|---|
+| **1. The page alone** — [maxgfr.github.io/phone-torrent](https://maxgfr.github.io/phone-torrent/) | nothing | no — a browser cannot reach those swarms | torrents with WebRTC peers, seeding from your phone |
+| **2. Your own server** | one `docker compose up -d` on a machine you own | yes — a real client, with TCP, UDP and DHT | everything, and files that stay on your disk |
+| **3. A quick deploy** | one click: Render, Fly, or Cloudflare Containers | yes | a phone, from anywhere, with no machine at home |
+| **4. A cloud service** | a TorBox or put.io key | yes | no machine and no deploy at all |
+
+The same page serves all four: Settings → **Cloud fetch** takes one address (or
+one key) and the **Cloud** tab drives whatever is behind it. Nothing is chosen
+for you: without a key or an address, the app is the page alone.
+
+### 2. Your own server
+
+```sh
+docker compose up -d          # then open http://localhost:8080
+```
+
+One container: a real BitTorrent client, its API, and this app on the same
+origin — so there is no CORS to configure and nothing else to deploy. Set
+`AUTH_TOKEN` before exposing it anywhere, then point the app at it: **Settings
+→ Cloud fetch → My own server**. [`server/README.md`](server/README.md) has the
+API and every setting.
+
+Away from home? `docker compose -f docker-compose.yml -f docker-compose.tunnel.yml up -d`
+puts it behind a Cloudflare quick tunnel and prints an https address — public,
+so `AUTH_TOKEN` stops being optional.
+
+### 3. A quick deploy
+
+| | what it gives you | what it costs |
+|---|---|---|
+| [**Render**](https://render.com/deploy?repo=https://github.com/maxgfr/phone-torrent) | a disk that persists, an HTTPS address, a generated token | a paid plan for the disk |
+| **Fly** (`fly launch && fly deploy`) | its own IP, so peers connect back to you — the closest thing to a seedbox here | a card on file |
+| **Cloudflare** (`cd cloudflare && wrangler deploy`) | the quickest start, no machine anywhere | Workers paid plan, an ephemeral disk and no UDP — [the details](cloudflare/README.md) |
+
+## Important limitation of the page alone: peers must speak WebRTC
 
 A web page cannot open raw TCP or UDP sockets, so the browser can only exchange data with peers
 that support **WebRTC** (other browsers running WebTorrent, WebTorrent Desktop, or "hybrid"
@@ -77,8 +115,8 @@ This is what put.io and TorBox are: a real BitTorrent client running in a data c
 UDP and DHT, it can announce to a private tracker, and it serves the finished file over plain
 HTTPS — which is exactly what a phone browser is good at.
 
-Settings → **Cloud fetch** takes a service (TorBox or put.io), its key, and optionally a base URL
-for a self‑hosted clone. That unlocks two things: the **Cloud** tab, which is a client for the
+Settings → **Cloud fetch** takes a service — TorBox, put.io, or **your own server** — its key, and
+its address. That unlocks two things: the **Cloud** tab, which is a client for the
 account itself (send, watch, stream, save, delete — nothing touches WebTorrent), and, on a torrent
 the browser cannot reach, **Fetch it in the cloud**:
 

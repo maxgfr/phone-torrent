@@ -1,0 +1,10 @@
+# Build the image from this checkout instead of pulling it.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+services:
+  phone-torrent:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    image: phone-torrent:local
+    pull_policy: build

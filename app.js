@@ -712,12 +712,13 @@ function cloudCtx(over = {}) {
  * One call to a cloud API. The key travels in an Authorization header, which makes this a request
  * the API must allow with CORS; when it does not, the user's own proxy relays it instead.
  */
-async function cloudFetch(url, { method = 'GET', body, json = false } = {}) {
+async function cloudFetch(url, { method = 'GET', body, json = false, contentType } = {}) {
   const viaProxy = proxied(url);
   const hasProxy = viaProxy !== url;
   const targets = settings.cloud.viaProxy && hasProxy ? [viaProxy] : hasProxy ? [url, viaProxy] : [url];
   const headers = { Authorization: `Bearer ${settings.cloud.apiKey}` };
   if (json) headers['Content-Type'] = 'application/json';
+  if (contentType) headers['Content-Type'] = contentType;
   let last = null;
   for (const target of targets) {
     try {
@@ -731,6 +732,8 @@ async function cloudFetch(url, { method = 'GET', body, json = false } = {}) {
 }
 
 async function cloudJson(url, opts) {
+  // Every provider's base URL is required; only "my own server" has no default.
+  if (/^\/+api\//.test(url) || url.startsWith('/')) throw new Error('Set the server address in Settings → Cloud fetch.');
   const res = await cloudFetch(url, opts);
   const text = await res.text();
   let json = null;
@@ -819,6 +822,57 @@ const CLOUD_PROVIDERS = {
       return url.toString();
     },
     zipLink: true,
+  },
+
+  // Your own machine, or one you deployed: a real client with real TCP, UDP and
+  // DHT, so the swarms a browser cannot reach are ordinary here. See server/.
+  server: {
+    label: 'My own server',
+    defaultBase: '',
+    keyPlaceholder: 'Server token (AUTH_TOKEN)',
+
+    async check(ctx) {
+      const { who, detail } = await cloudJson(`${ctx.base}/api/account`);
+      return [who, detail].filter(Boolean).join(' · ');
+    },
+
+    async submit(ctx, { bytes, magnet }) {
+      const { transfer } = bytes
+        ? await cloudJson(`${ctx.base}/api/transfers`, { method: 'POST', body: bytes, contentType: 'application/x-bittorrent' })
+        : await cloudJson(`${ctx.base}/api/transfers`, { method: 'POST', body: JSON.stringify({ magnet }), json: true });
+      if (!transfer || !transfer.id) throw new Error('the server did not return a transfer');
+      return transfer.id;
+    },
+
+    async status(ctx, id) {
+      const { transfer } = await cloudJson(`${ctx.base}/api/transfers/${encodeURIComponent(id)}`);
+      if (!transfer) throw new Error('the server no longer knows this transfer');
+      return transfer;
+    },
+
+    async list(ctx) {
+      const { transfers } = await cloudJson(`${ctx.base}/api/transfers`);
+      return transfers || [];
+    },
+
+    async remove(ctx, id) {
+      await cloudJson(`${ctx.base}/api/transfers/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    },
+
+    async account(ctx) {
+      const { who, detail } = await cloudJson(`${ctx.base}/api/account`);
+      return { who: who || 'your server', detail: detail || '' };
+    },
+
+    // A <video> cannot send an Authorization header, so the token rides in the
+    // query string for this one — the same link the phone downloads with.
+    fileLink(ctx, id, file) {
+      if (!file) return '';
+      const url = new URL(`${ctx.base}/api/transfers/${encodeURIComponent(id)}/files/${encodeURIComponent(file.id)}`);
+      if (ctx.key) url.searchParams.set('token', ctx.key);
+      return url.toString();
+    },
+    zipLink: false,
   },
 
   putio: {

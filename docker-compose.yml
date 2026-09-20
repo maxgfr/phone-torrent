@@ -1,0 +1,35 @@
+# The whole thing in one container: a real BitTorrent client, its API, and the
+# app itself on the same origin — so there is no CORS to configure and nothing
+# else to deploy.
+#
+#   docker compose up -d        then open http://localhost:8080
+#
+# This pulls a prebuilt image rather than building one. To build from source
+# instead — which is what you want when you are changing the server — add the
+# build overlay:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+services:
+  phone-torrent:
+    image: ghcr.io/maxgfr/phone-torrent:latest
+    pull_policy: always
+    ports:
+      - "8080:8080"
+      # The BitTorrent port. Forward it on your router and peers can connect to
+      # you as well as the other way round; without it you can still download.
+      - "6881:6881/tcp"
+      - "6881:6881/udp"
+    environment:
+      # Same-origin by default, because this container serves the app too. Add
+      # your GitHub Pages URL here if you use the hosted page against it.
+      ALLOWED_ORIGINS: "*"
+      # Set this the moment the server is reachable from outside your network.
+      # AUTH_TOKEN: "change-me"
+      # Keep seeding once a download finishes: it is how the swarm survives.
+      SEED_AFTER_DONE: "1"
+    volumes:
+      - downloads:/data
+    restart: unless-stopped
+
+volumes:
+  downloads:

@@ -21,6 +21,9 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npx playwright install --with-deps ${{ matrix.browser }}
+      # The server is a different animal from the page: a real BitTorrent client
+      # against a real peer, no browser involved. Cheap, so it runs in both jobs.
+      - run: npm run test:server
       - run: npm test
         env:
           BROWSER: ${{ matrix.browser }}

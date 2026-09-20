@@ -1,0 +1,27 @@
+# One-click deploy: https://render.com/deploy?repo=https://github.com/maxgfr/phone-torrent
+#
+# Render builds the Dockerfile and gives the service an HTTPS hostname, which is
+# what the app needs — a page served over HTTPS cannot call a plain-HTTP server,
+# so a bare IP or a LAN address will not do from the hosted page.
+services:
+  - type: web
+    name: phone-torrent
+    runtime: docker
+    dockerfilePath: ./server/Dockerfile
+    dockerContext: .
+    plan: starter
+    healthCheckPath: /api/health
+    disk:
+      name: downloads
+      mountPath: /data
+      sizeGB: 10
+    envVars:
+      # This service is public the moment it deploys, so it gets a key by
+      # default. Render generates one; read it in the dashboard and paste it
+      # into the app. Without it, anyone who finds the URL can drive your client.
+      - key: AUTH_TOKEN
+        generateValue: true
+      - key: ALLOWED_ORIGINS
+        value: "*"
+      - key: SEED_AFTER_DONE
+        value: "1"

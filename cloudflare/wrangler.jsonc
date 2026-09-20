@@ -1,0 +1,40 @@
+{
+  // Run the server on Cloudflare's network, with no machine of your own.
+  //
+  //   npm install -g wrangler
+  //   cd cloudflare && wrangler deploy
+  //
+  // Read cloudflare/README.md first: Containers need a Workers paid plan, the
+  // disk is ephemeral, and a container with no inbound port reaches fewer peers
+  // than a machine at home or on Fly. It is the quickest remote start, not the
+  // best seedbox.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "phone-torrent",
+  "main": "worker.js",
+  "compatibility_date": "2026-01-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  "containers": [
+    {
+      "class_name": "TorrentContainer",
+      // Built from this repository's Dockerfile; wrangler pushes it for you.
+      "image": "../server/Dockerfile",
+      "image_build_context": "..",
+      "instance_type": "standard-1",
+      "max_instances": 1
+    }
+  ],
+
+  // The container is driven by a Durable Object, which is what keeps it alive
+  // between requests and gives it a stable identity.
+  "durable_objects": {
+    "bindings": [{ "class_name": "TorrentContainer", "name": "TORRENT" }]
+  },
+
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TorrentContainer"] }],
+
+  "vars": {
+    // Set a real one before deploying: wrangler secret put AUTH_TOKEN
+    "ALLOWED_ORIGINS": "*"
+  }
+}
