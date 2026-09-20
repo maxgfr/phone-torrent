@@ -665,7 +665,26 @@ try {
   log('metadata fallback OK');
 
   // No peers for a while → hint with retry; retry re-announces with a refreshed tracker list.
-  await waitFor(() => phone.isVisible('.torrent .nopeers'), { label: 'no-peers hint', timeout: 30000 });
+  try {
+    await waitFor(() => phone.isVisible('.torrent .nopeers'), { label: 'no-peers hint', timeout: 30000 });
+  } catch (err) {
+    // The hint only appears while the torrent has no peer at all: say what the app saw instead.
+    console.error('no-peers state:', JSON.stringify(await phone.evaluate(() => {
+      const view = window.__phoneTorrent.views.values().next().value;
+      const t = view.torrent;
+      return {
+        cards: document.querySelectorAll('.torrent').length,
+        peers: t.numPeers,
+        wires: t.wires.map((w) => ({ type: w.type, peerId: (w.peerId || '').slice(0, 8) })),
+        done: t.done,
+        paused: t.paused,
+        progress: t.progress,
+        sinceStart: Date.now() - view.startedAt,
+        log: view.log.slice(-6),
+      };
+    })));
+    throw err;
+  }
   assert.match(await phone.$eval('.torrent .nopeers-text', (e) => e.textContent), /No peers found on \d+ trackers/);
   await phone.click('.torrent .nopeers-retry-btn');
   await waitFor(() => phone.$$eval('.torrent .log li', (els) => els.some((e) => /re-announced/.test(e.textContent))), { label: 'retry re-announce', timeout: 15000 });
