@@ -44,6 +44,12 @@ your phone either file by file or as a single `.zip`.
 - **Private by design.** Nothing is sent to any server other than the trackers and peers that
   BitTorrent itself needs.
 
+- **Cloud fetch for what a browser cannot reach.** A private tracker, an `http(s)://`‑only tracker or
+  a swarm with no WebRTC peer is out of reach from a web page, by design. With a TorBox API key (any
+  API with the same shape works — the base URL is a setting), the torrent is handed to that account,
+  a real BitTorrent client downloads it there, and the phone then saves the finished file straight
+  from the HTTPS link: no peers, no memory ceiling, and on iOS it lands in Files like any download.
+
 ## Important limitation: peers must speak WebRTC
 
 A web page cannot open raw TCP or UDP sockets, so the browser can only exchange data with peers
@@ -55,12 +61,34 @@ with WebTorrent‑compatible seeders works well; obscure torrents may not.
 You can edit the tracker list in **Settings** (gear icon). The defaults are the public WebTorrent
 trackers, plus a public list fetched automatically.
 
-**Private‑tracker torrents cannot work here.** A `.torrent` with the BEP 27 `private` flag may only
-get peers from its own tracker, which is an `http(s)://` tracker a browser cannot announce to. The
-app adds such a torrent and reads its metadata, but says so at once and never announces its info
-hash to the public trackers (doing so is what gets accounts banned). The same goes for any torrent
-whose trackers are all `http://` or `udp://`: download it with a desktop client, or attach an HTTP
-**web seed** if you have one.
+**Private‑tracker torrents cannot be downloaded peer‑to‑peer here.** A `.torrent` with the BEP 27
+`private` flag may only get peers from its own tracker, which is an `http(s)://` tracker a browser
+cannot announce to. The app adds such a torrent and reads its metadata, but says so at once and
+never announces its info hash to the public trackers (doing so is what gets accounts banned). The
+same goes for any torrent whose trackers are all `http://` or `udp://`.
+
+### Cloud fetch: the way those torrents do work
+
+This is what put.io and TorBox are: a real BitTorrent client running in a data centre. It has TCP,
+UDP and DHT, it can announce to a private tracker, and it serves the finished file over plain
+HTTPS — which is exactly what a phone browser is good at.
+
+Settings → **Cloud fetch** takes an API key (TorBox by default; the base URL is editable, so any
+API with the same shape works). Then any torrent shows **Fetch it in the cloud**:
+
+1. The `.torrent` itself (or the magnet, when metadata has not arrived) is sent to
+   `POST /v1/api/torrents/createtorrent` — the private tracker keeps seeing a normal client, with
+   your passkey, from the cloud account.
+2. The app polls `GET /v1/api/torrents/mylist?id=…` and shows the remote progress on the card.
+3. When it is ready, each file becomes a direct link
+   (`/v1/api/torrents/requestdl?token=…&torrent_id=…&file_id=…&redirect=true`). Tapping it is an
+   ordinary browser download: it streams to the device, so a 900 MB file is fine on an iPhone,
+   where the in‑memory saver would not be.
+
+The key is stored on the device only, and the payload never passes through this app or its proxy.
+If the API refuses browser requests (CORS), the same Settings section can route the API calls —
+and only those — through your own proxy; the worker in `proxy/` forwards `Authorization` solely to
+the hosts listed in its `API_HOSTS` variable.
 
 ### When a torrent is not found
 
@@ -138,8 +166,9 @@ persistence, the delete‑all cycle, removal, the Web Share Target flow, magnet 
 URL, the tracker‑list merge, the network check, metadata from a fallback source with a tampered file
 rejected, the no‑peers retry, an iPhone‑emulated context (unfiltered file picker, a non‑torrent file
 refused, a `.torrent` added from a URL and an unreachable URL reported, a private‑tracker torrent
-explained and kept off the public trackers), and the in‑memory fallback when service workers are
-blocked. CI runs it on Chromium and on WebKit (`BROWSER=webkit npm test`).
+explained and kept off the public trackers, and a full cloud‑fetch round trip against a stand‑in
+API: submit, poll, download the file from the link, and pick the transfer back up after a reload),
+and the in‑memory fallback when service workers are blocked. CI runs it on Chromium and on WebKit (`BROWSER=webkit npm test`).
 
 To try it against the real network, seed something with the app on one device (or with any
 WebTorrent‑compatible client) and open the shared link on your phone; public trackers are not

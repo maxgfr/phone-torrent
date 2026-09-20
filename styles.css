@@ -316,6 +316,12 @@ body {
 .nopeers { margin-top: 10px; padding: 10px 12px; border-radius: 10px; background: var(--bg); border: 1px dashed var(--border); display: grid; gap: 8px; }
 .nopeers .hint { margin: 0; }
 
+/* ---- cloud fetch ---- */
+.cloud { margin-top: 10px; padding: 10px 12px; border-radius: 10px; background: var(--bg); border: 1px solid var(--border); display: grid; gap: 8px; }
+.cloud .hint { margin: 0; }
+.cloud-files { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.cloud-files a { display: block; text-align: left; overflow-wrap: anywhere; text-decoration: none; }
+
 /* ---- network check ---- */
 .netcheck { list-style: none; margin: 0; padding: 8px 10px; background: var(--bg); border-radius: 8px; font-size: 0.8rem; display: grid; gap: 4px; }
 .netcheck li { display: grid; grid-template-columns: 1.2em 1fr; gap: 6px; overflow-wrap: anywhere; }

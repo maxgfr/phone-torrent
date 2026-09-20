@@ -124,9 +124,14 @@
         <button class="btn ghost details-btn" type="button" aria-expanded="false">Details</button>
       </div>
       <ul class="files"></ul>
+      <div class="cloud" hidden>
+        <p class="hint cloud-state"></p>
+        <ul class="cloud-files"></ul>
+      </div>
       <div class="nopeers" hidden>
         <p class="hint nopeers-text"></p>
         <div class="details-actions">
+          <button class="btn small nopeers-cloud-btn" type="button">Fetch it in the cloud</button>
           <button class="btn small nopeers-retry-btn" type="button">Retry with fresh trackers</button>
           <button class="btn small nopeers-webseed-btn" type="button">Add web seed</button>
         </div>
@@ -147,6 +152,7 @@
           <button class="btn small copy-link-btn" type="button">Copy app link</button>
           <button class="btn small webseed-btn" type="button">Add web seed</button>
           <button class="btn small retry-btn" type="button">Retry with fresh trackers</button>
+          <button class="btn small cloud-btn" type="button">Fetch it in the cloud</button>
         </div>
         <ul class="log" hidden></ul>
       </section>
@@ -238,6 +244,28 @@
         <input id="corsproxy-input" type="url" spellcheck="false" placeholder="https://your-worker.workers.dev/?url={url}" />
         <span class="hint">Your own proxy for the fallback sources and remote seeds. A ready-made Cloudflare Worker is in <code>proxy/</code> in the repository.</span>
       </label>
+
+      <div class="field">
+        <span>Cloud fetch (TorBox and compatible APIs)</span>
+        <p class="hint">A browser cannot reach a private tracker, an <code>http(s)://</code>‑only tracker or a
+          swarm without WebRTC peers. With an API key, the torrent is handed to your cloud account — a real
+          BitTorrent client in a data centre — and your phone then downloads the finished file over HTTPS,
+          straight from the link, with no size limit. Your key is stored on this device only.</p>
+        <label class="field">
+          <span>API key</span>
+          <input id="cloud-key" type="password" spellcheck="false" autocomplete="off" placeholder="TorBox API key" />
+        </label>
+        <label class="field">
+          <span>API base URL</span>
+          <input id="cloud-base" type="url" spellcheck="false" placeholder="https://api.torbox.app" />
+        </label>
+        <label class="toggle">
+          <input id="cloud-proxy-toggle" type="checkbox" />
+          <span>Route cloud API calls through my CORS proxy (only if the API refuses browser requests — your key then passes through the proxy)</span>
+        </label>
+        <button id="cloud-test-btn" class="btn small" type="button">Test the key</button>
+        <span class="hint" id="cloud-info"></span>
+      </div>
 
       <label class="field">
         <span>Give up on peers after (seconds)</span>

@@ -11,6 +11,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import http from 'node:http';
 import { chromium, webkit, devices } from 'playwright';
 import { Server as TrackerServer } from 'bittorrent-tracker';
 import { startServer } from './serve.mjs';
@@ -85,6 +86,82 @@ async function waitFor(fn, { timeout = 60000, interval = 250, label = 'condition
   }
 }
 
+/* A stand-in for the TorBox API: same paths, same wire format, on localhost. It proves the client
+ * side of cloud fetch end to end (submit → poll → link → the phone downloads the bytes). */
+function startCloudApi() {
+  // payload is filled in once the test knows the bytes the "cloud" is holding.
+  const state = { calls: [], polls: 0, key: 'test-api-key', payload: Buffer.alloc(0) };
+  const json = (res, body, status = 200) => {
+    res.writeHead(status, {
+      'Content-Type': 'application/json',
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Headers': 'Authorization, Content-Type',
+      'Cache-Control': 'no-store',
+    }).end(JSON.stringify(body));
+  };
+  const server = http.createServer(async (req, res) => {
+    const url = new URL(req.url, 'http://cloud.test');
+    state.calls.push(`${req.method} ${url.pathname}`);
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204, {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, HEAD, POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'Authorization, Content-Type',
+      }).end();
+      return;
+    }
+    const bearer = (req.headers.authorization || '').replace(/^Bearer /, '');
+    const needsKey = url.pathname !== '/v1/api/torrents/requestdl';
+    if (needsKey && bearer !== state.key) return json(res, { success: false, detail: 'bad api key' }, 401);
+
+    if (url.pathname === '/v1/api/user/me') return json(res, { success: true, data: { email: 'phone@example.com' } });
+
+    if (url.pathname === '/v1/api/torrents/createtorrent') {
+      const body = await new Promise((resolve) => {
+        const chunks = [];
+        req.on('data', (c) => chunks.push(c));
+        req.on('end', () => resolve(Buffer.concat(chunks)));
+      });
+      state.submitted = body;
+      return json(res, { success: true, data: { torrent_id: 77, hash: 'deadbeef', auth_id: 'x' } });
+    }
+
+    if (url.pathname === '/v1/api/torrents/mylist') {
+      state.polls++;
+      // First poll still downloading, then present — as a real transfer behaves.
+      const ready = state.polls > 1;
+      return json(res, {
+        success: true,
+        data: {
+          id: Number(url.searchParams.get('id')),
+          name: 'private release.bin',
+          size: state.payload.length,
+          progress: ready ? 1 : 0.5,
+          download_state: ready ? 'completed' : 'downloading',
+          download_present: ready,
+          download_finished: ready,
+          files: ready ? [{ id: 9, short_name: 'private release.bin', size: state.payload.length }] : [],
+        },
+      });
+    }
+
+    if (url.pathname === '/v1/api/torrents/requestdl') {
+      if (url.searchParams.get('token') !== state.key) return json(res, { success: false, detail: 'bad token' }, 401);
+      state.dl = { torrentId: url.searchParams.get('torrent_id'), fileId: url.searchParams.get('file_id') };
+      res.writeHead(200, {
+        'Content-Type': 'application/octet-stream',
+        'Content-Disposition': 'attachment; filename="private release.bin"',
+        'Content-Length': state.payload.length,
+      }).end(state.payload);
+      return;
+    }
+    json(res, { success: false, detail: 'not found' }, 404);
+  });
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () => resolve({ server, state, url: `http://127.0.0.1:${server.address().port}` }));
+  });
+}
+
 const tracker = new TrackerServer({ udp: false, http: false, ws: true, stats: false });
 await new Promise((resolve) => tracker.listen(0, '127.0.0.1', resolve));
 const trackerUrl = `ws://127.0.0.1:${tracker.ws.address().port}`;
@@ -92,6 +169,9 @@ log('tracker at', trackerUrl);
 
 const site = await startServer(0);
 log('site at', site.url);
+
+const cloudApi = await startCloudApi();
+log('cloud API stub at', cloudApi.url);
 
 // BROWSER=webkit runs the same suite on Safari's engine (what every browser on iOS uses).
 const BROWSER = process.env.BROWSER || 'chromium';
@@ -589,7 +669,8 @@ try {
 
   // A private-tracker .torrent parses and is listed, but says up front that no browser can reach it,
   // and its info hash must never be announced to the public trackers (BEP 27).
-  await ios.setInputFiles('#torrent-file-input', { name: 'private.torrent', mimeType: 'application/x-bittorrent', buffer: privateTorrent(rnd(40000, 23)) });
+  const privatePayload = rnd(40000, 23);
+  await ios.setInputFiles('#torrent-file-input', { name: 'private.torrent', mimeType: 'application/x-bittorrent', buffer: privateTorrent(privatePayload) });
   await waitFor(() => ios.$$eval('.torrent .name', (els) => els.some((e) => e.textContent === 'private release.bin')), { label: 'private torrent listed', timeout: 15000 });
   const privateHint = await ios.$$eval('.torrent', (els) => {
     const el = els.find((t) => t.querySelector('.name').textContent === 'private release.bin');
@@ -601,6 +682,52 @@ try {
   const privateAnnounce = await ios.evaluate(() => window.__phoneTorrent.client.torrents.find((t) => t.name === 'private release.bin').announce);
   assert.deepEqual(privateAnnounce, ['https://private.example/announce/passkey'], 'a private torrent is announced to its own tracker only');
   log('private torrent: listed, explained, not leaked to public trackers');
+
+  /* ---------- cloud fetch: what a browser cannot reach, a remote client can ---------- */
+  // The private torrent above is the case for it: no WebRTC peer will ever appear.
+  cloudApi.state.payload = privatePayload;
+  await ios.click('#settings-btn');
+  await ios.waitForSelector('#settings-dialog[open]');
+  await ios.fill('#cloud-key', 'test-api-key');
+  await ios.fill('#cloud-base', cloudApi.url);
+  await ios.click('#cloud-test-btn');
+  await waitFor(() => ios.$eval('#cloud-info', (e) => /Key accepted \(phone@example\.com\)/.test(e.textContent)), { label: 'cloud key accepted', timeout: 15000 });
+  await ios.click('#settings-dialog button[type="submit"]');
+  await ios.waitForSelector('#settings-dialog[open]', { state: 'detached', timeout: 5000 }).catch(() => {});
+  log('cloud key validated and saved');
+
+  const privateCard = ios.locator('.torrent', { has: ios.locator('.name', { hasText: 'private release.bin' }) }).first();
+  await privateCard.locator('.nopeers-cloud-btn').click();
+  await waitFor(() => privateCard.locator('.cloud-state').textContent().then((t) => /Cloud: downloading 50%/.test(t)).catch(() => false), { label: 'cloud transfer progress', timeout: 20000 });
+  await waitFor(() => privateCard.locator('.cloud-state').textContent().then((t) => /Ready in the cloud/.test(t)).catch(() => false), { label: 'cloud transfer ready', timeout: 30000 });
+  assert.ok(cloudApi.state.submitted && cloudApi.state.submitted.includes('private release.bin'), 'the .torrent itself was uploaded to the API');
+  const cloudLinkText = await privateCard.locator('.cloud-files a').first().textContent();
+  assert.match(cloudLinkText, /^private release\.bin · /);
+
+  // The phone downloads the finished file straight from the API link: no peers, no memory ceiling.
+  const [cloudDownload] = await Promise.all([
+    ios.waitForEvent('download', { timeout: 30000 }),
+    privateCard.locator('.cloud-files a').first().click(),
+  ]);
+  const cloudPath = path.join(TMP, 'cloud.bin');
+  await cloudDownload.saveAs(cloudPath);
+  assert.equal(sha(readFileSync(cloudPath)), sha(privatePayload), 'the file saved from the cloud matches the payload');
+  assert.deepEqual(cloudApi.state.dl, { torrentId: '77', fileId: '9' }, 'the link asked for the right torrent and file');
+  await ios.screenshot({ path: path.join(TMP, 'ios-cloud.png'), fullPage: true });
+  log('cloud fetch OK: submitted, polled, downloaded through the API link');
+
+  // The transfer survives a reload: the app picks the cloud id back up from storage.
+  // This context's first init script rewrites the settings on every navigation, so re-apply the
+  // cloud block on top of it (init scripts run in order) — otherwise the reload drops the key.
+  await iosCtx.addInitScript((cfg) => {
+    const current = JSON.parse(localStorage.getItem('phone-torrent:settings') || '{}');
+    localStorage.setItem('phone-torrent:settings', JSON.stringify({ ...current, cloud: cfg }));
+  }, { apiKey: 'test-api-key', apiBase: cloudApi.url, viaProxy: false });
+  await ios.reload();
+  await ios.waitForFunction(() => window.__phoneTorrent?.client);
+  const restoredCard = ios.locator('.torrent', { has: ios.locator('.name', { hasText: 'private release.bin' }) }).first();
+  await waitFor(() => restoredCard.locator('.cloud-state').textContent().then((t) => /Ready in the cloud/.test(t)).catch(() => false), { label: 'cloud transfer restored', timeout: 30000 });
+  log('cloud transfer restored after reload');
   await iosCtx.close();
 
   /* ---------- fallback: browser without service workers ---------- */
@@ -633,6 +760,7 @@ try {
 } finally {
   await browser.close();
   site.server.close();
+  cloudApi.server.close();
   tracker.close();
   process.exit(failed ? 1 : 0);
 }
