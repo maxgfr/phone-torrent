@@ -601,24 +601,32 @@ try {
   log('magnet torrent restore + retry OK');
 
   /* ---------- fallback "resolvers": metadata from a torrent cache, retry with fresh trackers ---------- */
-  // A torrent nobody seeds: created on the seeder, then dropped there, so only its .torrent bytes exist.
+  // A torrent nobody seeds: created in a context of its own, which is then closed. Removing the
+  // torrent is not enough — the tracker keeps handing out a peer that is still connected to it, and
+  // the phone then finds one, which is exactly what the no-peers hint below must not see. Closing
+  // the context drops the WebSocket, and the tracker forgets the peer there and then.
+  // Its bytes are random per run, so two CI jobs never share this info hash either.
   log('creating orphan torrent');
-  const orphan = await seeder.evaluate(async () => {
+  const orphanCtx = await browser.newContext();
+  const orphanPage = await orphanCtx.newPage();
+  orphanPage.on('pageerror', (e) => console.error('orphan page error:', e));
+  await orphanPage.addInitScript((t) => localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], trackerList: false })), trackerUrl);
+  await orphanPage.goto(site.url);
+  await orphanPage.waitForFunction(() => window.__phoneTorrent?.client);
+  const orphan = await orphanPage.evaluate(async (bytes) => {
     const timeout = (ms, what) => new Promise((_, rej) => setTimeout(() => rej(new Error(`timed out: ${what}`)), ms));
-    const f = new File([new Uint8Array(200 * 1024).fill(7)], 'orphan.bin');
+    const f = new File([new Uint8Array(bytes)], 'orphan.bin');
     // Use the app's own seeding path so it picks the same piece store the app would (OPFS or memory).
     const t = await window.__phoneTorrent.seedFiles([f], { name: 'Fallback Test' });
     await Promise.race([
       new Promise((resolve) => (t.ready ? resolve() : t.once('ready', resolve))),
       timeout(20000, 'seed orphan'),
     ]);
-    const out = { infoHash: t.infoHash, torrentFile: Array.from(t.torrentFile) };
-    await Promise.race([
-      new Promise((resolve) => window.__phoneTorrent.client.remove(t, { destroyStore: true }, resolve)),
-      timeout(10000, 'remove orphan'),
-    ]);
-    return out;
-  });
+    return { infoHash: t.infoHash, torrentFile: Array.from(t.torrentFile) };
+  }, Array.from(rnd(200 * 1024, Math.floor(Math.random() * 1e9) + 1)));
+  await orphanCtx.close();
+  await waitFor(() => !tracker.torrents[orphan.infoHash] || tracker.torrents[orphan.infoHash].complete + tracker.torrents[orphan.infoHash].incomplete === 0,
+    { label: 'tracker to forget the orphan seeder', timeout: 15000 });
   log('orphan torrent created');
   writeFileSync(path.join(TMP, `${orphan.infoHash}.torrent`), Buffer.from(orphan.torrentFile));
 
