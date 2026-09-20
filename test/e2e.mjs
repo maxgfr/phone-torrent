@@ -303,10 +303,13 @@ log('browser:', BROWSER);
 let failed = false;
 try {
   /* ---------- seeder ---------- */
+  // Every context here talks to another context on loopback, so WebRTC needs no STUN: the default
+  // servers only add a round trip and a reflexive candidate that leads nowhere, and under WebKit
+  // that was enough to make a handshake miss its window now and then.
   const seederCtx = await browser.newContext();
   const seeder = await seederCtx.newPage();
   seeder.on('pageerror', (e) => console.error('seeder page error:', e));
-  await seeder.addInitScript((t) => localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t] })), trackerUrl);
+  await seeder.addInitScript((t) => localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], rtcConfig: { iceServers: [] } })), trackerUrl);
   await seeder.goto(site.url);
   await seeder.waitForFunction(() => window.__phoneTorrent?.client);
 
@@ -374,7 +377,7 @@ try {
   writeFileSync(path.join(TMP, 'trackers.txt'), `udp://tracker.example.org:1337/announce\n\nhttp://ignored.example/announce\n${trackerUrl}\nwss://also-dead.example\n`);
   const listUrl = `${site.url}test/.tmp/trackers.txt`;
   await phone.addInitScript(({ listUrl, metaUrl }) => localStorage.setItem('phone-torrent:settings', JSON.stringify({
-    trackers: ['ws://127.0.0.1:2/dead'], trackerList: true, trackerListUrl: listUrl,
+    trackers: ['ws://127.0.0.1:2/dead'], trackerList: true, trackerListUrl: listUrl, rtcConfig: { iceServers: [] },
     metadataSources: ['https://127.0.0.1:1/never/{INFOHASH}.torrent', metaUrl], fallbackDelay: 5,
     dohResolver: `${new URL(listUrl).origin}/__doh`,
   })), { listUrl, metaUrl: `${site.url}test/.tmp/{infohash}.torrent` });
@@ -664,7 +667,7 @@ try {
   const orphanCtx = await browser.newContext();
   const orphanPage = await orphanCtx.newPage();
   orphanPage.on('pageerror', (e) => console.error('orphan page error:', e));
-  await orphanPage.addInitScript((t) => localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], trackerList: false })), trackerUrl);
+  await orphanPage.addInitScript((t) => localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], trackerList: false, rtcConfig: { iceServers: [] } })), trackerUrl);
   await orphanPage.goto(site.url);
   await orphanPage.waitForFunction(() => window.__phoneTorrent?.client);
   const orphan = await orphanPage.evaluate(async (bytes) => {
@@ -765,7 +768,7 @@ try {
   await ios.addInitScript((t) => {
     let current = {};
     try { current = JSON.parse(localStorage.getItem('phone-torrent:settings') || '{}'); } catch { /* first load */ }
-    localStorage.setItem('phone-torrent:settings', JSON.stringify({ ...current, trackers: [t], trackerList: false }));
+    localStorage.setItem('phone-torrent:settings', JSON.stringify({ ...current, trackers: [t], trackerList: false, rtcConfig: { iceServers: [] } }));
   }, trackerUrl);
   await ios.goto(site.url);
   await ios.waitForFunction(() => window.__phoneTorrent?.client);
@@ -974,7 +977,7 @@ try {
   const legacyCtx = await browser.newContext({ acceptDownloads: true, serviceWorkers: 'block' });
   const legacy = await legacyCtx.newPage();
   legacy.on('pageerror', (e) => console.error('legacy page error:', e));
-  await legacy.addInitScript((t) => localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t] })), trackerUrl);
+  await legacy.addInitScript((t) => localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], rtcConfig: { iceServers: [] } })), trackerUrl);
   await legacy.goto(site.url);
   await legacy.waitForFunction(() => window.__phoneTorrent?.client);
   const legacyMode = (await waitSaver(legacy)).mode;
