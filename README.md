@@ -44,6 +44,10 @@ your phone either file by file or as a single `.zip`.
 - **Private by design.** Nothing is sent to any server other than the trackers and peers that
   BitTorrent itself needs.
 
+- **A cloud library, like a cloud torrent service.** With a key, the **Cloud** tab is a client for
+  your TorBox or put.io account: send a magnet or a `.torrent` straight there (no local torrent at
+  all), watch the transfers, open a transfer's files, **play video and audio in the page**, save a
+  file to the device, copy its link, or delete the transfer from the account — storage line included.
 - **Cloud fetch for what a browser cannot reach.** A private tracker, an `http(s)://`‑only tracker or
   a swarm with no WebRTC peer is out of reach from a web page, by design. With a **TorBox** API key or
   a **put.io** OAuth token, the torrent is handed to that account, a real BitTorrent client downloads
@@ -74,7 +78,9 @@ UDP and DHT, it can announce to a private tracker, and it serves the finished fi
 HTTPS — which is exactly what a phone browser is good at.
 
 Settings → **Cloud fetch** takes a service (TorBox or put.io), its key, and optionally a base URL
-for a self‑hosted clone. Then any torrent shows **Fetch it in the cloud**:
+for a self‑hosted clone. That unlocks two things: the **Cloud** tab, which is a client for the
+account itself (send, watch, stream, save, delete — nothing touches WebTorrent), and, on a torrent
+the browser cannot reach, **Fetch it in the cloud**:
 
 1. The `.torrent` itself (or the magnet, when metadata has not arrived) is sent to the account —
    `POST /v1/api/torrents/createtorrent` on TorBox, `POST /v2/files/upload` (or
@@ -87,8 +93,10 @@ for a self‑hosted clone. Then any torrent shows **Fetch it in the cloud**:
    Tapping it is an ordinary browser download: it streams to the device, so a 900 MB file is fine on
    an iPhone, where the in‑memory saver would not be.
 
-Each transfer remembers which service it was started on, so switching the setting does not break
-the links of an earlier one. The key is stored on the device only, and the payload never passes
+The library polls while a transfer is still running and leaves the API alone once nothing is.
+Playback is the plain `<video>`/`<audio>` element pointed at the same direct link, so seeking is
+whatever the service's CDN supports. Each transfer remembers which service it was started on, so
+switching the setting does not break the links of an earlier one. The key is stored on the device only, and the payload never passes
 through this app or its proxy. If an API refuses browser requests (CORS), the call is retried
 through your own proxy automatically — and it can be forced in Settings; the worker in `proxy/`
 forwards `Authorization` solely to the hosts listed in its `API_HOSTS` variable.
@@ -171,8 +179,10 @@ rejected, the no‑peers retry, an iPhone‑emulated context (unfiltered file pi
 refused, a `.torrent` added from a URL and an unreachable URL reported, a private‑tracker torrent
 explained and kept off the public trackers, and full cloud‑fetch round trips against stand‑in APIs
 for both services: submit, poll, download the file from the link byte‑for‑byte, pick the transfer
-back up after a reload, and keep each transfer on the service it started on), and the in‑memory
-fallback when service workers are blocked. CI runs it on Chromium and on WebKit (`BROWSER=webkit npm test`).
+back up after a reload, keep each transfer on the service it started on, and drive the cloud library
+end to end: the account line, the transfer list, a file's direct link downloaded byte‑for‑byte, a
+magnet sent to the account with nothing added locally, and a delete that cancels the transfer and
+drops its file), and the in‑memory fallback when service workers are blocked. CI runs it on Chromium and on WebKit (`BROWSER=webkit npm test`).
 
 To try it against the real network, seed something with the app on one device (or with any
 WebTorrent‑compatible client) and open the shared link on your phone; public trackers are not

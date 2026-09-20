@@ -62,6 +62,18 @@ const els = {
   netcheckBtn: $('#netcheck-btn'),
   netcheckResults: $('#netcheck-results'),
   corsProxyInput: $('#corsproxy-input'),
+  cloudTab: $('.tab[data-tab="cloud"]'),
+  cloudForm: $('#cloud-form'),
+  cloudInput: $('#cloud-input'),
+  cloudFileInput: $('#cloud-file-input'),
+  cloudAccount: $('#cloud-account'),
+  cloudError: $('#cloud-error'),
+  cloudRefreshBtn: $('#cloud-refresh-btn'),
+  cloudLibrary: $('#cloud-library'),
+  cloudList: $('#cloud-list'),
+  cloudEmpty: $('#cloud-empty'),
+  cloudItemTemplate: $('#cloud-item-template'),
+  cloudFileTemplate: $('#cloud-file-template'),
   cloudProviderSelect: $('#cloud-provider'),
   cloudKeyInput: $('#cloud-key'),
   cloudBaseInput: $('#cloud-base'),
@@ -700,19 +712,16 @@ function cloudCtx(over = {}) {
  * One call to a cloud API. The key travels in an Authorization header, which makes this a request
  * the API must allow with CORS; when it does not, the user's own proxy relays it instead.
  */
-async function cloudFetch(url, { method = 'GET', body } = {}) {
+async function cloudFetch(url, { method = 'GET', body, json = false } = {}) {
   const viaProxy = proxied(url);
   const hasProxy = viaProxy !== url;
   const targets = settings.cloud.viaProxy && hasProxy ? [viaProxy] : hasProxy ? [url, viaProxy] : [url];
+  const headers = { Authorization: `Bearer ${settings.cloud.apiKey}` };
+  if (json) headers['Content-Type'] = 'application/json';
   let last = null;
   for (const target of targets) {
     try {
-      return await fetch(target, {
-        method,
-        body,
-        headers: { Authorization: `Bearer ${settings.cloud.apiKey}` },
-        cache: 'no-store',
-      });
+      return await fetch(target, { method, body, headers, cache: 'no-store' });
     } catch {
       // A network-level rejection is indistinguishable from CORS in script; in practice it is CORS.
       last = target === url ? 'the browser could not reach the API (CORS or network)' : 'the proxy did not answer';
@@ -755,22 +764,48 @@ const CLOUD_PROVIDERS = {
       return id;
     },
 
-    async status(ctx, id) {
-      const { data } = await cloudJson(`${ctx.base}/v1/api/torrents/mylist?id=${encodeURIComponent(id)}&bypass_cache=true`);
-      const raw = Array.isArray(data) ? data[0] : data;
-      if (!raw) throw new Error('the cloud no longer knows this transfer');
+    normalize(raw) {
       const ready = Boolean(pick(raw, 'download_present', 'downloadPresent')) || Boolean(pick(raw, 'download_finished', 'downloadFinished'));
       return {
         state: String(pick(raw, 'download_state', 'downloadState') || 'unknown'),
         progress: Number(pick(raw, 'progress') || 0),
         ready,
         name: pick(raw, 'name') || '',
+        size: Number(pick(raw, 'size') || 0),
         files: (Array.isArray(raw.files) ? raw.files : []).map((f) => ({
           id: pick(f, 'id'),
           name: String(pick(f, 'short_name', 'shortName', 'name') || 'file'),
           size: Number(pick(f, 'size') || 0),
         })),
       };
+    },
+
+    async status(ctx, id) {
+      const { data } = await cloudJson(`${ctx.base}/v1/api/torrents/mylist?id=${encodeURIComponent(id)}&bypass_cache=true`);
+      const raw = Array.isArray(data) ? data[0] : data;
+      if (!raw) throw new Error('the cloud no longer knows this transfer');
+      return this.normalize(raw);
+    },
+
+    async list(ctx) {
+      const { data } = await cloudJson(`${ctx.base}/v1/api/torrents/mylist?bypass_cache=true`);
+      const rows = Array.isArray(data) ? data : (data ? [data] : []);
+      return rows.map((raw) => ({ id: pick(raw, 'id'), ...this.normalize(raw) }));
+    },
+
+    async remove(ctx, id) {
+      await cloudJson(`${ctx.base}/v1/api/torrents/controltorrent`, {
+        method: 'POST',
+        body: JSON.stringify({ torrent_id: Number(id), operation: 'delete' }),
+        json: true,
+      });
+    },
+
+    async account(ctx) {
+      const { data } = await cloudJson(`${ctx.base}/v1/api/user/me?settings=false`);
+      const who = pick(data || {}, 'email', 'customer', 'id');
+      const plan = pick(data || {}, 'plan');
+      return { who: who ? String(who) : '', detail: plan !== undefined ? `plan ${plan}` : '' };
     },
 
     // A permalink: the browser follows it by itself, so no CORS and no API call to render the list.
@@ -841,6 +876,41 @@ const CLOUD_PROVIDERS = {
       return out;
     },
 
+    async list(ctx) {
+      const { transfers } = await cloudJson(`${ctx.base}/v2/transfers/list`);
+      return (transfers || []).map((t) => {
+        const state = String(t.status || 'unknown').toLowerCase();
+        return {
+          id: t.id,
+          fileId: t.file_id,
+          state,
+          progress: Number(t.percent_done || 0) / 100,
+          ready: state === 'completed' || state === 'seeding',
+          name: t.name || '',
+          size: Number(t.size || 0),
+          files: [],
+        };
+      });
+    },
+
+    async remove(ctx, id, item) {
+      await cloudJson(`${ctx.base}/v2/transfers/cancel`, { method: 'POST', body: new URLSearchParams({ transfer_ids: String(id) }) });
+      // Cancelling only drops the transfer; the file it produced is what takes up the account's space.
+      const fileId = item && (item.fileId !== undefined && item.fileId !== null ? item.fileId : (item.files && item.files[0] && item.files[0].id));
+      if (fileId !== undefined && fileId !== null) {
+        await cloudJson(`${ctx.base}/v2/files/delete`, { method: 'POST', body: new URLSearchParams({ file_ids: String(fileId) }) });
+      }
+    },
+
+    async account(ctx) {
+      const { info } = await cloudJson(`${ctx.base}/v2/account/info`);
+      const disk = (info && info.disk) || {};
+      return {
+        who: (info && (info.username || info.mail)) || '',
+        detail: disk.size ? `${formatBytes(disk.used || 0)} of ${formatBytes(disk.size)} used` : '',
+      };
+    },
+
     fileLink(ctx, id, file) {
       if (!file) return '';
       return `${ctx.base}/v2/files/${encodeURIComponent(file.id)}/download?oauth_token=${encodeURIComponent(ctx.key)}`;
@@ -848,6 +918,152 @@ const CLOUD_PROVIDERS = {
     zipLink: false,
   },
 };
+
+/* ---------- the cloud library: everything the account holds, like a cloud torrent service ---------- */
+
+const PLAYABLE = /\.(mp4|m4v|webm|ogv|mov|mkv|mp3|m4a|aac|ogg|opus|flac|wav)$/i;
+let cloudItems = [];
+let cloudPollTimer = null;
+
+/** Send a magnet, an info hash or a .torrent straight to the account, with no local torrent at all. */
+async function cloudSend({ bytes, name, magnet }) {
+  const ctx = cloudCtx();
+  const id = await ctx.api.submit(ctx, { bytes, name, magnet });
+  toast(`Sent to ${ctx.api.label}. It downloads there; the library below shows the progress.`);
+  await refreshCloudLibrary();
+  return id;
+}
+
+async function refreshCloudLibrary({ quiet = false } = {}) {
+  if (!cloudReady()) {
+    renderCloudLibrary();
+    return;
+  }
+  const ctx = cloudCtx();
+  try {
+    cloudItems = await ctx.api.list(ctx);
+    els.cloudError.hidden = true;
+  } catch (err) {
+    els.cloudError.hidden = false;
+    els.cloudError.textContent = `${ctx.api.label}: ${err.message}`;
+    if (!quiet) toast(`Could not read the cloud library: ${err.message}`, { error: true, timeout: 9000 });
+  }
+  renderCloudLibrary();
+  scheduleCloudPoll();
+}
+
+/** Poll while something is still downloading up there, and leave it alone once nothing is. */
+function scheduleCloudPoll() {
+  clearTimeout(cloudPollTimer);
+  if (!cloudReady() || !cloudItems.some((i) => !i.ready)) return;
+  cloudPollTimer = setTimeout(() => refreshCloudLibrary({ quiet: true }), CLOUD_POLL_MS);
+}
+
+async function cloudAccountLine() {
+  if (!cloudReady()) {
+    els.cloudAccount.textContent = 'No API key yet: add one in Settings → Cloud fetch.';
+    return;
+  }
+  const ctx = cloudCtx();
+  try {
+    const { who, detail } = await ctx.api.account(ctx);
+    els.cloudAccount.textContent = [`${ctx.api.label}${who ? ` · ${who}` : ''}`, detail].filter(Boolean).join(' · ');
+  } catch (err) {
+    els.cloudAccount.textContent = `${ctx.api.label}: ${err.message}`;
+  }
+}
+
+async function cloudExpand(item, el) {
+  const filesEl = $('.cloud-item-files', el);
+  if (!filesEl.hidden) {
+    filesEl.hidden = true;
+    return;
+  }
+  filesEl.hidden = false;
+  if (item.files.length) return renderCloudFiles(item, filesEl);
+  filesEl.textContent = 'Loading…';
+  const ctx = cloudCtx();
+  try {
+    const status = await ctx.api.status(ctx, item.id);
+    item.files = status.files;
+    renderCloudFiles(item, filesEl);
+  } catch (err) {
+    filesEl.textContent = `Could not list the files: ${err.message}`;
+  }
+}
+
+function renderCloudFiles(item, filesEl) {
+  const ctx = cloudCtx();
+  filesEl.textContent = '';
+  if (!item.files.length) {
+    filesEl.textContent = item.ready ? 'No files in this transfer.' : 'Files appear once the download finishes.';
+    return;
+  }
+  for (const file of item.files) {
+    const row = els.cloudFileTemplate.content.firstElementChild.cloneNode(true);
+    const href = ctx.api.fileLink(ctx, item.id, file);
+    $('.cloud-file-name', row).textContent = file.name;
+    $('.cloud-file-size', row).textContent = formatBytes(file.size);
+    const save = $('.cloud-save', row);
+    save.href = href;
+    save.setAttribute('download', file.name);
+    const play = $('.cloud-play', row);
+    if (PLAYABLE.test(file.name)) {
+      play.addEventListener('click', () => {
+        const holder = $('.cloud-player', row);
+        holder.hidden = false;
+        holder.textContent = '';
+        const media = document.createElement(/\.(mp3|m4a|aac|ogg|opus|flac|wav)$/i.test(file.name) ? 'audio' : 'video');
+        media.controls = true;
+        media.src = href;
+        media.playsInline = true;
+        holder.appendChild(media);
+        play.hidden = true;
+      });
+    } else {
+      play.hidden = true;
+    }
+    $('.cloud-copy', row).addEventListener('click', async () => {
+      toast((await copyText(href)) ? 'Link copied. It works for a few hours.' : 'Could not copy.');
+    });
+    filesEl.appendChild(row);
+  }
+}
+
+async function cloudRemoveItem(item) {
+  const ctx = cloudCtx();
+  if (!confirm(`Delete "${item.name || item.id}" from your ${ctx.api.label} account?\n\nFiles you already saved to this device are not affected.`)) return;
+  try {
+    await ctx.api.remove(ctx, item.id, item);
+    cloudItems = cloudItems.filter((i) => i.id !== item.id);
+    renderCloudLibrary();
+    toast('Deleted from the cloud.');
+  } catch (err) {
+    toast(`Could not delete it: ${err.message}`, { error: true, timeout: 9000 });
+  }
+}
+
+function renderCloudLibrary() {
+  els.cloudList.textContent = '';
+  els.cloudEmpty.hidden = Boolean(cloudItems.length);
+  // Without a key there is no account to show; the Cloud tab is where you learn about it.
+  els.cloudLibrary.hidden = !cloudReady();
+  if (!cloudReady()) return;
+  els.cloudEmpty.textContent = 'Nothing in your cloud account yet. Send a magnet or a .torrent above.';
+  for (const item of cloudItems) {
+    const el = els.cloudItemTemplate.content.firstElementChild.cloneNode(true);
+    const pct = Math.min(100, Math.round((item.progress || 0) * 100));
+    $('.cloud-item-name', el).textContent = item.name || `Transfer ${item.id}`;
+    $('.cloud-item-meta', el).textContent = item.ready
+      ? `${formatBytes(item.size)} · ready`
+      : `${formatBytes(item.size)} · ${item.state}${pct ? ` ${pct}%` : ''}`;
+    $('.cloud-item-bar', el).style.width = `${pct}%`;
+    el.classList.toggle('ready', Boolean(item.ready));
+    $('.cloud-item-files-btn', el).addEventListener('click', () => cloudExpand(item, el));
+    $('.cloud-item-delete', el).addEventListener('click', () => cloudRemoveItem(item));
+    els.cloudList.appendChild(el);
+  }
+}
 
 async function cloudSubmit(view) {
   const { torrent } = view;
@@ -912,6 +1128,7 @@ async function startCloudFetch(view) {
       view.cloud = await cloudSubmit(view);
       logEvent(view, `sent to ${cloudCtx(view.cloud).api.label} (transfer ${view.cloud.id})`);
       toast('Sent to the cloud. It downloads there, then you save it from the link.');
+      refreshCloudLibrary({ quiet: true });
       // The transfer keeps going in the cloud even if this tab closes now, so make its id durable
       // before anything else: without it the app cannot find the transfer again.
       await persistTorrent(view);
@@ -1725,6 +1942,57 @@ els.magnetForm.addEventListener('submit', async (event) => {
   }
 });
 
+els.cloudForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const id = parseTorrentText(els.cloudInput.value);
+  if (!id) {
+    toast('Paste a magnet link, a 40-character info hash, or a .torrent URL.', { error: true });
+    return;
+  }
+  if (!cloudReady()) {
+    toast('Add your cloud API key first: Settings → Cloud fetch.', { error: true });
+    els.settingsBtn.click();
+    return;
+  }
+  const value = els.cloudInput.value;
+  els.cloudInput.value = '';
+  try {
+    // A .torrent URL is fetched here so the cloud gets the file itself, exactly as the picker does.
+    if (/^https?:\/\//i.test(id)) await cloudSend({ bytes: await fetchTorrentUrl(id), name: 'torrent' });
+    else await cloudSend({ magnet: id });
+  } catch (err) {
+    els.cloudInput.value = value;
+    toast(`Could not send it: ${err.message}`, { error: true, timeout: 9000 });
+  }
+});
+
+els.cloudFileInput.addEventListener('change', async () => {
+  const files = Array.from(els.cloudFileInput.files || []);
+  els.cloudFileInput.value = '';
+  if (!cloudReady() && files.length) {
+    toast('Add your cloud API key first: Settings → Cloud fetch.', { error: true });
+    els.settingsBtn.click();
+    return;
+  }
+  for (const f of files) {
+    try {
+      const bytes = new Uint8Array(await f.arrayBuffer());
+      if (!torrentReach(bytes)) {
+        toast(`"${f.name}" is not a .torrent file.`, { error: true });
+        continue;
+      }
+      await cloudSend({ bytes, name: f.name.replace(/\.torrent$/i, '') });
+    } catch (err) {
+      toast(`Could not send ${f.name}: ${err.message}`, { error: true, timeout: 9000 });
+    }
+  }
+});
+
+els.cloudRefreshBtn.addEventListener('click', () => {
+  cloudAccountLine();
+  refreshCloudLibrary();
+});
+
 els.seedFileInput.addEventListener('change', () => {
   const files = Array.from(els.seedFileInput.files || []);
   els.seedFileInput.value = '';
@@ -1752,6 +2020,10 @@ els.seedUrlForm.addEventListener('submit', async (event) => {
 });
 
 $$('.tab').forEach((tab) => tab.addEventListener('click', () => {
+  if (tab.dataset.tab === 'cloud') {
+    cloudAccountLine();
+    refreshCloudLibrary({ quiet: true });
+  }
   $$('.tab').forEach((t) => {
     const active = t === tab;
     t.classList.toggle('active', active);
@@ -1967,6 +2239,8 @@ els.settingsDialog.addEventListener('close', () => {
   applyTrackers();
   applySpeedLimits();
   updateWakeLock();
+  cloudAccountLine();
+  refreshCloudLibrary({ quiet: true });
   if (listChanged) refreshTrackerList({ force: true });
 
   const wantDebug = els.debugToggle.checked;
@@ -2165,9 +2439,16 @@ window.addEventListener('hashchange', async () => {
   }
   await takeSharedInbox();
 
+  // The cloud account is the one part of the app that exists without any local torrent.
+  renderCloudLibrary();
+  if (cloudReady()) {
+    cloudAccountLine();
+    refreshCloudLibrary({ quiet: true });
+  }
+
   updateEmptyState();
   updateWakeLock();
 })();
 
 // Expose for debugging and tests.
-window.__phoneTorrent = { client, views, saver, addTorrent, seedFiles, torrentReach, unreachableReason, cloudCtx, CLOUD_PROVIDERS, effectiveTrackers, refreshTrackerList, fetchMetadataFallback, verifyTorrentBytes, findInfoSpan, runNetworkCheck, cleanOrphanStores, isComplete, get opfsOk() { return opfsOk; } };
+window.__phoneTorrent = { client, views, saver, addTorrent, seedFiles, torrentReach, unreachableReason, cloudCtx, CLOUD_PROVIDERS, cloudSend, refreshCloudLibrary, effectiveTrackers, refreshTrackerList, fetchMetadataFallback, verifyTorrentBytes, findInfoSpan, runNetworkCheck, cleanOrphanStores, isComplete, get opfsOk() { return opfsOk; } };

@@ -114,7 +114,18 @@ function startCloudApi() {
     const needsKey = url.pathname !== '/v1/api/torrents/requestdl';
     if (needsKey && bearer !== state.key) return json(res, { success: false, detail: 'bad api key' }, 401);
 
-    if (url.pathname === '/v1/api/user/me') return json(res, { success: true, data: { email: 'phone@example.com' } });
+    if (url.pathname === '/v1/api/user/me') return json(res, { success: true, data: { email: 'phone@example.com', plan: 1 } });
+
+    if (url.pathname === '/v1/api/torrents/controltorrent') {
+      const body = await new Promise((resolve) => {
+        const chunks = [];
+        req.on('data', (c) => chunks.push(c));
+        req.on('end', () => resolve(Buffer.concat(chunks).toString()));
+      });
+      state.controlled = JSON.parse(body || '{}');
+      if (state.controlled.operation === 'delete') state.deleted = true;
+      return json(res, { success: true, detail: 'ok' });
+    }
 
     if (url.pathname === '/v1/api/torrents/createtorrent') {
       const body = await new Promise((resolve) => {
@@ -127,9 +138,23 @@ function startCloudApi() {
     }
 
     if (url.pathname === '/v1/api/torrents/mylist') {
-      state.polls++;
-      // First poll still downloading, then present — as a real transfer behaves.
+      // Only a card's own poll advances the transfer; the library reads the same state without
+      // moving it on, so asking for the list does not skip the "downloading" step.
+      if (url.searchParams.get('id')) state.polls++;
       const ready = state.polls > 1;
+      const row = {
+        id: 77,
+        name: 'private release.bin',
+        size: state.payload.length,
+        progress: ready ? 1 : 0.5,
+        download_state: ready ? 'completed' : 'downloading',
+        download_present: ready,
+        download_finished: ready,
+        files: ready ? [{ id: 9, short_name: 'private release.bin', size: state.payload.length }] : [],
+      };
+      // No id → the whole account, which is what the library asks for.
+      if (!url.searchParams.get('id')) return json(res, { success: true, data: state.deleted ? [] : [row] });
+      if (state.deleted) return json(res, { success: true, data: null });
       return json(res, {
         success: true,
         data: {
@@ -192,7 +217,36 @@ function startPutioApi() {
     if ((req.headers.authorization || '').replace(/^Bearer /, '') !== state.key) {
       return send({ status: 'ERROR', error_message: 'bad token' }, 401);
     }
-    if (url.pathname === '/v2/account/info') return send({ status: 'OK', info: { username: 'phone-user' } });
+    if (url.pathname === '/v2/account/info') {
+      return send({ status: 'OK', info: { username: 'phone-user', disk: { used: 1024 * 1024, size: 100 * 1024 * 1024, avail: 99 * 1024 * 1024 } } });
+    }
+    if (url.pathname === '/v2/transfers/list') {
+      const ready = state.polls > 1;
+      return send({
+        status: 'OK',
+        transfers: state.deleted ? [] : [{
+          id: 55,
+          name: 'putio release.bin',
+          status: ready ? 'COMPLETED' : 'DOWNLOADING',
+          percent_done: ready ? 100 : 40,
+          file_id: ready ? 1234 : null,
+          size: state.payload.length,
+        }],
+      });
+    }
+    if (url.pathname === '/v2/transfers/cancel' || url.pathname === '/v2/files/delete') {
+      const chunks = [];
+      for await (const c of req) chunks.push(c);
+      state[url.pathname === '/v2/files/delete' ? 'deletedFiles' : 'cancelled'] = Buffer.concat(chunks).toString();
+      if (url.pathname === '/v2/files/delete') state.deleted = true;
+      return send({ status: 'OK' });
+    }
+    if (url.pathname === '/v2/transfers/add') {
+      const chunks = [];
+      for await (const c of req) chunks.push(c);
+      state.added = Buffer.concat(chunks).toString();
+      return send({ status: 'OK', transfer: { id: 56, status: 'IN_QUEUE' } });
+    }
     if (url.pathname === '/v2/files/upload') {
       const chunks = [];
       for await (const c of req) chunks.push(c);
@@ -880,6 +934,40 @@ try {
   const torboxLink = await restoredCard.locator('.cloud-files a').first().getAttribute('href');
   assert.ok(torboxLink.startsWith(cloudApi.url), 'the TorBox transfer still links to TorBox after switching provider');
   log('per-transfer service kept across a provider switch');
+
+  /* ---------- the cloud library: the account itself, no local torrent involved ---------- */
+  await ios.click('.tab[data-tab="cloud"]');
+  await waitFor(() => ios.$eval('#cloud-account', (e) => /put\.io · phone-user · [\d.]+ MB of 100 MB used/.test(e.textContent)), { label: 'cloud account line', timeout: 15000 });
+  await waitFor(() => ios.$$eval('.cloud-item-name', (els) => els.some((e) => e.textContent === 'putio release.bin')), { label: 'library lists the transfer', timeout: 15000 });
+  assert.match(await ios.$eval('.cloud-item-meta', (e) => e.textContent), /ready$/);
+
+  // Files on demand, with a direct link per file — what the phone actually saves or streams.
+  await ios.click('.cloud-item-files-btn');
+  await waitFor(() => ios.$$eval('.cloud-file-name', (els) => els.some((e) => e.textContent === 'putio release.bin')), { label: 'file row', timeout: 15000 });
+  const libraryHref = await ios.$eval('.cloud-save', (e) => e.getAttribute('href'));
+  assert.ok(libraryHref.startsWith(`${putioApi.url}/v2/files/1234/download?oauth_token=`), 'the file links straight at the account');
+  const [libraryDownload] = await Promise.all([
+    ios.waitForEvent('download', { timeout: 30000 }),
+    ios.click('.cloud-save'),
+  ]);
+  const libraryPath = path.join(TMP, 'library.bin');
+  await libraryDownload.saveAs(libraryPath);
+  assert.equal(sha(readFileSync(libraryPath)), sha(putioApi.state.payload), 'the library download matches the payload');
+
+  // Sending a magnet from here never creates a local torrent: it is the account that downloads it.
+  const localBefore = await ios.evaluate(() => window.__phoneTorrent.client.torrents.length);
+  await ios.fill('#cloud-input', `magnet:?xt=urn:btih:${'3'.repeat(40)}&dn=cloud-only`);
+  await ios.click('#cloud-form button[type="submit"]');
+  await waitFor(() => Boolean(putioApi.state.added), { label: 'magnet handed to the cloud', timeout: 15000 });
+  assert.match(putioApi.state.added, /magnet/, 'the magnet reached transfers/add');
+  assert.equal(await ios.evaluate(() => window.__phoneTorrent.client.torrents.length), localBefore, 'nothing was added locally');
+
+  // Delete removes it from the account: the transfer is cancelled and its file dropped.
+  await ios.click('.cloud-item-delete');
+  await waitFor(() => ios.$$('.cloud-item').then((l) => l.length === 0), { label: 'library entry removed', timeout: 15000 });
+  assert.match(putioApi.state.cancelled, /transfer_ids=55/);
+  assert.match(putioApi.state.deletedFiles, /file_ids=1234/);
+  log('cloud library OK: listed, streamed link, magnet sent, deleted');
   await iosCtx.close();
 
   /* ---------- fallback: browser without service workers ---------- */

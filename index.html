@@ -39,6 +39,7 @@
       <div class="tabs" role="tablist">
         <button class="tab active" type="button" role="tab" data-tab="download" aria-selected="true">Download</button>
         <button class="tab" type="button" role="tab" data-tab="seed" aria-selected="false">Seed &amp; share</button>
+        <button class="tab" type="button" role="tab" data-tab="cloud" aria-selected="false">Cloud</button>
       </div>
 
       <div class="tab-panel" id="tab-download" role="tabpanel">
@@ -82,6 +83,34 @@
           cross-origin requests and are fetched into memory first.
         </p>
       </div>
+      <div class="tab-panel" id="tab-cloud" role="tabpanel" hidden>
+        <div class="add-row">
+          <label class="btn primary file-btn">
+            <input id="cloud-file-input" type="file" multiple />
+            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M19.35 10.04A7.49 7.49 0 0 0 12 4a7.48 7.48 0 0 0-6.64 4.04A6 6 0 0 0 6 20h13a5 5 0 0 0 .35-9.96ZM14 13v4h-4v-4H7l5-5 5 5h-3Z"/></svg>
+            Send a .torrent to the cloud
+          </label>
+        </div>
+        <form id="cloud-form" class="add-row" autocomplete="off">
+          <input id="cloud-input" type="text" inputmode="url" placeholder="magnet:?xt=urn:btih:… or info hash"
+                 aria-label="Magnet link or info hash to send to the cloud" spellcheck="false" />
+          <button class="btn" type="submit">Send</button>
+        </form>
+        <p class="hint" id="cloud-account"></p>
+        <p class="hint error" id="cloud-error" hidden></p>
+        <button id="cloud-refresh-btn" class="btn small" type="button">Refresh the library</button>
+        <p class="hint">
+          Your cloud account downloads the torrent — a real BitTorrent client, so private trackers,
+          <code>http(s)</code> trackers and swarms with no WebRTC peer all work. Then you stream or save the
+          files from here over HTTPS, with no size limit.
+        </p>
+      </div>
+    </section>
+
+    <section class="card cloud-library" id="cloud-library" hidden>
+      <h2>Cloud library</h2>
+      <ul id="cloud-list" class="cloud-list"></ul>
+      <p id="cloud-empty" class="empty"></p>
     </section>
 
     <section id="torrents" class="torrents" aria-live="polite"></section>
@@ -157,6 +186,36 @@
         <ul class="log" hidden></ul>
       </section>
     </article>
+  </template>
+
+  <template id="cloud-item-template">
+    <li class="cloud-item">
+      <div class="cloud-item-head">
+        <div>
+          <div class="cloud-item-name"></div>
+          <div class="cloud-item-meta"></div>
+        </div>
+        <div class="head-actions">
+          <button class="btn small cloud-item-files-btn" type="button">Files</button>
+          <button class="btn small cloud-item-delete" type="button">Delete</button>
+        </div>
+      </div>
+      <div class="progress"><div class="bar cloud-item-bar"></div></div>
+      <div class="cloud-item-files" hidden></div>
+    </li>
+  </template>
+
+  <template id="cloud-file-template">
+    <div class="cloud-file">
+      <span class="cloud-file-name"></span>
+      <span class="cloud-file-size"></span>
+      <div class="cloud-file-actions">
+        <button class="btn small cloud-play" type="button">Play</button>
+        <a class="btn small cloud-save" target="_blank" rel="noopener">Save</a>
+        <button class="btn small cloud-copy" type="button">Copy link</button>
+      </div>
+      <div class="cloud-player" hidden></div>
+    </div>
   </template>
 
   <template id="file-template">
