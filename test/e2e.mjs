@@ -651,7 +651,8 @@ try {
   const mainHash = await seeder.evaluate(() => window.__phoneTorrent.client.torrents[0].infoHash);
   await phone.fill('#magnet-input', `magnet:?xt=urn:btih:${mainHash}`);
   await phone.click('#magnet-form button[type="submit"]');
-  await phone.waitForSelector('.torrent .file', { timeout: 30000 });
+  // A magnet has no metadata of its own: it comes from the seeder, so this waits like a download.
+  await waitForFromSeeder(() => phone.$('.torrent .file').then(Boolean), { label: 'magnet metadata from the seeder', timeout: 180000 });
   await waitForFromSeeder(() => phone.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 'magnet download', timeout: 180000 });
   await phone.evaluate(() => Promise.race([window.__phoneTorrent.views.values().next().value.persisted, new Promise((r) => setTimeout(r, 5000))]));
   await seederPause(); // no peers available from here on
