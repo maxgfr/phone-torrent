@@ -539,6 +539,89 @@ function findInfoSpan(bytes) {
   return span;
 }
 
+/**
+ * Minimal bencode reader for the few fields the UI needs from a .torrent the user picked.
+ * Byte strings longer than 4 KiB (the piece hashes) are skipped instead of decoded.
+ */
+function bdecode(bytes) {
+  const dec = new TextDecoder();
+  let pos = 0;
+  const fail = () => { throw new Error('not a valid .torrent file'); };
+  function read() {
+    const c = bytes[pos];
+    if (c === 0x69) { // i<int>e
+      const e = bytes.indexOf(0x65, pos);
+      if (e < 0) fail();
+      const n = Number(dec.decode(bytes.subarray(pos + 1, e)));
+      pos = e + 1;
+      return n;
+    }
+    if (c === 0x6c || c === 0x64) { // l…e / d…e
+      const isDict = c === 0x64;
+      pos++;
+      const out = isDict ? {} : [];
+      while (bytes[pos] !== 0x65) {
+        if (pos >= bytes.length) fail();
+        if (isDict) {
+          const key = read();
+          out[typeof key === 'string' ? key : ''] = read();
+        } else out.push(read());
+      }
+      pos++;
+      return out;
+    }
+    if (c >= 0x30 && c <= 0x39) { // <len>:<bytes>
+      const colon = bytes.indexOf(0x3a, pos);
+      if (colon < 0) fail();
+      const len = Number(dec.decode(bytes.subarray(pos, colon)));
+      if (!Number.isFinite(len) || len < 0) fail();
+      const start = colon + 1;
+      pos = start + len;
+      if (pos > bytes.length) fail();
+      return len > 4096 ? '' : dec.decode(bytes.subarray(start, pos));
+    }
+    return fail();
+  }
+  const value = read();
+  if (!value || typeof value !== 'object' || Array.isArray(value)) fail();
+  return value;
+}
+
+/**
+ * What a .torrent can hope for in a browser: its own trackers, whether any of them speaks
+ * WebSocket, and the BEP 27 private flag (which forbids DHT, PEX and extra trackers).
+ * Returns null when the bytes are not a .torrent at all.
+ */
+function torrentReach(bytes) {
+  let meta;
+  try { meta = bdecode(bytes); } catch { return null; }
+  if (!meta.info || typeof meta.info !== 'object') return null;
+  const urls = [meta.announce, ...[].concat(...(Array.isArray(meta['announce-list']) ? meta['announce-list'] : []))]
+    .filter((u) => typeof u === 'string' && u);
+  const trackers = Array.from(new Set(urls));
+  return {
+    name: typeof meta.info.name === 'string' ? meta.info.name : '',
+    private: meta.info.private === 1 || meta.info.private === true,
+    trackers,
+    webrtc: trackers.some((u) => /^wss?:\/\//i.test(u)),
+  };
+}
+
+/** Human explanation of why a torrent will find no peers here, or '' when it might. */
+function unreachableReason(reach) {
+  if (!reach || reach.webrtc) return '';
+  let host = '';
+  try { host = new URL(reach.trackers[0]).host; } catch { /* no usable tracker at all */ }
+  if (reach.private) {
+    return `This torrent is marked private${host ? ` (${host})` : ''}: only that tracker may hand out peers, `
+      + 'and a browser cannot announce to it. Nothing will download here — use a desktop client.';
+  }
+  return reach.trackers.length
+    ? `None of this torrent's ${reach.trackers.length} trackers speak ws:// or wss://, so a browser cannot ask them for peers. `
+      + 'It will only work if a WebRTC peer shows up on the app\'s own trackers.'
+    : 'This torrent carries no tracker at all, and browsers have no DHT, so peers can only come from the app\'s own trackers.';
+}
+
 async function verifyTorrentBytes(bytes, expectedInfoHash) {
   const [start, end] = findInfoSpan(bytes);
   const digest = await crypto.subtle.digest('SHA-1', bytes.subarray(start, end));
@@ -616,9 +699,12 @@ async function addTorrent(id, { record } = {}) {
     return existing;
   }
 
+  // A private torrent (BEP 27) may only be announced to its own tracker: adding public ones
+  // would publish its info hash and can get the user banned from the tracker it came from.
+  const reach = typeof id === 'string' ? null : torrentReach(new Uint8Array(id));
   const torrent = client.add(id, {
     ...storeOpts(),
-    announce: effectiveTrackers(),
+    announce: reach && reach.private ? reach.trackers : effectiveTrackers(),
     strategy: settings.strategy === 'rarest' ? 'rarest' : 'sequential',
     destroyStoreOnDestroy: false,
     deselect: Boolean(record && record.deselected && record.deselected.length),
@@ -630,6 +716,13 @@ async function addTorrent(id, { record } = {}) {
     : { type: 'torrent', bytes: new Uint8Array(id) });
   const view = attachTorrent(torrent, { record, seeding: false });
   view.source = source;
+  view.reach = reach;
+  const reason = unreachableReason(reach);
+  if (reason) {
+    logEvent(view, reason);
+    refreshView(view); // surface the warning straight away instead of after the no-peers delay
+    toast(reason, { error: true, timeout: 9000 });
+  }
   return torrent;
 }
 
@@ -900,15 +993,22 @@ function refreshView(view) {
     ? formatEta(((selectedBytes - selectedDownloaded) / torrent.downloadSpeed) * 1000)
     : '';
 
-  const stuck = !complete && !torrent.paused && torrent.numPeers === 0 && Date.now() - view.startedAt > 2 * fallbackDelayMs();
+  // When the .torrent itself says no browser can reach its swarm, say so at once instead of
+  // making the user wait out the no-peers delay.
+  const reason = unreachableReason(view.reach);
+  const stuck = !complete && !torrent.paused && torrent.numPeers === 0
+    && (Boolean(reason) || Date.now() - view.startedAt > 2 * fallbackDelayMs());
   const noPeersEl = $('.nopeers', el);
   if (stuck !== !noPeersEl.hidden) {
     noPeersEl.hidden = !stuck;
     if (stuck) {
       const n = (torrent.announce || effectiveTrackers()).length;
-      $('.nopeers-text', el).textContent = torrent.metadata
+      // A private torrent is stuck on its own tracker; a fresh public tracker list cannot help it.
+      $('.nopeers-retry-btn', el).hidden = Boolean(view.reach?.private);
+      $('.retry-btn', el).hidden = Boolean(view.reach?.private);
+      $('.nopeers-text', el).textContent = reason || (torrent.metadata
         ? `No peers found on ${n} trackers yet. Browsers only reach WebRTC peers; this torrent may only have classic seeders. You can retry with a fresh tracker list or add an HTTP web seed.`
-        : `Still waiting for metadata from ${n} trackers. If the fallback sources could not provide the .torrent either, try again later or add the .torrent file directly.`;
+        : `Still waiting for metadata from ${n} trackers. If the fallback sources could not provide the .torrent either, try again later or add the .torrent file directly.`);
     }
   }
 
@@ -1048,8 +1148,9 @@ async function retryDiscovery(torrent) {
   const before = new Set(torrent.announce || []);
   const btns = $$('.retry-btn, .nopeers-retry-btn', view.el);
   btns.forEach((b) => { b.disabled = true; b.textContent = 'Refreshing…'; });
-  await refreshTrackerList({ force: true });
-  const now = effectiveTrackers();
+  // A private torrent stays on its own tracker; refreshing the public list would not help it.
+  if (!view.reach?.private) await refreshTrackerList({ force: true });
+  const now = view.reach?.private ? (torrent.announce || []) : effectiveTrackers();
   const added = now.filter((t) => !before.has(t));
   const id = torrent.metadata ? new Uint8Array(torrent.torrentFile) : (view.source?.type === 'magnet' ? view.source.uri : torrent.magnetURI);
   toast(added.length ? `Re-announcing with ${added.length} new tracker${added.length === 1 ? '' : 's'}.` : 'No new trackers found; re-announcing to the current ones.');
@@ -1211,11 +1312,22 @@ async function saveTorrentFile(torrent) {
 
 async function addTorrentFiles(fileList) {
   for (const f of fileList) {
+    let buf;
     try {
-      const buf = new Uint8Array(await f.arrayBuffer());
-      await addTorrent(buf);
+      buf = new Uint8Array(await f.arrayBuffer());
     } catch (err) {
       toast(`Could not read ${f.name}: ${err.message}`, { error: true });
+      continue;
+    }
+    // The picker cannot filter by file type on iOS, so the bytes have the last word.
+    if (!torrentReach(buf)) {
+      toast(`"${f.name}" is not a .torrent file. To share a file of your own, use the "Seed & share" tab.`, { error: true });
+      continue;
+    }
+    try {
+      await addTorrent(buf);
+    } catch (err) {
+      toast(`Could not add ${f.name}: ${err.message}`, { error: true });
     }
   }
 }
@@ -1629,4 +1741,4 @@ window.addEventListener('hashchange', async () => {
 })();
 
 // Expose for debugging and tests.
-window.__phoneTorrent = { client, views, saver, addTorrent, seedFiles, effectiveTrackers, refreshTrackerList, fetchMetadataFallback, verifyTorrentBytes, findInfoSpan, runNetworkCheck, cleanOrphanStores, isComplete, get opfsOk() { return opfsOk; } };
+window.__phoneTorrent = { client, views, saver, addTorrent, seedFiles, torrentReach, unreachableReason, effectiveTrackers, refreshTrackerList, fetchMetadataFallback, verifyTorrentBytes, findInfoSpan, runNetworkCheck, cleanOrphanStores, isComplete, get opfsOk() { return opfsOk; } };

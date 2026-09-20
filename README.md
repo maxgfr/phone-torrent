@@ -8,8 +8,11 @@ your phone either file by file or as a single `.zip`.
 ## Features
 
 - **Download from a `.torrent` file, a magnet link or a bare info hash.** Pick the file from your
-  phone, paste the link, or open `https://…/#magnet:?xt=…`. On Android you can also *share* a
-  `.torrent` file or magnet link to the installed app, and `magnet:` links open in it once installed.
+  phone, paste the link, or open `https://…/#magnet:?xt=…`. The file picker is deliberately
+  unfiltered — iOS's Files app greys out every `.torrent` when a filter is set — and whatever you
+  pick is checked by its bytes, so a file that is not a torrent is refused with an explanation.
+  On Android you can also *share* a `.torrent` file or magnet link to the installed app, and
+  `magnet:` links open in it once installed.
 - **Choose the files you want.** Untick a file and its pieces are not downloaded.
 - **Save file by file** or **save everything as one `.zip`** (folder structure preserved).
   A small service worker turns each save into a normal browser download, so multi‑gigabyte files never
@@ -48,6 +51,13 @@ with WebTorrent‑compatible seeders works well; obscure torrents may not.
 
 You can edit the tracker list in **Settings** (gear icon). The defaults are the public WebTorrent
 trackers, plus a public list fetched automatically.
+
+**Private‑tracker torrents cannot work here.** A `.torrent` with the BEP 27 `private` flag may only
+get peers from its own tracker, which is an `http(s)://` tracker a browser cannot announce to. The
+app adds such a torrent and reads its metadata, but says so at once and never announces its info
+hash to the public trackers (doing so is what gets accounts banned). The same goes for any torrent
+whose trackers are all `http://` or `udp://`: download it with a desktop client, or attach an HTTP
+**web seed** if you have one.
 
 ### When a torrent is not found
 
@@ -123,8 +133,9 @@ real UI. It verifies the file list, pause/resume, the details panel, saving the 
 save (twice), zip save (byte‑for‑byte against the seeded data), restore after reload, file selection
 persistence, the delete‑all cycle, removal, the Web Share Target flow, magnet links passed in the
 URL, the tracker‑list merge, the network check, metadata from a fallback source with a tampered file
-rejected, the no‑peers retry, an iPhone‑emulated context, and the in‑memory fallback when service
-workers are blocked. CI runs it on Chromium and on WebKit (`BROWSER=webkit npm test`).
+rejected, the no‑peers retry, an iPhone‑emulated context (unfiltered file picker, a non‑torrent file
+refused, a private‑tracker torrent explained and kept off the public trackers), and the in‑memory
+fallback when service workers are blocked. CI runs it on Chromium and on WebKit (`BROWSER=webkit npm test`).
 
 To try it against the real network, seed something with the app on one device (or with any
 WebTorrent‑compatible client) and open the shared link on your phone; public trackers are not
@@ -172,7 +183,9 @@ all behave like Safari here: WebRTC and the app itself work, "Add to Home Screen
 saved files are assembled in memory then handed to the download popup or, in the installed app, to
 the share sheet (choose "Save to Files"). That memory step caps the practical file size at what the
 device can hold, roughly one to two gigabytes. Share Target and `magnet:` protocol handling are not
-available on iOS, so use the file picker or paste the link. In Brave, if no peers ever connect,
+available on iOS, so use the file picker or paste the link — the picker sets no `accept` filter,
+because iOS maps it to UTIs and `.torrent` has none, which would leave every `.torrent` greyed out
+in Files. In Brave, if no peers ever connect,
 lower Shields for the site: aggressive blocking can interfere with tracker connections. CI runs the
 whole end‑to‑end suite on WebKit as well as Chromium, including an iPhone‑emulated context. Keep the tab in the foreground while downloading: mobile
 browsers throttle or suspend background pages, which is why the wake lock option exists.

@@ -45,6 +45,36 @@ setTimeout(() => {
 }, WATCHDOG_MS).unref();
 const sha = (buf) => createHash('sha256').update(buf).digest('hex');
 
+/** Bencode just enough to build a .torrent by hand. */
+function bencode(v) {
+  if (Buffer.isBuffer(v)) return Buffer.concat([Buffer.from(`${v.length}:`), v]);
+  if (typeof v === 'string') return bencode(Buffer.from(v));
+  if (typeof v === 'number') return Buffer.from(`i${v}e`);
+  if (Array.isArray(v)) return Buffer.concat([Buffer.from('l'), ...v.map(bencode), Buffer.from('e')]);
+  const keys = Object.keys(v).sort();
+  return Buffer.concat([Buffer.from('d'), ...keys.map((k) => Buffer.concat([bencode(k), bencode(v[k])])), Buffer.from('e')]);
+}
+
+/** A .torrent as a private tracker hands it out: private flag, https-only announce. */
+function privateTorrent(body) {
+  const pieceLength = 16384;
+  const pieces = [];
+  for (let off = 0; off < body.length; off += pieceLength) {
+    pieces.push(createHash('sha1').update(body.subarray(off, off + pieceLength)).digest());
+  }
+  return bencode({
+    announce: 'https://private.example/announce/passkey',
+    'announce-list': [['https://private.example/announce/passkey']],
+    info: {
+      length: body.length,
+      name: 'private release.bin',
+      'piece length': pieceLength,
+      pieces: Buffer.concat(pieces),
+      private: 1,
+    },
+  });
+}
+
 async function waitFor(fn, { timeout = 60000, interval = 250, label = 'condition' } = {}) {
   const start = Date.now();
   for (;;) {
@@ -509,6 +539,9 @@ try {
   const iosSaver = await waitSaver(ios);
   assert.equal(iosSaver.mode, 'blob', 'iOS saves through memory, not the streaming worker');
   assert.match(iosSaver.reason, /iOS/);
+  // iOS maps the accept attribute to UTIs and .torrent has none, so any filter greys out every
+  // .torrent in the Files picker: the input must stay unfiltered and judge the bytes instead.
+  assert.equal(await ios.$eval('#torrent-file-input', (e) => e.getAttribute('accept')), null, 'no accept filter (it would hide .torrent files on iOS)');
   await ios.setInputFiles('#torrent-file-input', { name: 'test.torrent', mimeType: 'application/x-bittorrent', buffer: Buffer.from(torrentFile) });
   await ios.waitForSelector('.torrent .file', { timeout: 15000 });
   await waitFor(() => ios.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 'iOS download', timeout: 90000 });
@@ -527,6 +560,28 @@ try {
   assert.equal(iosZip.suggestedFilename(), 'Phone Torrent Test.zip');
   await ios.screenshot({ path: path.join(TMP, 'ios.png'), fullPage: true });
   log('iOS-emulated save + zip OK');
+
+  // Picking something that is not a .torrent (the picker can no longer filter) says so and adds nothing.
+  const torrentsBefore = (await ios.$$('.torrent')).length;
+  await ios.setInputFiles('#torrent-file-input', { name: 'IMG_0001.HEIC', mimeType: 'image/heic', buffer: Buffer.from('ftypheic not a torrent') });
+  await waitFor(() => ios.$$eval('.toast', (els) => els.some((e) => /is not a \.torrent file/.test(e.textContent))), { label: 'non-torrent rejected', timeout: 10000 });
+  assert.equal((await ios.$$('.torrent')).length, torrentsBefore, 'a non-torrent file is not added');
+  log('non-torrent file refused with an explanation');
+
+  // A private-tracker .torrent parses and is listed, but says up front that no browser can reach it,
+  // and its info hash must never be announced to the public trackers (BEP 27).
+  await ios.setInputFiles('#torrent-file-input', { name: 'private.torrent', mimeType: 'application/x-bittorrent', buffer: privateTorrent(rnd(40000, 23)) });
+  await waitFor(() => ios.$$eval('.torrent .name', (els) => els.some((e) => e.textContent === 'private release.bin')), { label: 'private torrent listed', timeout: 15000 });
+  const privateHint = await ios.$$eval('.torrent', (els) => {
+    const el = els.find((t) => t.querySelector('.name').textContent === 'private release.bin');
+    return { text: el.querySelector('.nopeers-text').textContent, hidden: el.querySelector('.nopeers').hidden, retry: el.querySelector('.nopeers-retry-btn').hidden };
+  });
+  assert.equal(privateHint.hidden, false, 'private torrent explains itself immediately');
+  assert.match(privateHint.text, /marked private \(private\.example\)/);
+  assert.equal(privateHint.retry, true, 'no "retry with fresh trackers" for a private torrent');
+  const privateAnnounce = await ios.evaluate(() => window.__phoneTorrent.client.torrents.find((t) => t.name === 'private release.bin').announce);
+  assert.deepEqual(privateAnnounce, ['https://private.example/announce/passkey'], 'a private torrent is announced to its own tracker only');
+  log('private torrent: listed, explained, not leaked to public trackers');
   await iosCtx.close();
 
   /* ---------- fallback: browser without service workers ---------- */
