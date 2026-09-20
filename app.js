@@ -841,6 +841,8 @@ function renderCloud(view, error) {
   if (!box) return;
   const cloud = view.cloud;
   box.hidden = !cloud;
+  // One transfer per torrent: the buttons that start one go away once it exists.
+  $$('.cloud-btn, .nopeers-cloud-btn', view.el).forEach((b) => { b.hidden = Boolean(cloud); });
   if (!cloud) return;
   const pct = Math.min(100, Math.round((cloud.progress || 0) * 100));
   $('.cloud-state', box).textContent = error
@@ -1270,6 +1272,7 @@ function refreshView(view) {
   // making the user wait out the no-peers delay.
   const reason = unreachableReason(view.reach);
   const stuck = !complete && !torrent.paused && torrent.numPeers === 0
+    && !(view.cloud && view.cloud.ready) // the cloud already has it; the peer hunt is moot
     && (Boolean(reason) || Date.now() - view.startedAt > 2 * fallbackDelayMs());
   const noPeersEl = $('.nopeers', el);
   if (stuck !== !noPeersEl.hidden) {
