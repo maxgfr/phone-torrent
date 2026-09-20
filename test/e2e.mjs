@@ -652,7 +652,30 @@ try {
   await phone.fill('#magnet-input', `magnet:?xt=urn:btih:${mainHash}`);
   await phone.click('#magnet-form button[type="submit"]');
   // A magnet has no metadata of its own: it comes from the seeder, so this waits like a download.
-  await waitForFromSeeder(() => phone.$('.torrent .file').then(Boolean), { label: 'magnet metadata from the seeder', timeout: 180000 });
+  try {
+    await waitForFromSeeder(() => phone.$('.torrent .file').then(Boolean), { label: 'magnet metadata from the seeder', timeout: 180000 });
+  } catch (err) {
+    // Both sides of the swarm, so a failure says whether the two ever found each other at all.
+    const swarm = tracker.torrents[mainHash];
+    console.error('swarm:', JSON.stringify({ known: Boolean(swarm), complete: swarm?.complete, incomplete: swarm?.incomplete }));
+    console.error('phone:', JSON.stringify(await phone.evaluate(() => {
+      const t = window.__phoneTorrent.client.torrents[0];
+      const view = window.__phoneTorrent.views.values().next().value;
+      return {
+        infoHash: t?.infoHash,
+        peers: t?.numPeers,
+        wires: t?.wires?.length,
+        announce: t?.announce,
+        metadata: Boolean(t?.metadata),
+        log: view?.log?.slice(-8),
+      };
+    })));
+    console.error('seeder:', JSON.stringify(await seeder.evaluate(() => {
+      const t = window.__phoneTorrent.client.torrents[0];
+      return { infoHash: t?.infoHash, paused: t?.paused, peers: t?.numPeers, announce: t?.announce };
+    })));
+    throw err;
+  }
   await waitForFromSeeder(() => phone.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 'magnet download', timeout: 180000 });
   await phone.evaluate(() => Promise.race([window.__phoneTorrent.views.values().next().value.persisted, new Promise((r) => setTimeout(r, 5000))]));
   await seederPause(); // no peers available from here on
