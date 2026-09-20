@@ -305,10 +305,10 @@
       </label>
 
       <div class="field">
-        <span>Cloud fetch (TorBox, put.io, or your own server)</span>
+        <span>Cloud fetch (TorBox, put.io, Real‑Debrid, AllDebrid, or your own server)</span>
         <p class="hint">A browser cannot reach a private tracker, an <code>http(s)://</code>‑only tracker or a
-          swarm without WebRTC peers. With a TorBox API key or a put.io OAuth token, the torrent is handed to
-          your account there — a real BitTorrent client in a data centre — and your phone then downloads the
+          swarm without WebRTC peers. With a key for one of these services — or the address of the server in
+          <code>server/</code>, which is the same thing on a machine you own — the torrent is handed to it — a real BitTorrent client in a data centre — and your phone then downloads the
           finished file over HTTPS, straight from the link, with no size limit. Your key is stored on this
           device only.</p>
         <label class="field">
@@ -316,6 +316,8 @@
           <select id="cloud-provider">
             <option value="torbox">TorBox</option>
             <option value="putio">put.io</option>
+            <option value="realdebrid">Real-Debrid</option>
+            <option value="alldebrid">AllDebrid</option>
             <option value="server">My own server (Docker, one command)</option>
           </select>
         </label>

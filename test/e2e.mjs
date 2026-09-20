@@ -284,6 +284,110 @@ function startPutioApi() {
 // A WebSocket tracker tells clients to re-announce every fifth of its interval, and the default is
 // ten minutes — so a WebRTC handshake that misses (pause/resume, a fresh magnet) waits two minutes
 // for the next try, longer than any wait here. Thirty seconds means a retry every six.
+/* Real-Debrid and AllDebrid, in one stand-in: two very different dialects of the
+ * same idea, both answering on their own paths so the provider table is checked
+ * against what they actually send, not against a tidy version of it. */
+function startDebridApis(payloadUrl) {
+  const state = { key: 'debrid-key', rdSelected: false, adDeleted: false };
+  const cors = {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Headers': 'Authorization, Content-Type',
+    'Content-Type': 'application/json',
+    'Cache-Control': 'no-store',
+  };
+  const server = http.createServer(async (req, res) => {
+    const url = new URL(req.url, 'http://debrid.test');
+    const send = (body, status = 200) => res.writeHead(status, cors).end(JSON.stringify(body));
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204, { ...cors, 'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS' }).end();
+      return;
+    }
+    const body = await new Promise((resolve) => {
+      const chunks = [];
+      req.on('data', (c) => chunks.push(c));
+      req.on('end', () => resolve(Buffer.concat(chunks)));
+    });
+
+    /* ---- Real-Debrid: bearer token, form bodies, links to unrestrict ---- */
+    if (url.pathname.startsWith('/rest/1.0/')) {
+      if ((req.headers.authorization || '') !== `Bearer ${state.key}`) return send({ error: 'bad_token' }, 401);
+      const p = url.pathname.slice('/rest/1.0/'.length);
+      if (p === 'user') return send({ username: 'rd-user', email: 'rd@example.com', premium: 172800, type: 'premium' });
+      if (p === 'torrents/addMagnet') {
+        state.rdMagnet = body.toString();
+        return send({ id: 'RD1', uri: '/rest/1.0/torrents/info/RD1' });
+      }
+      if (p === 'torrents/addTorrent') {
+        state.rdBytes = body;
+        return send({ id: 'RD1' });
+      }
+      if (p === 'torrents/selectFiles/RD1') {
+        state.rdSelected = body.toString().includes('files=all');
+        return send({}, 204);
+      }
+      if (p === 'torrents/info/RD1') {
+        return send({
+          id: 'RD1',
+          filename: 'rd release.mkv',
+          bytes: 4096,
+          progress: 100,
+          status: 'downloaded',
+          files: [{ id: 1, path: '/rd release.mkv', bytes: 4096, selected: 1 }],
+          links: ['https://real-debrid.example/restricted/abc'],
+        });
+      }
+      if (p === 'torrents') return send([{ id: 'RD1', filename: 'rd release.mkv', bytes: 4096, progress: 100, status: 'downloaded' }]);
+      if (p === 'unrestrict/link') {
+        state.rdUnrestricted = body.toString();
+        return send({ download: payloadUrl, filename: 'rd release.mkv', filesize: 4096 });
+      }
+      if (p === 'torrents/delete/RD1') return send({}, 204);
+      return send({ error: 'unknown_endpoint' }, 404);
+    }
+
+    /* ---- AllDebrid: key in the query, data envelopes, a nested file tree ---- */
+    if (url.pathname.startsWith('/v4')) {
+      if (url.searchParams.get('apikey') !== state.key) {
+        return send({ status: 'error', error: { code: 'AUTH_BAD_APIKEY', message: 'The auth apikey is invalid' } });
+      }
+      if (url.pathname === '/v4/user') return send({ status: 'success', data: { user: { username: 'ad-user', isPremium: true } } });
+      if (url.pathname === '/v4/magnet/upload') {
+        state.adMagnet = url.searchParams.get('magnets[]');
+        return send({ status: 'success', data: { magnets: [{ id: 77, magnet: state.adMagnet, ready: false }] } });
+      }
+      if (url.pathname === '/v4/magnet/upload/file') {
+        state.adUploaded = body;
+        return send({ status: 'success', data: { magnets: [{ id: 77, ready: false }] } });
+      }
+      if (url.pathname === '/v4.1/magnet/status') {
+        const row = { id: 77, filename: 'ad release.mkv', size: 4096, downloaded: 4096, status: state.adDeleted ? 'Error' : 'Ready' };
+        // With an id it answers with one object; without, with the whole list.
+        if (url.searchParams.get('id')) return send({ status: 'success', data: { magnets: row } });
+        return send({ status: 'success', data: { magnets: state.adDeleted ? [] : [row] } });
+      }
+      if (url.pathname === '/v4/magnet/files') {
+        return send({
+          status: 'success',
+          data: { magnets: [{ id: 77, files: [{ n: 'season', e: [{ n: 'ad release.mkv', s: 4096, l: 'https://alldebrid.example/locked/xyz' }] }] }] },
+        });
+      }
+      if (url.pathname === '/v4/link/unlock') {
+        state.adUnlocked = url.searchParams.get('link');
+        return send({ status: 'success', data: { link: payloadUrl, filename: 'ad release.mkv', filesize: 4096 } });
+      }
+      if (url.pathname === '/v4/magnet/delete') {
+        state.adDeleted = true;
+        return send({ status: 'success', data: { message: 'deleted' } });
+      }
+      return send({ status: 'error', error: { code: 'NOT_FOUND', message: 'no such endpoint' } });
+    }
+    send({ error: 'not found' }, 404);
+  });
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () => resolve({ server, state, url: `http://127.0.0.1:${server.address().port}` }));
+  });
+}
+
 const tracker = new TrackerServer({ udp: false, http: false, ws: true, stats: false, interval: 30000 });
 await new Promise((resolve) => tracker.listen(0, '127.0.0.1', resolve));
 const trackerUrl = `ws://127.0.0.1:${tracker.ws.address().port}`;
@@ -294,7 +398,8 @@ log('site at', site.url);
 
 const cloudApi = await startCloudApi();
 const putioApi = await startPutioApi();
-log('cloud API stubs at', cloudApi.url, 'and', putioApi.url);
+const debridApi = await startDebridApis(`${site.url}test/.tmp/debrid-payload.bin`);
+log('cloud API stubs at', cloudApi.url, ',', putioApi.url, 'and', debridApi.url);
 
 // BROWSER=webkit runs the same suite on Safari's engine (what every browser on iOS uses).
 const BROWSER = process.env.BROWSER || 'chromium';
@@ -1014,6 +1119,67 @@ try {
   assert.match(putioApi.state.cancelled, /transfer_ids=55/);
   assert.match(putioApi.state.deletedFiles, /file_ids=1234/);
   log('cloud library OK: listed, streamed link, magnet sent, deleted');
+
+  /* ---------- Real-Debrid and AllDebrid: the same table, two other dialects ---------- */
+  // Driven through the app's own provider functions rather than the UI, which
+  // put.io and TorBox already cover: what is under test here is the mapping.
+  const debridPayload = rnd(4096, 51);
+  writeFileSync(path.join(TMP, 'debrid-payload.bin'), debridPayload);
+
+  for (const [provider, label, account] of [['realdebrid', 'Real-Debrid', 'rd-user'], ['alldebrid', 'AllDebrid', 'ad-user']]) {
+    // Point the app at the stand-in through its own settings dialog, which is
+    // also the only place the new services have to appear.
+    await ios.click('#settings-btn');
+    await ios.waitForSelector('#settings-dialog[open]');
+    await ios.selectOption('#cloud-provider', provider);
+    await ios.fill('#cloud-key', 'debrid-key');
+    await ios.fill('#cloud-base', debridApi.url);
+    await ios.click('#cloud-test-btn');
+    await waitFor(() => ios.$eval('#cloud-info', (e) => /Key accepted/.test(e.textContent)), { label: `${label} key accepted`, timeout: 15000 });
+    await ios.click('#settings-dialog button[type="submit"]');
+    await ios.waitForSelector('#settings-dialog[open]', { state: 'detached', timeout: 5000 }).catch(() => {});
+
+    const result = await ios.evaluate(async () => {
+      const ctx = window.__phoneTorrent.cloudCtx();
+      const who = await ctx.api.check(ctx);
+      const id = await ctx.api.submit(ctx, { magnet: 'magnet:?xt=urn:btih:' + '4'.repeat(40) });
+      const status = await ctx.api.status(ctx, id);
+      const listed = await ctx.api.list(ctx);
+      const link = ctx.api.fileLink(ctx, id, status.files[0]);
+      const { detail } = await ctx.api.account(ctx);
+      await ctx.api.remove(ctx, id, status);
+      return { who, id, status, listed: listed.length, link, detail };
+    });
+
+    assert.equal(result.who, account, `${label} says who the key belongs to`);
+    assert.ok(result.id, `${label} returned a transfer id`);
+    assert.equal(result.status.ready, true, `${label} reports a finished transfer`);
+    assert.equal(result.status.files.length, 1, `${label} lists the file`);
+    assert.equal(result.status.files[0].size, 4096);
+    assert.equal(result.link, `${site.url}test/.tmp/debrid-payload.bin`, `${label} hands back a link that needs no key`);
+    assert.ok(result.listed >= 1, `${label} lists the account's transfers`);
+    log(`${label} OK: ${result.who} · ${result.detail} · ${result.status.files[0].name}`);
+  }
+  assert.ok(debridApi.state.rdSelected, 'Real-Debrid was told to select every file, without which it downloads nothing');
+  assert.match(debridApi.state.rdUnrestricted, /link=https/, 'the restricted link was unrestricted');
+  assert.match(debridApi.state.adUnlocked, /alldebrid\.example/, 'the locked link was unlocked');
+  assert.equal(debridApi.state.adDeleted, true, 'AllDebrid delete reached the API');
+
+  // The link a debrid service hands back is a plain file: the phone saves it like any download.
+  const [debridDownload] = await Promise.all([
+    ios.waitForEvent('download', { timeout: 30000 }),
+    ios.evaluate((href) => {
+      const a = document.createElement('a');
+      a.href = href;
+      a.download = 'debrid.bin';
+      document.body.appendChild(a);
+      a.click();
+    }, `${site.url}test/.tmp/debrid-payload.bin`),
+  ]);
+  const debridPath = path.join(TMP, 'debrid-saved.bin');
+  await debridDownload.saveAs(debridPath);
+  assert.equal(sha(readFileSync(debridPath)), sha(debridPayload), 'the file behind a debrid link arrives intact');
+  log('a debrid link downloads to the phone');
   await iosCtx.close();
 
   /* ---------- fallback: browser without service workers ---------- */
@@ -1048,6 +1214,7 @@ try {
   site.server.close();
   cloudApi.server.close();
   putioApi.server.close();
+  debridApi.server.close();
   tracker.close();
   process.exit(failed ? 1 : 0);
 }

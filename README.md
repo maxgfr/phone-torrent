@@ -62,7 +62,7 @@ your phone either file by file or as a single `.zip`.
 | **1. The page alone** — [maxgfr.github.io/phone-torrent](https://maxgfr.github.io/phone-torrent/) | nothing | no — a browser cannot reach those swarms | torrents with WebRTC peers, seeding from your phone |
 | **2. Your own server** | one `docker compose up -d` on a machine you own | yes — a real client, with TCP, UDP and DHT | everything, and files that stay on your disk |
 | **3. A quick deploy** | one click: Render, Fly, or Cloudflare Containers | yes | a phone, from anywhere, with no machine at home |
-| **4. A cloud service** | a TorBox or put.io key | yes | no machine and no deploy at all |
+| **4. A cloud service** | a TorBox, put.io, Real‑Debrid or AllDebrid key | yes | no machine and no deploy at all |
 
 The same page serves all four: Settings → **Cloud fetch** takes one address (or
 one key) and the **Cloud** tab drives whatever is behind it. Nothing is chosen
@@ -115,21 +115,27 @@ This is what put.io and TorBox are: a real BitTorrent client running in a data c
 UDP and DHT, it can announce to a private tracker, and it serves the finished file over plain
 HTTPS — which is exactly what a phone browser is good at.
 
-Settings → **Cloud fetch** takes a service — TorBox, put.io, or **your own server** — its key, and
-its address. That unlocks two things: the **Cloud** tab, which is a client for the
+Settings → **Cloud fetch** takes a service — TorBox, put.io, Real‑Debrid, AllDebrid, or **your own
+server** — its key, and its address. That unlocks two things: the **Cloud** tab, which is a client for the
 account itself (send, watch, stream, save, delete — nothing touches WebTorrent), and, on a torrent
 the browser cannot reach, **Fetch it in the cloud**:
 
-1. The `.torrent` itself (or the magnet, when metadata has not arrived) is sent to the account —
-   `POST /v1/api/torrents/createtorrent` on TorBox, `POST /v2/files/upload` (or
-   `/v2/transfers/add` for a magnet) on put.io. The private tracker keeps seeing a normal client,
-   with your passkey, from the cloud account.
-2. The app polls the transfer (`/v1/api/torrents/mylist` · `/v2/transfers/{id}`) and shows the
-   remote progress on the card.
-3. When it is ready, each file becomes a direct link
-   (`/v1/api/torrents/requestdl?token=…&redirect=true` · `/v2/files/{id}/download?oauth_token=…`).
-   Tapping it is an ordinary browser download: it streams to the device, so a 900 MB file is fine on
-   an iPhone, where the in‑memory saver would not be.
+1. The `.torrent` itself (or the magnet, when metadata has not arrived) is sent to the account. The
+   private tracker keeps seeing a normal client, with your passkey, from there.
+2. The app polls the transfer and shows the remote progress on the card.
+3. When it is ready, each file becomes a direct link. Tapping it is an ordinary browser download: it
+   streams to the device, so a 900 MB file is fine on an iPhone, where the in‑memory saver would not
+   be.
+
+Each service says all that in its own dialect, and the app speaks five of them:
+
+| | submit | watch | the link per file |
+|---|---|---|---|
+| **TorBox** | `POST /v1/api/torrents/createtorrent` | `/v1/api/torrents/mylist` | `requestdl?token=…&redirect=true` |
+| **put.io** | `POST /v2/files/upload`, or `/v2/transfers/add` | `/v2/transfers/{id}` | `/v2/files/{id}/download?oauth_token=…` |
+| **Real‑Debrid** | `addMagnet`/`addTorrent`, then `selectFiles` — without which it downloads nothing | `/torrents/info/{id}` | `unrestrict/link`, resolved when the transfer turns ready |
+| **AllDebrid** | `/v4/magnet/upload` | `/v4.1/magnet/status` | `/v4/link/unlock`, and its nested folders are flattened |
+| **Your own server** | `POST /api/transfers` | `/api/transfers/{infoHash}` | `/api/transfers/{id}/files/{i}`, with `Range` |
 
 The library polls while a transfer is still running and leaves the API alone once nothing is.
 Playback is the plain `<video>`/`<audio>` element pointed at the same direct link, so seeking is
@@ -220,7 +226,12 @@ for both services: submit, poll, download the file from the link byte‑for‑by
 back up after a reload, keep each transfer on the service it started on, and drive the cloud library
 end to end: the account line, the transfer list, a file's direct link downloaded byte‑for‑byte, a
 magnet sent to the account with nothing added locally, and a delete that cancels the transfer and
-drops its file), and the in‑memory fallback when service workers are blocked. CI runs it on Chromium and on WebKit (`BROWSER=webkit npm test`).
+drops its file), the Real‑Debrid and AllDebrid mappings against stand‑ins speaking their own
+dialects, and the in‑memory fallback when service workers are blocked.
+
+`npm run test:server` is the other half: it seeds a file from a plain BitTorrent client over an
+http tracker — no browser anywhere — asks the server in [`server/`](server/) for it through its API,
+and pulls the file back out whole and by `Range`, byte for byte, before deleting it. CI runs both. CI runs it on Chromium and on WebKit (`BROWSER=webkit npm test`).
 
 To try it against the real network, seed something with the app on one device (or with any
 WebTorrent‑compatible client) and open the shared link on your phone; public trackers are not

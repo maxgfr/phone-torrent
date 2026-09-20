@@ -738,9 +738,14 @@ async function cloudJson(url, opts) {
   const text = await res.text();
   let json = null;
   try { json = JSON.parse(text); } catch { /* an error page, not JSON */ }
-  const failed = !res.ok || (json && (json.success === false || json.status === 'ERROR'));
+  // Each service says "no" in its own dialect: TorBox with success:false, put.io
+  // with status ERROR, AllDebrid with status error and an {error:{message}}.
+  const status = json && typeof json.status === 'string' ? json.status.toLowerCase() : '';
+  const failed = !res.ok || (json && json.success === false) || status === 'error';
   if (failed) {
-    const detail = (json && (json.detail || json.error_message || json.error)) || text.slice(0, 120) || `HTTP ${res.status}`;
+    const detail = (json && (json.detail || json.error_message
+      || (json.error && (json.error.message || (typeof json.error === 'string' ? json.error : ''))))) 
+      || text.slice(0, 120) || `HTTP ${res.status}`;
     throw new Error(String(detail));
   }
   return json || {};
@@ -871,6 +876,182 @@ const CLOUD_PROVIDERS = {
       const url = new URL(`${ctx.base}/api/transfers/${encodeURIComponent(id)}/files/${encodeURIComponent(file.id)}`);
       if (ctx.key) url.searchParams.set('token', ctx.key);
       return url.toString();
+    },
+    zipLink: false,
+  },
+
+  // Real-Debrid hands back one link per file, and each has to be unrestricted
+  // before it can be downloaded — so that happens when a transfer turns ready.
+  realdebrid: {
+    label: 'Real-Debrid',
+    defaultBase: 'https://api.real-debrid.com',
+    keyPlaceholder: 'Real-Debrid API token',
+
+    async check(ctx) {
+      const user = await cloudJson(`${ctx.base}/rest/1.0/user`);
+      return user && (user.username || user.email);
+    },
+
+    async submit(ctx, { bytes, magnet }) {
+      const added = bytes
+        ? await cloudJson(`${ctx.base}/rest/1.0/torrents/addTorrent`, { method: 'PUT', body: bytes, contentType: 'application/x-bittorrent' })
+        : await cloudJson(`${ctx.base}/rest/1.0/torrents/addMagnet`, { method: 'POST', body: new URLSearchParams({ magnet }) });
+      if (!added || !added.id) throw new Error('Real-Debrid did not return a torrent id');
+      // Nothing downloads until files are chosen; "all" is what a torrent client does.
+      await cloudJson(`${ctx.base}/rest/1.0/torrents/selectFiles/${encodeURIComponent(added.id)}`, {
+        method: 'POST',
+        body: new URLSearchParams({ files: 'all' }),
+      });
+      return added.id;
+    },
+
+    normalize(raw) {
+      const state = String(raw.status || 'unknown');
+      return {
+        id: raw.id,
+        state,
+        progress: Number(raw.progress || 0) / 100,
+        ready: state === 'downloaded',
+        name: raw.filename || raw.original_filename || '',
+        size: Number(raw.bytes || raw.original_bytes || 0),
+        files: [],
+      };
+    },
+
+    async status(ctx, id) {
+      const raw = await cloudJson(`${ctx.base}/rest/1.0/torrents/info/${encodeURIComponent(id)}`);
+      if (!raw || !raw.id) throw new Error('Real-Debrid no longer knows this transfer');
+      const out = this.normalize(raw);
+      if (!out.ready) return out;
+      // links[] lines up with the files the torrent selected, in the same order.
+      const selected = (raw.files || []).filter((f) => f.selected);
+      const links = raw.links || [];
+      out.files = await Promise.all(selected.slice(0, links.length).map(async (f, i) => {
+        const unrestricted = await cloudJson(`${ctx.base}/rest/1.0/unrestrict/link`, {
+          method: 'POST',
+          body: new URLSearchParams({ link: links[i] }),
+        });
+        return {
+          id: f.id,
+          name: String(f.path || '').replace(/^\//, '') || `file ${i + 1}`,
+          size: Number(f.bytes || 0),
+          url: unrestricted && unrestricted.download,
+        };
+      }));
+      return out;
+    },
+
+    async list(ctx) {
+      const rows = await cloudJson(`${ctx.base}/rest/1.0/torrents`);
+      return (Array.isArray(rows) ? rows : []).map((raw) => this.normalize(raw));
+    },
+
+    async remove(ctx, id) {
+      await cloudJson(`${ctx.base}/rest/1.0/torrents/delete/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    },
+
+    async account(ctx) {
+      const user = await cloudJson(`${ctx.base}/rest/1.0/user`);
+      const days = user && user.premium ? Math.round(Number(user.premium) / 86400) : 0;
+      return {
+        who: (user && (user.username || user.email)) || '',
+        detail: days ? `premium, ${days} day${days === 1 ? '' : 's'} left` : (user && user.type) || '',
+      };
+    },
+
+    // The unrestricted link needs no key of its own, which is what makes it
+    // something a <video> or a download can follow.
+    fileLink(ctx, id, file) {
+      return (file && file.url) || '';
+    },
+    zipLink: false,
+  },
+
+  alldebrid: {
+    label: 'AllDebrid',
+    defaultBase: 'https://api.alldebrid.com',
+    keyPlaceholder: 'AllDebrid API key',
+
+    // Its key rides in the query string, and it wants to know who is calling.
+    query(ctx, extra = {}) {
+      return new URLSearchParams({ agent: 'phone-torrent', apikey: ctx.key, ...extra }).toString();
+    },
+
+    async check(ctx) {
+      const { data } = await cloudJson(`${ctx.base}/v4/user?${this.query(ctx)}`);
+      return data && data.user && data.user.username;
+    },
+
+    async submit(ctx, { bytes, magnet, name }) {
+      let magnets;
+      if (bytes) {
+        const form = new FormData();
+        form.append('files[]', new Blob([bytes], { type: 'application/x-bittorrent' }), `${name || 'torrent'}.torrent`);
+        ({ data: { magnets } = {} } = await cloudJson(`${ctx.base}/v4/magnet/upload/file?${this.query(ctx)}`, { method: 'POST', body: form }));
+      } else {
+        ({ data: { magnets } = {} } = await cloudJson(`${ctx.base}/v4/magnet/upload?${this.query(ctx, { 'magnets[]': magnet })}`, { method: 'POST' }));
+      }
+      const first = Array.isArray(magnets) ? magnets[0] : magnets;
+      if (!first || first.id === undefined) throw new Error((first && first.error && first.error.message) || 'AllDebrid did not return a magnet id');
+      return first.id;
+    },
+
+    normalize(raw) {
+      const state = String(raw.status || 'unknown').toLowerCase();
+      const size = Number(raw.size || 0);
+      return {
+        id: raw.id,
+        state,
+        progress: size ? Math.min(1, Number(raw.downloaded || 0) / size) : 0,
+        ready: state === 'ready',
+        name: raw.filename || '',
+        size,
+        files: [],
+      };
+    },
+
+    async status(ctx, id) {
+      const { data } = await cloudJson(`${ctx.base}/v4.1/magnet/status?${this.query(ctx, { id })}`);
+      const raw = data && (data.magnets && !Array.isArray(data.magnets) ? data.magnets : (data.magnets || [])[0]);
+      if (!raw) throw new Error('AllDebrid no longer knows this transfer');
+      const out = this.normalize(raw);
+      if (!out.ready) return out;
+      const files = await cloudJson(`${ctx.base}/v4/magnet/files?${this.query(ctx, { 'id[]': id })}`);
+      const entry = ((files.data && files.data.magnets) || [])[0] || {};
+      // Its file tree nests folders; a flat list is what the app shows.
+      const flat = [];
+      const walk = (nodes, prefix) => {
+        for (const node of nodes || []) {
+          if (node.e) walk(node.e, `${prefix}${node.n}/`);
+          else if (node.l) flat.push({ name: `${prefix}${node.n}`, size: Number(node.s || 0), link: node.l });
+        }
+      };
+      walk(entry.files, '');
+      out.files = await Promise.all(flat.slice(0, 50).map(async (f, i) => {
+        const unlocked = await cloudJson(`${ctx.base}/v4/link/unlock?${this.query(ctx, { link: f.link })}`);
+        return { id: i, name: f.name, size: f.size, url: unlocked.data && unlocked.data.link };
+      }));
+      return out;
+    },
+
+    async list(ctx) {
+      const { data } = await cloudJson(`${ctx.base}/v4.1/magnet/status?${this.query(ctx)}`);
+      const rows = data && (Array.isArray(data.magnets) ? data.magnets : Object.values(data.magnets || {}));
+      return (rows || []).map((raw) => this.normalize(raw));
+    },
+
+    async remove(ctx, id) {
+      await cloudJson(`${ctx.base}/v4/magnet/delete?${this.query(ctx, { id })}`);
+    },
+
+    async account(ctx) {
+      const { data } = await cloudJson(`${ctx.base}/v4/user?${this.query(ctx)}`);
+      const user = (data && data.user) || {};
+      return { who: user.username || '', detail: user.isPremium ? 'premium' : (user.isSubscribed ? 'subscribed' : 'free') };
+    },
+
+    fileLink(ctx, id, file) {
+      return (file && file.url) || '';
     },
     zipLink: false,
   },
