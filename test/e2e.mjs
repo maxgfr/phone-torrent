@@ -957,6 +957,24 @@ try {
   assert.equal(await phone.$eval('.torrent .name', (e) => e.textContent), 'Fallback Test', 'metadata kept across retry');
   log('retry with fresh trackers OK');
 
+  // Coming back to a tab the phone froze: its sockets are dead, and BitTorrent's own
+  // answer is to wait minutes for the next announce. This torrent still wants peers,
+  // so the return must send it looking again by itself.
+  await phone.evaluate(() => {
+    Object.defineProperty(document, 'hidden', { value: true, configurable: true });
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  await new Promise((r) => setTimeout(r, 4500));
+  await phone.evaluate(() => {
+    Object.defineProperty(document, 'hidden', { value: false, configurable: true });
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  await waitFor(() => phone.$$eval('.torrent .log li', (els) => els.some((e) => /back after .*asking the trackers again/.test(e.textContent))),
+    { label: 'the return to wake the torrent', timeout: 15000 });
+  assert.equal(await phone.$eval('.torrent .state', (e) => e.textContent), 'reconnecting', 'and says so while it does');
+  assert.equal(await phone.evaluate(() => window.__phoneTorrent.client.torrents[0].paused), false, 'coming back pauses nothing');
+  log('coming back goes looking for peers by itself');
+
   /* ---------- iOS (Safari / Brave / Chrome on iPhone all report a WebKit iPhone UA) ---------- */
   const iphone = devices['iPhone 13'];
   const iosCtx = await browser.newContext({ ...iphone, acceptDownloads: true });

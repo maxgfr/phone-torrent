@@ -54,6 +54,7 @@ const els = {
   trackerListInfo: $('#trackerlist-info'),
   downLimit: $('#down-limit'),
   upLimit: $('#up-limit'),
+  autoResumeToggle: $('#autoresume-toggle'),
   seedAfterToggle: $('#seed-after-toggle'),
   strategySelect: $('#strategy-select'),
   installBtn: $('#install-btn'),
@@ -120,6 +121,9 @@ function loadSettings() {
     // Simple by default: the trackers, the fallbacks and the storage are already
     // set to what works, and nothing in Expert has to be touched to download.
     expert: false,
+    // Phones freeze tabs they cannot see. On return, go and find the peers again
+    // instead of waiting for BitTorrent's own timers.
+    autoResume: true,
     fallbackDelay: 20, // seconds
     dohResolver: DEFAULT_DOH,
   };
@@ -1839,6 +1843,7 @@ function refreshView(view) {
   else if (view.seeding && !torrent.ready) state = 'hashing';
   else if (complete) state = torrent.numPeers ? `seeding to ${torrent.numPeers}` : (view.seeding ? 'seeding · waiting for peers' : 'complete');
   else if (!torrent.metadata) state = 'fetching metadata';
+  else if (torrent.numPeers === 0 && view.reconnectingUntil > Date.now()) state = 'reconnecting';
   else if (torrent.numPeers === 0) state = 'looking for peers';
   else state = 'downloading';
   $('.state', el).textContent = state;
@@ -2005,7 +2010,7 @@ async function replaceTorrent(torrent, id, why) {
   return next;
 }
 
-async function retryDiscovery(torrent) {
+async function retryDiscovery(torrent, { quiet = false } = {}) {
   const view = views.get(torrent);
   if (!view) return;
   const before = new Set(torrent.announce || []);
@@ -2016,12 +2021,78 @@ async function retryDiscovery(torrent) {
   const now = view.reach?.private ? (torrent.announce || []) : effectiveTrackers();
   const added = now.filter((t) => !before.has(t));
   const id = torrent.metadata ? new Uint8Array(torrent.torrentFile) : (view.source?.type === 'magnet' ? view.source.uri : torrent.magnetURI);
-  toast(added.length ? `Re-announcing with ${added.length} new tracker${added.length === 1 ? '' : 's'}.` : 'No new trackers found; re-announcing to the current ones.');
+  if (!quiet) toast(added.length ? `Re-announcing with ${added.length} new tracker${added.length === 1 ? '' : 's'}.` : 'No new trackers found; re-announcing to the current ones.');
   const next = await replaceTorrent(torrent, id, `re-announced (${added.length} new trackers)`);
   if (next) {
     const nv = views.get(next);
     if (nv) nv.startedAt = Date.now();
   }
+}
+
+/* ---------- coming back ----------
+ *
+ * A phone freezes a tab it cannot see. The WebRTC connections die with it and so
+ * does the tracker's WebSocket, and BitTorrent's own answer to that is to wait for
+ * the next announce — minutes away. Which is why a torrent looks dead on return.
+ *
+ * So when the page comes back, or the network does, every unfinished torrent asks
+ * its trackers again at once; the ones still alone a few seconds later have their
+ * discovery rebuilt, which is what the retry button does by hand.
+ */
+const RECONNECT_GRACE_MS = 12000;
+let awaySince = 0;
+
+function needsPeers(torrent) {
+  return !torrent.destroyed && !torrent.paused && !isComplete(torrent);
+}
+
+async function pickUpWhereWeLeftOff(why) {
+  if (!settings.autoResume) return;
+  const waking = client.torrents.filter(needsPeers);
+  if (!waking.length) return;
+  for (const torrent of waking) {
+    const view = views.get(torrent);
+    if (view) {
+      view.reconnectingUntil = Date.now() + RECONNECT_GRACE_MS;
+      logEvent(view, `${why}: asking the trackers again`);
+      refreshView(view);
+    }
+    try { torrent.discovery?.tracker?.update?.(); } catch { /* the socket may be gone; the retry below covers it */ }
+  }
+  // An announce on a socket that died while the tab was frozen goes nowhere. Give it
+  // a few seconds, then rebuild discovery for whoever is still alone.
+  setTimeout(() => {
+    for (const torrent of waking) {
+      if (!needsPeers(torrent) || torrent.numPeers > 0) continue;
+      const view = views.get(torrent);
+      if (view) logEvent(view, 'still no peers: rebuilding the connection');
+      retryDiscovery(torrent, { quiet: true });
+    }
+  }, RECONNECT_GRACE_MS);
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    awaySince = Date.now();
+    return;
+  }
+  const away = awaySince ? Date.now() - awaySince : 0;
+  awaySince = 0;
+  // A glance at another app is not a freeze; a few seconds away is.
+  if (away > 4000) pickUpWhereWeLeftOff(`back after ${formatDuration(away)}`);
+});
+
+window.addEventListener('online', () => pickUpWhereWeLeftOff('the network came back'));
+// Safari restores a page from its cache with every socket already dead.
+window.addEventListener('pageshow', (event) => {
+  if (event.persisted) pickUpWhereWeLeftOff('the browser restored this page');
+});
+
+function formatDuration(ms) {
+  const s = Math.round(ms / 1000);
+  if (s < 90) return `${s}s`;
+  const m = Math.round(s / 60);
+  return m < 90 ? `${m} min` : `${Math.round(m / 60)} h`;
 }
 
 function addWebSeedPrompt(torrent) {
@@ -2401,6 +2472,7 @@ els.settingsBtn.addEventListener('click', async () => {
     : 'Only ws:// and wss:// entries are used; the rest cannot be reached from a browser.';
   els.downLimit.value = String(settings.downloadLimit || 0);
   els.upLimit.value = String(settings.uploadLimit || 0);
+  els.autoResumeToggle.checked = settings.autoResume !== false;
   els.seedAfterToggle.checked = Boolean(settings.seedAfterDone);
   els.strategySelect.value = settings.strategy === 'rarest' ? 'rarest' : 'sequential';
   els.metaSourcesInput.value = (settings.metadataSources || []).join('\n');
@@ -2564,6 +2636,7 @@ els.settingsDialog.addEventListener('close', () => {
     trackerListUrl: trackerListUrl || DEFAULT_TRACKER_LIST_URL,
     downloadLimit: Math.max(0, Number(els.downLimit.value) || 0),
     uploadLimit: Math.max(0, Number(els.upLimit.value) || 0),
+    autoResume: els.autoResumeToggle.checked,
     seedAfterDone: els.seedAfterToggle.checked,
     strategy: els.strategySelect.value === 'rarest' ? 'rarest' : 'sequential',
     metadataSources: els.metaSourcesInput.value.split('\n').map((s) => s.trim()).filter((s) => /^https?:\/\/.*\{infohash\}/i.test(s)),

@@ -55,14 +55,20 @@ and saved to the device file by file or as one `.zip`.
 - **Fallbacks.** No metadata from peers → the `.torrent` is fetched from configurable caches and
   checked against the info hash. No peers at all → one tap refreshes the tracker list and
   re‑announces, or adds an HTTP **web seed**.
-- **Survives reloads.** Pieces live in the Origin Private File System; the list, the file selection
-  and the paused state are remembered.
+- **Survives reloads, and comes back from a freeze.** Pieces live in the Origin Private File System;
+  the list, the file selection and the paused state are remembered. And because a phone freezes a tab
+  it cannot see — killing the WebRTC connections and the tracker's socket with it — returning to the
+  page makes every unfinished torrent ask its trackers again straight away, rather than waiting out
+  BitTorrent's own timers; anything still alone a few seconds later has its discovery rebuilt. The
+  same happens when the network comes back. The card says `reconnecting` while it does, and the event
+  log records it.
 - **Settings with two levels.** **Simple** — the default — shows what decides whether this works:
   the cloud service and its key, whether to keep seeding, the screen lock, and the stored data.
   Nothing behind **Expert** has to be touched to download anything; it holds the trackers, the
   metadata fallbacks, the network check, speed limits, piece order, the CORS proxy, the WebRTC
   configuration and the debug switch, for when a default is wrong for you. The choice is remembered.
-  Your own server's address stays in Simple, because for that one the address *is* the setting.
+  Your own server's address stays in Simple, because for that one the address *is* the setting — and
+  so does **pick up where it left off**, which is what makes leaving the app and coming back work.
 
 ### What the page alone cannot do, and why
 
@@ -156,9 +162,11 @@ are dead and which exist but are unreachable from your network — the second is
 on the device: Android → Private DNS → `one.one.one.one`; iPhone → the 1.1.1.1 app or Cloudflare's
 encrypted‑DNS profile; or your router.
 
-**A phone that suspends the tab.** Mobile browsers throttle background pages. Keep the tab in front,
-and turn on the wake lock — or use one of the other three ways, where the download does not depend
-on the phone being awake at all.
+**A phone that suspends the tab.** No web page downloads while you are in another app: the browser
+freezes it. What the app can do is come back quickly, and it does — see "comes back from a freeze"
+above. Keep the tab in front and the wake lock on for a download you are watching; for one you are
+not, use your own server or a cloud service, where the download does not depend on the phone at all.
+That difference is the honest reason the other three ways exist.
 
 ## Browsers
 
@@ -183,8 +191,9 @@ npm run test:server   # the server, against a real peer
 
 `test/e2e.mjs` boots a WebSocket tracker and a static server, seeds a two‑file torrent through the
 UI of one browser context and downloads it in a second, phone‑sized one — the real UI throughout. It
-covers the file list, pause/resume, the share panel (the real link, selected, and the copy button
-answering on itself), Simple hiding every expert setting while Expert shows them and the choice
+covers the file list, pause/resume, coming back from a frozen tab (the page is hidden, then shown,
+and the torrent must go looking for peers by itself), the share panel (the real link, selected, and
+the copy button answering on itself), Simple hiding every expert setting while Expert shows them and the choice
 surviving a reload, the details panel, saving the `.torrent`, per‑file save (twice),
 zip save byte‑for‑byte, restore after reload, file‑selection persistence, the delete‑all cycle,
 removal, the Web Share Target, magnets in the URL and in the fragment, the tracker‑list merge, the
