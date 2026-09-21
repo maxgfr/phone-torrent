@@ -328,7 +328,7 @@
         <label class="field">
           <span>API base URL (optional)</span>
           <input id="cloud-base" type="url" spellcheck="false" placeholder="https://api.torbox.app" />
-          <span class="hint">Leave empty for the service's own API. For your own server this is its address — <code>docker compose up -d</code> and it is <code>http://localhost:8080</code>; see <code>server/</code> in the repository.</span>
+          <span class="hint">Leave empty for the service's own API — and for your own server, empty means <em>this page's address</em>, which is already right when the server is the one serving this page (<code>docker compose up -d</code>, then open it). Fill it in to drive a server somewhere else.</span>
         </label>
         <label class="toggle">
           <input id="cloud-proxy-toggle" type="checkbox" />

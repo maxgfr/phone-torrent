@@ -18,6 +18,23 @@ import { Server as TrackerServer } from 'bittorrent-tracker';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const TOKEN = 'test-server-token';
 const sha = (buf) => createHash('sha256').update(buf).digest('hex');
+/** RFC 4648 base32, the other way an info hash is written on a tracker page. */
+function base32(buf) {
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+  let bits = 0;
+  let value = 0;
+  let out = '';
+  for (const byte of buf) {
+    value = (value << 8) | byte;
+    bits += 8;
+    while (bits >= 5) {
+      out += alphabet[(value >>> (bits - 5)) & 31];
+      bits -= 5;
+    }
+  }
+  if (bits) out += alphabet[(value << (5 - bits)) & 31];
+  return out;
+}
 const log = (...a) => console.log('•', ...a);
 
 const WATCHDOG_MS = 3 * 60 * 1000;
@@ -101,6 +118,37 @@ try {
   const { transfer } = await created.json();
   assert.equal(transfer.id, seeded.infoHash);
   log('submitted', transfer.id);
+
+  // The same torrent again is the same transfer, not an error: a phone whose
+  // connection dropped mid-tap sends it twice.
+  const again = await api('/api/transfers', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ magnet }),
+  });
+  assert.equal(again.status, 200);
+  assert.equal((await again.json()).transfer.id, seeded.infoHash, 'a repeat submit answers with the transfer it already is');
+  assert.equal((await (await api('/api/transfers')).json()).transfers.length, 1, 'and does not add a second one');
+  log('a repeated submit is idempotent');
+
+  // A bare info hash is a valid thing to paste, in hex and in the base32 some sites
+  // still print. Both name the same transfer, so neither adds a second one.
+  for (const [shape, given] of [['hex', seeded.infoHash], ['base32', base32(Buffer.from(seeded.infoHash, 'hex'))]]) {
+    const bare = await api('/api/transfers', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ magnet: given }),
+    });
+    assert.equal(bare.status, 200, `a bare ${shape} info hash is accepted`);
+    assert.equal((await bare.json()).transfer.id, seeded.infoHash, `a bare ${shape} info hash names the same transfer`);
+  }
+  assert.equal((await (await api('/api/transfers')).json()).transfers.length, 1, 'and neither added a second one');
+  log('a bare info hash works in hex and in base32');
+
+  const badBody = await api('/api/transfers', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"magnet":"not a torrent"}' });
+  assert.equal(badBody.status, 400);
+  assert.match((await badBody.json()).error, /magnet link or an info hash/);
+  log('a body that is not a torrent is refused with a reason');
 
   const ready = await waitFor(async () => {
     const { transfer: t } = await (await api(`/api/transfers/${seeded.infoHash}`)).json();

@@ -1160,6 +1160,16 @@ try {
     assert.ok(result.listed >= 1, `${label} lists the account's transfers`);
     log(`${label} OK: ${result.who} · ${result.detail} · ${result.status.files[0].name}`);
   }
+  // Served by your own server, the address to call is the one you are already on:
+  // `docker compose up`, open it, and there is nothing to type in settings. Compared
+  // against the address the test itself served from, so the page cannot agree with itself.
+  const serverFallback = await ios.evaluate(() => {
+    const api = window.__phoneTorrent.CLOUD_PROVIDERS.server;
+    return typeof api.defaultBase === 'function' ? api.defaultBase() : api.defaultBase;
+  });
+  assert.equal(serverFallback, new URL(site.url).origin, 'with no address of its own, the server provider means this page — which is where a server that serves the app is');
+  log('a server with no address means this page itself:', serverFallback);
+
   assert.ok(debridApi.state.rdSelected, 'Real-Debrid was told to select every file, without which it downloads nothing');
   assert.match(debridApi.state.rdUnrestricted, /link=https/, 'the restricted link was unrestricted');
   assert.match(debridApi.state.adUnlocked, /alldebrid\.example/, 'the locked link was unlocked');

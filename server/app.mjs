@@ -54,12 +54,24 @@ async function loadState() {
   } catch { /* first run */ }
 }
 
+/** The id WebTorrent takes: a magnet string, or the .torrent bytes a record kept as base64. */
+function torrentId(source) {
+  return source.startsWith('torrent:') ? Buffer.from(source.slice('torrent:'.length), 'base64') : source;
+}
+
 function addToClient(source) {
-  const id = source.startsWith('torrent:') ? Buffer.from(source.slice(8), 'base64') : source;
-  return client.add(id, { path: DOWNLOAD_DIR });
+  return client.add(torrentId(source), { path: DOWNLOAD_DIR });
 }
 
 /* ---------- the shape the app reads ---------- */
+
+/** Delete what a transfer wrote, and nothing else: only inside the download directory. */
+async function forgetFiles(name) {
+  if (!name) return;
+  const target = path.resolve(DOWNLOAD_DIR, name);
+  if (!target.startsWith(path.resolve(DOWNLOAD_DIR) + path.sep)) return;
+  await fsp.rm(target, { recursive: true, force: true }).catch(() => {});
+}
 
 function describe(torrent) {
   const record = records.get(torrent.infoHash);
@@ -226,8 +238,10 @@ const server = http.createServer(async (req, res) => {
         const type = String(req.headers['content-type'] || '');
         if (type.includes('application/json')) {
           const { magnet } = JSON.parse((await readBody(req)).toString() || '{}');
-          if (!magnet || !/^(magnet:|[a-f0-9]{40}$)/i.test(String(magnet).trim())) throw new Error('need a magnet link or an info hash');
-          source = /^magnet:/i.test(magnet) ? magnet : `magnet:?xt=urn:btih:${magnet.trim()}`;
+          const given = String(magnet || '').trim();
+          const isHash = /^[a-f0-9]{40}$/i.test(given) || /^[a-z2-7]{32}$/i.test(given);
+          if (!given || !(/^magnet:\?/i.test(given) || isHash)) throw new Error('need a magnet link or an info hash');
+          source = isHash ? `magnet:?xt=urn:btih:${given}` : given;
         } else {
           const bytes = await readBody(req);
           if (!bytes.length || bytes[0] !== 0x64) throw new Error('that body is not a .torrent file');
@@ -236,6 +250,10 @@ const server = http.createServer(async (req, res) => {
       } catch (err) {
         return send(req, res, 400, { error: err.message });
       }
+      // Sending the same torrent twice is not a mistake — a phone that lost its
+      // connection mid-tap does exactly that. Answer with the transfer it already is.
+      const existing = await client.get(torrentId(source)).catch(() => null);
+      if (existing) return send(req, res, 200, { transfer: describe(existing) });
       let torrent;
       try {
         torrent = addToClient(source);
@@ -251,6 +269,26 @@ const server = http.createServer(async (req, res) => {
       torrent.on('done', () => {
         console.log(`done: ${torrent.name}`);
         if (!SEED_AFTER_DONE) torrent.pause();
+      });
+      // Metadata is when a transfer's name — and so its files on disk — becomes known.
+      torrent.on('ready', async () => {
+        const record = records.get(id);
+        if (record && record.name !== torrent.name) {
+          record.name = torrent.name;
+          await saveState();
+        }
+      });
+      torrent.on('error', async (err) => {
+        console.error(`transfer failed: ${torrent.name || id}: ${err.message || err}`);
+        const record = records.get(id);
+        records.delete(id);
+        await saveState();
+        // Take the half-written files with it: nothing lists this transfer any more,
+        // so anything it left behind is unreachable rather than resumable.
+        try {
+          if (!torrent.destroyed) await new Promise((resolve) => client.remove(torrent, { destroyStore: true }, resolve));
+        } catch { /* webtorrent had already torn it down */ }
+        await forgetFiles((record && record.name) || torrent.name);
       });
       return send(req, res, 201, { transfer: describe(torrent) });
     }

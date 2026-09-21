@@ -701,11 +701,20 @@ function cloudReady() {
   return Boolean(settings.cloud && settings.cloud.apiKey);
 }
 
+/**
+ * A provider's built-in address, used when none was typed. It can depend on where the page is:
+ * served by your own server, the address to call is the one you are already on — hence a function.
+ */
+function providerBase(api) {
+  return (typeof api.defaultBase === 'function' ? api.defaultBase() : api.defaultBase) || '';
+}
+
 /** Where a transfer lives: which API, at which base URL. Stored with the torrent so it survives a reload. */
 function cloudCtx(over = {}) {
   const provider = CLOUD_PROVIDERS[over.provider] ? over.provider : (CLOUD_PROVIDERS[settings.cloud.provider] ? settings.cloud.provider : 'torbox');
-  const base = (over.base || settings.cloud.apiBase || CLOUD_PROVIDERS[provider].defaultBase).replace(/\/+$/, '');
-  return { provider, base, key: settings.cloud.apiKey, api: CLOUD_PROVIDERS[provider] };
+  const api = CLOUD_PROVIDERS[provider];
+  const base = (over.base || settings.cloud.apiBase || providerBase(api)).replace(/\/+$/, '');
+  return { provider, base, key: settings.cloud.apiKey, api };
 }
 
 /**
@@ -731,8 +740,14 @@ async function cloudFetch(url, { method = 'GET', body, json = false, contentType
   throw new Error(hasProxy ? `${last}, and the proxy did not help` : `${last}. Set a CORS proxy in Settings to relay it.`);
 }
 
+/** The host an error should name, without throwing on a URL that never parsed. */
+function hostOf(url) {
+  try { return new URL(url, location.href).host; } catch { return String(url).slice(0, 60); }
+}
+
 async function cloudJson(url, opts) {
-  // Every provider's base URL is required; only "my own server" has no default.
+  // Every provider has a base URL now (your own server's is this page's origin), so a
+  // relative one means a bug or a half-written setting — never a request worth sending.
   if (/^\/+api\//.test(url) || url.startsWith('/')) throw new Error('Set the server address in Settings → Cloud fetch.');
   const res = await cloudFetch(url, opts);
   const text = await res.text();
@@ -745,6 +760,9 @@ async function cloudJson(url, opts) {
   if (failed) {
     const detail = (json && (json.detail || json.error_message
       || (json.error && (json.error.message || (typeof json.error === 'string' ? json.error : ''))))) 
+      // Not JSON at all means the address is not an API — most often a server address
+      // that was never set, so the page's own host answered with its 404 page.
+      || (json ? '' : `${hostOf(url)} answered ${res.status}, and not with this API — check the address in Settings → Cloud fetch.`)
       || text.slice(0, 120) || `HTTP ${res.status}`;
     throw new Error(String(detail));
   }
@@ -833,7 +851,9 @@ const CLOUD_PROVIDERS = {
   // DHT, so the swarms a browser cannot reach are ordinary here. See server/.
   server: {
     label: 'My own server',
-    defaultBase: '',
+    // Empty means "this page's own origin", which is exactly right when the
+    // server is the one serving the app — `docker compose up` and nothing to type.
+    defaultBase: () => location.origin,
     keyPlaceholder: 'Server token (AUTH_TOKEN)',
 
     async check(ctx) {
@@ -2387,12 +2407,13 @@ els.netcheckBtn.addEventListener('click', () => {
 function applyCloudProviderFields() {
   const api = CLOUD_PROVIDERS[els.cloudProviderSelect.value] || CLOUD_PROVIDERS[DEFAULT_CLOUD_PROVIDER];
   els.cloudKeyInput.placeholder = api.keyPlaceholder;
-  els.cloudBaseInput.placeholder = api.defaultBase;
+  const base = providerBase(api);
+  els.cloudBaseInput.placeholder = typeof api.defaultBase === 'function' ? `${base} (this page)` : base;
 }
 
 els.cloudProviderSelect.addEventListener('change', () => {
   // A base URL typed for the other provider would not answer; only a custom one is worth keeping.
-  const known = Object.values(CLOUD_PROVIDERS).map((p) => p.defaultBase);
+  const known = Object.values(CLOUD_PROVIDERS).map(providerBase);
   if (known.includes(els.cloudBaseInput.value.trim())) els.cloudBaseInput.value = '';
   applyCloudProviderFields();
   els.cloudInfo.textContent = '';

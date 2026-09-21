@@ -34,10 +34,12 @@ the same image; the main README compares them.
 
 ## Point the app at it
 
-**Settings → Cloud fetch → service “My own server”**, the address as the base
-URL, `AUTH_TOKEN` as the key, then **Test the key**. From then on the Cloud tab
-and the library drive this server exactly as they drive TorBox or put.io: send
-a magnet or a `.torrent`, watch the progress, then play or save each file.
+**Settings → Cloud fetch → service “My own server”**, `AUTH_TOKEN` as the key,
+then **Test the key**. Opened from this server, the base URL can stay empty —
+empty means this page’s own address, which is already the right one. Fill it in
+only to drive a server somewhere else. From then on the Cloud tab and the
+library drive this server exactly as they drive TorBox or put.io: send a magnet
+or a `.torrent`, watch the progress, then play or save each file.
 
 ## The API
 
