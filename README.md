@@ -41,6 +41,9 @@ and saved to the device file by file or as one `.zip`.
 - **Seed and share.** Turn files on the phone into a torrent and send the link with the system share
   sheet; whoever opens it downloads straight from your browser. A CORS‑enabled remote URL can be
   seeded too. The `.torrent` and the magnet are one tap away.
+- **Share hands you the link.** Not a message saying it was copied: the app link and the magnet, both
+  shown, selected and one tap from the clipboard — plus the system share sheet where there is one, and
+  **Save .torrent**. Every torrent can be shared, not only the ones you seed.
 - **Pause, resume, remove**, per‑torrent and total speeds, ETA, peer counts, and a details panel with
   the info hash, ratio, pieces, trackers and an event log. Pausing really pauses: a connection that
   was already in flight is dropped rather than allowed to resume the transfer.
@@ -54,8 +57,12 @@ and saved to the device file by file or as one `.zip`.
   re‑announces, or adds an HTTP **web seed**.
 - **Survives reloads.** Pieces live in the Origin Private File System; the list, the file selection
   and the paused state are remembered.
-- **Speed limits, seeding policy, piece order**, custom trackers, custom WebRTC (STUN/TURN), a debug
-  switch, and a **copy diagnostics** button for reporting a problem from a phone.
+- **Settings with two levels.** **Simple** — the default — shows what decides whether this works:
+  the cloud service and its key, whether to keep seeding, the screen lock, and the stored data.
+  Nothing behind **Expert** has to be touched to download anything; it holds the trackers, the
+  metadata fallbacks, the network check, speed limits, piece order, the CORS proxy, the WebRTC
+  configuration and the debug switch, for when a default is wrong for you. The choice is remembered.
+  Your own server's address stays in Simple, because for that one the address *is* the setting.
 
 ### What the page alone cannot do, and why
 
@@ -176,7 +183,9 @@ npm run test:server   # the server, against a real peer
 
 `test/e2e.mjs` boots a WebSocket tracker and a static server, seeds a two‑file torrent through the
 UI of one browser context and downloads it in a second, phone‑sized one — the real UI throughout. It
-covers the file list, pause/resume, the details panel, saving the `.torrent`, per‑file save (twice),
+covers the file list, pause/resume, the share panel (the real link, selected, and the copy button
+answering on itself), Simple hiding every expert setting while Expert shows them and the choice
+surviving a reload, the details panel, saving the `.torrent`, per‑file save (twice),
 zip save byte‑for‑byte, restore after reload, file‑selection persistence, the delete‑all cycle,
 removal, the Web Share Target, magnets in the URL and in the fragment, the tracker‑list merge, the
 network check, metadata from a fallback source with a tampered file rejected, the no‑peers retry,

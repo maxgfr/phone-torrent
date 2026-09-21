@@ -152,6 +152,27 @@
         <button class="btn ghost select-none-btn" type="button">None</button>
         <button class="btn ghost details-btn" type="button" aria-expanded="false">Details</button>
       </div>
+      <div class="share-panel" hidden>
+        <label class="share-row">
+          <span>Link to this torrent — opens it in this app</span>
+          <span class="share-field">
+            <input class="share-app-link" type="text" readonly spellcheck="false" />
+            <button class="btn small share-copy-app" type="button">Copy</button>
+          </span>
+        </label>
+        <label class="share-row">
+          <span>Magnet link — works in any torrent client</span>
+          <span class="share-field">
+            <input class="share-magnet" type="text" readonly spellcheck="false" />
+            <button class="btn small share-copy-magnet" type="button">Copy</button>
+          </span>
+        </label>
+        <div class="details-actions">
+          <button class="btn small share-native-btn" type="button" hidden>Share…</button>
+          <button class="btn small share-torrent-btn" type="button">Save .torrent</button>
+          <button class="btn small share-close-btn" type="button">Close</button>
+        </div>
+      </div>
       <ul class="files"></ul>
       <div class="cloud" hidden>
         <p class="hint cloud-state"></p>
@@ -212,8 +233,12 @@
       <div class="cloud-file-actions">
         <button class="btn small cloud-play" type="button">Play</button>
         <a class="btn small cloud-save" target="_blank" rel="noopener">Save</a>
-        <button class="btn small cloud-copy" type="button">Copy link</button>
+        <button class="btn small cloud-copy" type="button">Link</button>
       </div>
+      <span class="share-field cloud-link-field" hidden>
+        <input class="cloud-link" type="text" readonly spellcheck="false" />
+        <button class="btn small cloud-link-copy" type="button">Copy</button>
+      </span>
       <div class="cloud-player" hidden></div>
     </div>
   </template>
@@ -234,23 +259,29 @@
     <form method="dialog" class="dialog-body">
       <h2>Settings</h2>
 
-      <label class="field">
+      <div class="mode-switch" role="group" aria-label="How much of this to show">
+        <button id="mode-simple" class="tab active" type="button" aria-pressed="true">Simple</button>
+        <button id="mode-expert" class="tab" type="button" aria-pressed="false">Expert</button>
+      </div>
+      <p class="hint" id="mode-hint"></p>
+
+      <label class="field" data-expert>
         <span>WebSocket trackers (one per line)</span>
         <textarea id="trackers-input" rows="5" spellcheck="false"></textarea>
         <span class="hint">Added to every torrent so browsers can find each other. Only <code>wss://</code> trackers work from a web page.</span>
       </label>
 
-      <label class="toggle">
+      <label class="toggle" data-expert>
         <input id="trackerlist-toggle" type="checkbox" />
         <span>Also fetch a public list of WebSocket trackers (like qBittorrent's "automatically add trackers")</span>
       </label>
-      <label class="field">
+      <label class="field" data-expert>
         <span>Tracker list URL</span>
         <input id="trackerlist-url" type="url" spellcheck="false" />
         <span class="hint" id="trackerlist-info"></span>
       </label>
 
-      <div class="field">
+      <div class="field" data-expert>
         <span>Network check</span>
         <label class="field">
           <span class="hint">Resolver used to check whether tracker hostnames exist (DNS over HTTPS)</span>
@@ -268,7 +299,7 @@
           profile; or change the DNS on your router.</p>
       </div>
 
-      <div class="field two-col">
+      <div class="field two-col" data-expert>
         <label class="field">
           <span>Download limit (KB/s, 0 = unlimited)</span>
           <input id="down-limit" type="number" min="0" step="50" inputmode="numeric" />
@@ -284,7 +315,7 @@
         <span>Keep seeding after a download finishes (helps other phones)</span>
       </label>
 
-      <label class="field">
+      <label class="field" data-expert>
         <span>Piece order</span>
         <select id="strategy-select">
           <option value="sequential">Sequential (files become usable sooner)</option>
@@ -292,13 +323,13 @@
         </select>
       </label>
 
-      <label class="field">
+      <label class="field" data-expert>
         <span>Metadata fallback sources (one URL per line, <code>{infohash}</code> is replaced)</span>
         <textarea id="metasources-input" rows="3" spellcheck="false"></textarea>
         <span class="hint">When a magnet link finds no peers to send the metadata, the <code>.torrent</code> is fetched from these torrent caches instead and verified against the info hash. Most caches block browser requests (CORS); a proxy below fixes that.</span>
       </label>
 
-      <label class="field">
+      <label class="field" data-expert>
         <span>CORS proxy (optional, <code>{url}</code> is replaced)</span>
         <input id="corsproxy-input" type="url" spellcheck="false" placeholder="https://your-worker.workers.dev/?url={url}" />
         <span class="hint">Your own proxy for the fallback sources and remote seeds. A ready-made Cloudflare Worker is in <code>proxy/</code> in the repository.</span>
@@ -325,12 +356,12 @@
           <span>API key</span>
           <input id="cloud-key" type="password" spellcheck="false" autocomplete="off" placeholder="TorBox API key" />
         </label>
-        <label class="field">
+        <label class="field" id="cloud-base-field">
           <span>API base URL (optional)</span>
           <input id="cloud-base" type="url" spellcheck="false" placeholder="https://api.torbox.app" />
           <span class="hint">Leave empty for the service's own API — and for your own server, empty means <em>this page's address</em>, which is already right when the server is the one serving this page (<code>docker compose up -d</code>, then open it). Fill it in to drive a server somewhere else.</span>
         </label>
-        <label class="toggle">
+        <label class="toggle" data-expert>
           <input id="cloud-proxy-toggle" type="checkbox" />
           <span>Always route cloud API calls through my CORS proxy. Leave off: a call the browser cannot make is retried through the proxy by itself. Either way the key passes through it.</span>
         </label>
@@ -338,13 +369,13 @@
         <span class="hint" id="cloud-info"></span>
       </div>
 
-      <label class="field">
+      <label class="field" data-expert>
         <span>Give up on peers after (seconds)</span>
         <input id="fallback-delay" type="number" min="5" step="5" inputmode="numeric" />
         <span class="hint">After this long without metadata the fallback sources are tried; after twice this long without peers the torrent offers a retry.</span>
       </label>
 
-      <label class="field">
+      <label class="field" data-expert>
         <span>WebRTC configuration (JSON, optional)</span>
         <textarea id="rtc-input" rows="3" spellcheck="false" placeholder='{"iceServers":[{"urls":"stun:stun.l.google.com:19302"}]}'></textarea>
         <span class="hint">Custom STUN/TURN servers. Leave empty for the defaults. Takes effect after reload.</span>
@@ -355,7 +386,7 @@
         <span>Keep the screen awake while downloading or seeding</span>
       </label>
 
-      <label class="toggle">
+      <label class="toggle" data-expert>
         <input id="debug-toggle" type="checkbox" />
         <span>Debug logging to the browser console (reloads the page)</span>
       </label>
@@ -366,7 +397,7 @@
         <button id="clear-storage-btn" class="btn danger" type="button">Delete all stored torrent data</button>
       </div>
 
-      <div class="field">
+      <div class="field" data-expert>
         <span>Client</span>
         <p class="hint" id="saver-info"></p>
         <p class="hint mono" id="client-info"></p>
@@ -374,7 +405,7 @@
       </div>
 
       <div class="dialog-actions">
-        <button class="btn ghost" type="button" id="reset-trackers-btn">Reset trackers</button>
+        <button class="btn ghost" type="button" id="reset-trackers-btn" data-expert>Reset trackers</button>
         <button class="btn primary" type="submit" value="save">Save</button>
       </div>
     </form>

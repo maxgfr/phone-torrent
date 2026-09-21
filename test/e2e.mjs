@@ -500,11 +500,18 @@ try {
   // (the qBittorrent-style "automatically add trackers" feature).
   writeFileSync(path.join(TMP, 'trackers.txt'), `udp://tracker.example.org:1337/announce\n\nhttp://ignored.example/announce\n${trackerUrl}\nwss://also-dead.example\n`);
   const listUrl = `${site.url}test/.tmp/trackers.txt`;
-  await phone.addInitScript(({ listUrl, metaUrl }) => localStorage.setItem('phone-torrent:settings', JSON.stringify({
-    trackers: ['ws://127.0.0.1:2/dead'], trackerList: true, trackerListUrl: listUrl,
-    metadataSources: ['https://127.0.0.1:1/never/{INFOHASH}.torrent', metaUrl], fallbackDelay: 5,
-    dohResolver: `${new URL(listUrl).origin}/__doh`,
-  })), { listUrl, metaUrl: `${site.url}test/.tmp/{infohash}.torrent` });
+  // Merge rather than replace: this context also saves settings through the app's own
+  // dialog later on, and a rewrite on every navigation would quietly undo that.
+  await phone.addInitScript(({ listUrl, metaUrl }) => {
+    let current = {};
+    try { current = JSON.parse(localStorage.getItem('phone-torrent:settings') || '{}'); } catch { /* first load */ }
+    localStorage.setItem('phone-torrent:settings', JSON.stringify({
+      ...current,
+      trackers: ['ws://127.0.0.1:2/dead'], trackerList: true, trackerListUrl: listUrl,
+      metadataSources: ['https://127.0.0.1:1/never/{INFOHASH}.torrent', metaUrl], fallbackDelay: 5,
+      dohResolver: `${new URL(listUrl).origin}/__doh`,
+    }));
+  }, { listUrl, metaUrl: `${site.url}test/.tmp/{infohash}.torrent` });
   await phone.goto(site.url);
   await phone.waitForFunction(() => window.__phoneTorrent?.client);
   await waitFor(() => phone.evaluate((t) => window.__phoneTorrent.effectiveTrackers().includes(t), trackerUrl), { label: 'tracker list to be fetched and merged', timeout: 15000 });
@@ -606,6 +613,29 @@ try {
   await waitForFromSeeder(() => phone.evaluate(() => window.__phoneTorrent.client.torrents[0].numPeers > 0), { label: 'peers reacquired after resume', timeout: 120000 });
   log(`pause/resume OK (peers reacquired in ${Math.round((Date.now() - resumeStart) / 1000)}s)`);
 
+  // Sharing shows the links themselves: a toast saying "copied" is not a link.
+  await phone.click('.torrent .share-link-btn');
+  await phone.waitForSelector('.torrent .share-panel:not([hidden])');
+  const shared = await phone.evaluate(() => ({
+    app: document.querySelector('.share-app-link').value,
+    magnet: document.querySelector('.share-magnet').value,
+    selected: document.activeElement.classList.contains('share-app-link'),
+  }));
+  const liveMagnet = await phone.evaluate(() => window.__phoneTorrent.client.torrents[0].magnetURI);
+  assert.equal(shared.magnet, liveMagnet, 'the magnet shown is this torrent\'s');
+  assert.ok(shared.app.includes(`#magnet:?xt=urn:btih:`), 'the app link carries the magnet in its fragment');
+  assert.ok(shared.selected, 'the link is selected, so one tap copies it');
+  await phone.click('.torrent .share-copy-app');
+  // The button answers on itself. Whether the clipboard accepts the write depends on the
+  // engine's permissions, so both answers are valid — a silent button is not.
+  const copyFeedback = await waitFor(async () => {
+    const text = await phone.$eval('.torrent .share-copy-app', (e) => e.textContent);
+    return ['Copied', 'Press and hold to copy'].includes(text) ? text : false;
+  }, { label: 'the copy button to answer', timeout: 5000 });
+  await phone.click('.torrent .share-close-btn');
+  assert.equal(await phone.$eval('.torrent .share-panel', (e) => e.hidden), true);
+  log('share shows the link:', shared.app.slice(0, 64) + `… (copy said "${copyFeedback}")`);
+
   // Details panel.
   await phone.click('.torrent .details-btn');
   assert.ok(!(await phone.$eval('.torrent .details', (e) => e.hidden)));
@@ -679,8 +709,30 @@ try {
   await phone.screenshot({ path: path.join(TMP, 'phone.png'), fullPage: true });
   await phone.click('#settings-btn');
   await phone.waitForSelector('#settings-dialog[open]');
+
+  // Simple is the default and hides the settings nobody needs to touch.
+  const hiddenInSimple = await phone.$$eval('#settings-dialog [data-expert]', (els) => els.filter((e) => !e.hidden).length);
+  assert.equal(hiddenInSimple, 0, 'Simple hides every expert setting');
+  assert.equal(await phone.isVisible('#cloud-key'), true, 'and keeps the one that makes it work');
+  assert.equal(await phone.isVisible('#trackers-input'), false);
   await phone.screenshot({ path: path.join(TMP, 'settings.png') });
+
+  await phone.click('#mode-expert');
+  assert.equal(await phone.isVisible('#trackers-input'), true, 'Expert shows them');
+  assert.equal(await phone.$$eval('#settings-dialog [data-expert]', (els) => els.filter((e) => e.hidden).length), 0);
+  await phone.screenshot({ path: path.join(TMP, 'settings-expert.png') });
   await phone.keyboard.press('Escape');
+
+  // The choice is a setting: it survives a reload like the others.
+  await phone.reload();
+  await phone.waitForFunction(() => window.__phoneTorrent?.client);
+  await phone.click('#settings-btn');
+  await phone.waitForSelector('#settings-dialog[open]');
+  assert.equal(await phone.isVisible('#trackers-input'), true, 'Expert is remembered');
+  await phone.click('#mode-simple');
+  await phone.keyboard.press('Escape');
+  log('settings: Simple by default, Expert when asked, remembered');
+  await phone.waitForSelector('.torrent .file', { timeout: 15000 });
 
   // Deselecting a file survives a reload.
   const notesIndex = names.indexOf(files[1].name);
@@ -992,6 +1044,7 @@ try {
   cloudApi.state.payload = privatePayload;
   await ios.click('#settings-btn');
   await ios.waitForSelector('#settings-dialog[open]');
+  await ios.click('#mode-expert'); // a custom base URL for a hosted service lives in Expert
   await ios.fill('#cloud-key', 'test-api-key');
   await ios.fill('#cloud-base', cloudApi.url);
   await ios.click('#cloud-test-btn');
@@ -1056,6 +1109,7 @@ try {
 
   await ios.click('#settings-btn');
   await ios.waitForSelector('#settings-dialog[open]');
+  await ios.click('#mode-expert'); // a custom base URL for a hosted service lives in Expert
   await ios.selectOption('#cloud-provider', 'putio');
   await ios.fill('#cloud-key', 'putio-token');
   await ios.fill('#cloud-base', putioApi.url);
@@ -1131,6 +1185,7 @@ try {
     // also the only place the new services have to appear.
     await ios.click('#settings-btn');
     await ios.waitForSelector('#settings-dialog[open]');
+  await ios.click('#mode-expert'); // a custom base URL for a hosted service lives in Expert
     await ios.selectOption('#cloud-provider', provider);
     await ios.fill('#cloud-key', 'debrid-key');
     await ios.fill('#cloud-base', debridApi.url);

@@ -300,8 +300,9 @@ body {
 .torrent.seeding .save-btn { display: none; }
 .torrent.seeding .file { grid-template-areas: "check size"; grid-template-columns: 1fr auto; }
 .torrent.seeding .file-check input { display: none; }
-.share-link-btn { display: none; flex: 1; }
-.torrent.seeding .share-link-btn { display: inline-flex; }
+/* Sharing is not only for what you seed: a torrent you are downloading is one
+   more peer for whoever you send it to. */
+.share-link-btn { flex: 1; }
 
 /* ---- settings extras ---- */
 .field input[type="url"], .field input[type="number"], .field select {
@@ -315,6 +316,19 @@ body {
 /* ---- no peers hint ---- */
 .nopeers { margin-top: 10px; padding: 10px 12px; border-radius: 10px; background: var(--bg); border: 1px dashed var(--border); display: grid; gap: 8px; }
 .nopeers .hint { margin: 0; }
+
+/* ---- simple / expert ---- */
+.mode-switch { display: flex; gap: 6px; padding: 4px; background: var(--bg); border-radius: 10px; }
+.mode-switch .tab { flex: 1; }
+
+/* ---- sharing: the link itself, not a message about it ---- */
+.share-panel { margin-top: 10px; padding: 10px 12px; border-radius: 10px; background: var(--bg); border: 1px solid var(--border); display: grid; gap: 10px; }
+.share-row { display: grid; gap: 4px; font-size: 0.85rem; color: var(--muted); }
+.share-field { display: flex; gap: 6px; align-items: center; }
+.share-field input {
+  flex: 1; min-width: 0; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--card); color: var(--text); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.8rem;
+}
 
 /* ---- cloud library ---- */
 .cloud-library { display: grid; gap: 10px; }

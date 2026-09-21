@@ -74,9 +74,13 @@ const els = {
   cloudEmpty: $('#cloud-empty'),
   cloudItemTemplate: $('#cloud-item-template'),
   cloudFileTemplate: $('#cloud-file-template'),
+  modeSimpleBtn: $('#mode-simple'),
+  modeExpertBtn: $('#mode-expert'),
+  modeHint: $('#mode-hint'),
   cloudProviderSelect: $('#cloud-provider'),
   cloudKeyInput: $('#cloud-key'),
   cloudBaseInput: $('#cloud-base'),
+  cloudBaseField: $('#cloud-base-field'),
   cloudProxyToggle: $('#cloud-proxy-toggle'),
   cloudTestBtn: $('#cloud-test-btn'),
   cloudInfo: $('#cloud-info'),
@@ -113,6 +117,9 @@ function loadSettings() {
     // Cloud fetch: a remote client (TorBox and anything speaking its API) downloads what a browser
     // cannot reach — private trackers, http(s)-only trackers, swarms without a single WebRTC peer.
     cloud: { provider: DEFAULT_CLOUD_PROVIDER, apiKey: '', apiBase: '', viaProxy: false },
+    // Simple by default: the trackers, the fallbacks and the storage are already
+    // set to what works, and nothing in Expert has to be touched to download.
+    expert: false,
     fallbackDelay: 20, // seconds
     dohResolver: DEFAULT_DOH,
   };
@@ -1278,8 +1285,18 @@ function renderCloudFiles(item, filesEl) {
     } else {
       play.hidden = true;
     }
-    $('.cloud-copy', row).addEventListener('click', async () => {
-      toast((await copyText(href)) ? 'Link copied. It works for a few hours.' : 'Could not copy.');
+    const linkField = $('.cloud-link-field', row);
+    const linkInput = $('.cloud-link', row);
+    linkInput.value = href;
+    linkInput.addEventListener('focus', () => linkInput.setSelectionRange(0, linkInput.value.length));
+    $('.cloud-link-copy', row).addEventListener('click', (e) => copyFrom(e.currentTarget, href));
+    $('.cloud-copy', row).addEventListener('click', () => {
+      // The link, in full: paste it into a player, or into another device's browser.
+      linkField.hidden = !linkField.hidden;
+      if (!linkField.hidden) {
+        linkInput.focus();
+        linkInput.setSelectionRange(0, linkInput.value.length);
+      }
     });
     filesEl.appendChild(row);
   }
@@ -1634,12 +1651,17 @@ function createTorrentView(torrent, record, seeding) {
   $('.select-all-btn', el).addEventListener('click', () => setAllSelected(torrent, true));
   $('.select-none-btn', el).addEventListener('click', () => setAllSelected(torrent, false));
   $('.details-btn', el).addEventListener('click', () => openDetails(torrent));
-  $('.copy-magnet-btn', el).addEventListener('click', async () => {
-    toast((await copyText(torrent.magnetURI)) ? 'Magnet link copied.' : 'Could not copy.', { error: false });
-  });
-  $('.copy-link-btn', el).addEventListener('click', async () => {
-    toast((await copyText(appLinkFor(torrent))) ? 'App link copied. Anyone opening it downloads this torrent here.' : 'Could not copy.');
-  });
+  $('.copy-magnet-btn', el).addEventListener('click', (e) => copyFrom(e.currentTarget, torrent.magnetURI));
+  $('.copy-link-btn', el).addEventListener('click', (e) => copyFrom(e.currentTarget, appLinkFor(torrent)));
+  $('.share-copy-app', el).addEventListener('click', (e) => copyFrom(e.currentTarget, $('.share-app-link', el).value));
+  $('.share-copy-magnet', el).addEventListener('click', (e) => copyFrom(e.currentTarget, $('.share-magnet', el).value));
+  $('.share-native-btn', el).addEventListener('click', () => shareNatively(torrent));
+  $('.share-torrent-btn', el).addEventListener('click', () => saveTorrentFile(torrent));
+  $('.share-close-btn', el).addEventListener('click', () => { $('.share-panel', el).hidden = true; });
+  // Tapping a link field selects all of it, which is what you want to do with it.
+  for (const field of $$('.share-app-link, .share-magnet', el)) {
+    field.addEventListener('focus', () => field.setSelectionRange(0, field.value.length));
+  }
   $('.save-torrent-btn', el).addEventListener('click', () => saveTorrentFile(torrent));
   for (const sel of ['.webseed-btn', '.nopeers-webseed-btn']) {
     $(sel, el).addEventListener('click', () => addWebSeedPrompt(torrent));
@@ -2021,22 +2043,46 @@ function addWebSeedPrompt(torrent) {
   }
 }
 
-async function shareTorrent(torrent) {
+/** Say "Copied" on the button itself: a toast about a link is not the link. */
+async function copyFrom(button, text) {
+  const ok = await copyText(text);
+  const was = button.textContent;
+  button.textContent = ok ? 'Copied' : 'Press and hold to copy';
+  setTimeout(() => { button.textContent = was; }, ok ? 1400 : 2600);
+}
+
+/**
+ * Sharing shows the links. A share sheet is one more way to send them, not the
+ * only one — and on a desktop, or when the sheet is dismissed, there has to be
+ * something to select and copy.
+ */
+function shareTorrent(torrent) {
+  const view = views.get(torrent);
+  if (!view) return;
   if (!torrent.infoHash) {
     toast('Wait until the torrent has an info hash.');
     return;
   }
+  const panel = $('.share-panel', view.el);
+  const appLink = $('.share-app-link', view.el);
+  const magnet = $('.share-magnet', view.el);
+  appLink.value = appLinkFor(torrent);
+  magnet.value = torrent.magnetURI;
+  panel.hidden = false;
+  $('.share-native-btn', view.el).hidden = !navigator.share;
+  // Selected, so one tap on the phone's own "Copy" does the job too.
+  appLink.focus();
+  appLink.setSelectionRange(0, appLink.value.length);
+}
+
+async function shareNatively(torrent) {
   const url = appLinkFor(torrent);
   const title = torrent.name || 'Torrent';
-  if (navigator.share) {
-    try {
-      await navigator.share({ title, text: `Download "${title}" with Phone Torrent`, url });
-      return;
-    } catch (err) {
-      if (err && err.name === 'AbortError') return;
-    }
+  try {
+    await navigator.share({ title, text: `Download "${title}" with Phone Torrent`, url });
+  } catch (err) {
+    if (err && err.name !== 'AbortError') toast(`Could not share: ${err.message}`, { error: true });
   }
-  toast((await copyText(url)) ? 'Link copied to the clipboard.' : 'Could not share.', { error: false });
 }
 
 function removeView(torrent) {
@@ -2369,6 +2415,7 @@ els.settingsBtn.addEventListener('click', async () => {
   els.netcheckBtn.disabled = false;
   els.netcheckBtn.textContent = 'Check tracker connectivity';
   els.corsProxyInput.value = settings.corsProxy || '';
+  applySettingsMode(Boolean(settings.expert));
   els.cloudProviderSelect.value = CLOUD_PROVIDERS[settings.cloud.provider] ? settings.cloud.provider : DEFAULT_CLOUD_PROVIDER;
   els.cloudKeyInput.value = settings.cloud.apiKey || '';
   els.cloudBaseInput.value = settings.cloud.apiBase || '';
@@ -2403,12 +2450,42 @@ els.netcheckBtn.addEventListener('click', () => {
   runNetworkCheck();
 });
 
+/**
+ * Simple shows the two things that decide whether this works at all — a cloud
+ * service, and whether to keep seeding — and hides the rest. Nothing behind
+ * Expert needs touching for the app to do its job; it is there for when the
+ * defaults are wrong for you.
+ */
+function applySettingsMode(expert) {
+  settings = { ...settings, expert };
+  els.modeSimpleBtn.classList.toggle('active', !expert);
+  els.modeExpertBtn.classList.toggle('active', expert);
+  els.modeSimpleBtn.setAttribute('aria-pressed', String(!expert));
+  els.modeExpertBtn.setAttribute('aria-pressed', String(expert));
+  for (const el of $$('[data-expert]', els.settingsDialog)) el.hidden = !expert;
+  applyCloudProviderFields();
+  els.modeHint.textContent = expert
+    ? 'Everything, including the settings you can break things with.'
+    : 'The settings that matter. Trackers, fallbacks and storage are already set to what works.';
+}
+
 /** Keep the key placeholder and the base-URL hint in step with the chosen provider. */
 function applyCloudProviderFields() {
-  const api = CLOUD_PROVIDERS[els.cloudProviderSelect.value] || CLOUD_PROVIDERS[DEFAULT_CLOUD_PROVIDER];
+  const provider = els.cloudProviderSelect.value;
+  const api = CLOUD_PROVIDERS[provider] || CLOUD_PROVIDERS[DEFAULT_CLOUD_PROVIDER];
   els.cloudKeyInput.placeholder = api.keyPlaceholder;
   const base = providerBase(api);
   els.cloudBaseInput.placeholder = typeof api.defaultBase === 'function' ? `${base} (this page)` : base;
+  // A hosted service's address is a detail; your own server's address is the point,
+  // so that one stays in Simple.
+  els.cloudBaseField.hidden = !settings.expert && provider !== 'server';
+}
+
+for (const [button, expert] of [[els.modeSimpleBtn, false], [els.modeExpertBtn, true]]) {
+  button.addEventListener('click', () => {
+    applySettingsMode(expert);
+    saveSettings({ ...settings, expert });
+  });
 }
 
 els.cloudProviderSelect.addEventListener('change', () => {
@@ -2499,6 +2576,7 @@ els.settingsDialog.addEventListener('close', () => {
     },
     fallbackDelay: Math.max(5, Number(els.fallbackDelayInput.value) || 20),
     dohResolver: els.dohSelect.value || DEFAULT_DOH,
+    expert: Boolean(settings.expert),
   });
   applyTrackers();
   applySpeedLimits();
