@@ -553,6 +553,8 @@ async function copyText(text) {
     ta.style.opacity = '0';
     document.body.appendChild(ta);
     ta.select();
+    // iOS ignores select() on a read-only field: without a selection range, "copy" copies nothing.
+    ta.setSelectionRange(0, ta.value.length);
     let ok = false;
     try { ok = document.execCommand('copy'); } catch { /* ignore */ }
     ta.remove();

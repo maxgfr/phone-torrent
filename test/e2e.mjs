@@ -692,6 +692,17 @@ try {
   assert.deepEqual([...names].sort(), files.map((f) => f.name).sort());
   log('file list rendered:', names.join(', '));
 
+  // No sideways scrolling at any phone width: 320px is an iPhone SE, or any iPhone with Display Zoom,
+  // and between 481px and ~530px the card's five buttons used to stay on one line.
+  for (const width of [320, 500, 390]) {
+    await phone.setViewportSize({ width, height: 844 });
+    const overflow = await phone.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+    assert.equal(overflow, 0, `no horizontal scroll at ${width}px`);
+  }
+  // The list is rewritten every 750 ms; as a live region, a screen reader would read out every tick.
+  assert.equal(await phone.$eval('#torrents', (e) => e.getAttribute('aria-live')), null, 'the torrent list is not a live region');
+  log('layout fits 320px and 500px; the list does not chatter to screen readers');
+
   try {
     await waitForFromSeeder(() => phone.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 'download to finish', timeout: 180000 });
   } catch (err) {

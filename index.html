@@ -113,7 +113,9 @@
       <p id="cloud-empty" class="empty"></p>
     </section>
 
-    <section id="torrents" class="torrents" aria-live="polite"></section>
+    <!-- Not a live region: its speeds and percentages change every 750 ms, and a screen reader would
+         read each change aloud. What deserves announcing (finished, errors) goes to the toasts. -->
+    <section id="torrents" class="torrents" aria-label="Torrents"></section>
 
     <p id="empty-state" class="empty">No torrents yet. Pick a .torrent file from your phone or paste a magnet link above.</p>
   </main>
