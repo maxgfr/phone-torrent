@@ -17,6 +17,7 @@ import os from 'node:os';
 import { chromium, webkit, devices } from 'playwright';
 import { Server as TrackerServer } from 'bittorrent-tracker';
 import { startServer } from './serve.mjs';
+import proxyWorker from '../proxy/cloudflare-worker.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const TMP = path.join(HERE, '.tmp');
@@ -81,6 +82,14 @@ function privateTorrent(body, name = 'private release.bin') {
   });
 }
 
+/**
+ * Save closes the dialog, and the dialog's 'close' event — where the settings are stored — comes a
+ * moment later. "Test the key" no longer switches the app over before Save, so wait for Save itself.
+ */
+function savedService(page, provider) {
+  return page.waitForFunction((p) => window.__phoneTorrent.cloudCtx().provider === p, provider, { timeout: 5000 });
+}
+
 async function waitFor(fn, { timeout = 60000, interval = 250, label = 'condition' } = {}) {
   const start = Date.now();
   for (;;) {
@@ -121,6 +130,23 @@ function startCloudApi() {
 
     if (url.pathname === '/v1/api/user/me') return json(res, { success: true, data: { email: 'phone@example.com', plan: 1 } });
 
+    // Every active slot taken: createtorrent answers with a queued_id, and the torrent waits in
+    // /queued — not in /torrents — until it starts under a torrent id of its own.
+    if (url.pathname === '/v1/api/queued/getqueued') {
+      const row = { id: 5, name: 'queued release', hash: QUEUED_HASH, type: 'torrent', magnet: `magnet:?xt=urn:btih:${QUEUED_HASH}` };
+      if (url.searchParams.get('id')) {
+        if (state.queued && url.searchParams.get('id') === '5') return json(res, { success: true, data: row });
+        return json(res, { success: false, error: 'ITEM_NOT_FOUND', detail: 'Queued download not found.', data: null });
+      }
+      return json(res, { success: true, data: state.queued ? [row] : [] });
+    }
+    if (url.pathname === '/v1/api/queued/controlqueued') {
+      const chunks = [];
+      for await (const c of req) chunks.push(c);
+      state.queueControlled = JSON.parse(Buffer.concat(chunks).toString() || '{}');
+      return json(res, { success: true, detail: 'ok' });
+    }
+
     if (url.pathname === '/v1/api/torrents/controltorrent') {
       const body = await new Promise((resolve) => {
         const chunks = [];
@@ -139,6 +165,11 @@ function startCloudApi() {
         req.on('end', () => resolve(Buffer.concat(chunks)));
       });
       state.submitted = body;
+      if (state.queueNext) {
+        state.queueNext = false;
+        state.queued = true;
+        return json(res, { success: true, detail: 'Torrent queued.', data: { queued_id: 5, hash: QUEUED_HASH, auth_id: 'x', active_limit: 1, current_active_downloads: 1 } });
+      }
       return json(res, { success: true, data: { torrent_id: 77, hash: 'deadbeef', auth_id: 'x' } });
     }
 
@@ -149,6 +180,7 @@ function startCloudApi() {
       const ready = state.polls > 1;
       const row = {
         id: 77,
+        hash: 'deadbeef',
         name: 'private release.bin',
         size: state.payload.length,
         progress: ready ? 1 : 0.5,
@@ -157,8 +189,10 @@ function startCloudApi() {
         download_finished: ready,
         files: ready ? [{ id: 9, short_name: 'private release.bin', size: state.payload.length }] : [],
       };
+      // The queued torrent, once it has started: an ordinary row, found by its info hash.
+      const started = { id: 78, hash: QUEUED_HASH, name: 'queued release', size: 1, progress: 1, download_state: 'completed', download_present: true, download_finished: true, files: [{ id: 0, short_name: 'queued release', size: 1 }] };
       // No id → the whole account, which is what the library asks for.
-      if (!url.searchParams.get('id')) return json(res, { success: true, data: state.deleted ? [] : [row] });
+      if (!url.searchParams.get('id')) return json(res, { success: true, data: [...(state.deleted ? [] : [row]), ...(state.started ? [started] : [])] });
       if (state.deleted) return json(res, { success: true, data: null });
       return json(res, {
         success: true,
@@ -226,18 +260,29 @@ function startPutioApi() {
       return send({ status: 'OK', info: { username: 'phone-user', disk: { used: 1024 * 1024, size: 100 * 1024 * 1024, avail: 99 * 1024 * 1024 } } });
     }
     if (url.pathname === '/v2/transfers/list') {
+      state.listCalls = (state.listCalls || 0) + 1;
       const ready = state.polls > 1;
+      const extra = state.extra ? [
+        { id: 57, name: 'clip.mp4', status: 'COMPLETED', percent_done: 100, file_id: 1235, size: state.payload.length },
+        { id: 58, name: 'still going', status: state.extraFailed ? 'ERROR' : 'DOWNLOADING', percent_done: 10, file_id: null, size: 1000 },
+      ] : [];
       return send({
         status: 'OK',
-        transfers: state.deleted ? [] : [{
+        transfers: [...(state.deleted ? [] : [{
           id: 55,
           name: 'putio release.bin',
           status: ready ? 'COMPLETED' : 'DOWNLOADING',
           percent_done: ready ? 100 : 40,
           file_id: ready ? 1234 : null,
           size: state.payload.length,
-        }],
+        }]), ...extra],
       });
+    }
+    if (url.pathname === '/v2/transfers/57') {
+      return send({ status: 'OK', transfer: { id: 57, name: 'clip.mp4', status: 'COMPLETED', percent_done: 100, file_id: 1235 } });
+    }
+    if (url.pathname === '/v2/files/1235') {
+      return send({ status: 'OK', file: { id: 1235, name: 'clip.mp4', file_type: 'VIDEO', size: state.payload.length } });
     }
     if (url.pathname === '/v2/transfers/cancel' || url.pathname === '/v2/files/delete') {
       const chunks = [];
@@ -343,7 +388,10 @@ function startDebridApis(payloadUrl) {
         state.rdUnrestricted = body.toString();
         return send({ download: payloadUrl, filename: 'rd release.mkv', filesize: 4096 });
       }
-      if (p === 'torrents/delete/RD1') return send({}, 204);
+      if (p === 'torrents/delete/RD1') {
+        state.rdDeleted = req.method;
+        return send({}, 204);
+      }
       return send({ error: 'unknown_endpoint' }, 404);
     }
 
@@ -358,22 +406,24 @@ function startDebridApis(payloadUrl) {
         return send({ status: 'success', data: { magnets: [{ id: 77, magnet: state.adMagnet, ready: false }] } });
       }
       if (url.pathname === '/v4/magnet/upload/file') {
+        // What AllDebrid answers to a file upload: data.files, each naming the file it came
+        // from — not data.magnets, which is the answer to a magnet.
         state.adUploaded = body;
-        return send({ status: 'success', data: { magnets: [{ id: 77, ready: false }] } });
+        return send({ status: 'success', data: { files: [{ file: 'debrid.torrent', name: 'ad release', size: 4096, hash: 'a'.repeat(40), ready: false, id: 78 }] } });
       }
       if (url.pathname === '/v4.1/magnet/status') {
-        const row = { id: 77, filename: 'ad release.mkv', size: 4096, downloaded: 4096, status: state.adDeleted ? 'Error' : 'Ready' };
+        const row = { id: 77, filename: 'ad release.mkv', size: 4096, downloaded: 4096, status: state.adDeleted ? 'Error' : 'Ready', statusCode: state.adDeleted ? 5 : 4 };
         // With an id it answers with one object; without, with the whole list.
         if (url.searchParams.get('id')) return send({ status: 'success', data: { magnets: row } });
         return send({ status: 'success', data: { magnets: state.adDeleted ? [] : [row] } });
       }
       if (url.pathname === '/v4/magnet/files') {
-        return send({
-          status: 'success',
-          data: { magnets: [{ id: 77, files: [{ n: 'season', e: [{ n: 'ad release.mkv', s: 4096, l: 'https://alldebrid.example/locked/xyz' }] }] }] },
-        });
+        // A season: more files than one burst of unlocks, all of which must be listed.
+        const episodes = Array.from({ length: 60 }, (_, i) => ({ n: `ad release ${String(i + 1).padStart(2, '0')}.mkv`, s: 4096, l: `https://alldebrid.example/locked/xyz${i}` }));
+        return send({ status: 'success', data: { magnets: [{ id: 77, files: [{ n: 'season', e: episodes }] }] } });
       }
       if (url.pathname === '/v4/link/unlock') {
+        state.adUnlocks = (state.adUnlocks || 0) + 1;
         state.adUnlocked = url.searchParams.get('link');
         return send({ status: 'success', data: { link: payloadUrl, filename: 'ad release.mkv', filesize: 4096 } });
       }
@@ -384,6 +434,37 @@ function startDebridApis(payloadUrl) {
       return send({ status: 'error', error: { code: 'NOT_FOUND', message: 'no such endpoint' } });
     }
     send({ error: 'not found' }, 404);
+  });
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () => resolve({ server, state, url: `http://127.0.0.1:${server.address().port}` }));
+  });
+}
+
+const QUEUED_HASH = '5'.repeat(40);
+
+/* proxy/cloudflare-worker.js, served on localhost: the same code the user deploys, in front of
+ * the stand-ins. Workers stream a request body without being asked; Node's fetch wants
+ * duplex: 'half' said out loud, so the worker's upstream calls get it here. */
+function startCorsProxy(env) {
+  const state = { methods: [] };
+  const nodeFetch = globalThis.fetch;
+  globalThis.fetch = (input, init = {}) => nodeFetch(input, init.body && typeof init.body.getReader === 'function' ? { ...init, duplex: 'half' } : init);
+  const server = http.createServer(async (req, res) => {
+    const chunks = [];
+    for await (const c of req) chunks.push(c);
+    state.methods.push(req.method);
+    const headers = {};
+    for (const h of ['origin', 'authorization', 'content-type', 'range', 'accept', 'access-control-request-method']) {
+      if (req.headers[h]) headers[h] = req.headers[h];
+    }
+    const request = new Request(`http://proxy.test${req.url}`, {
+      method: req.method,
+      headers,
+      body: ['GET', 'HEAD', 'OPTIONS'].includes(req.method) ? undefined : Buffer.concat(chunks),
+    });
+    const response = await proxyWorker.fetch(request, env);
+    res.writeHead(response.status, Object.fromEntries(response.headers));
+    res.end(Buffer.from(await response.arrayBuffer()));
   });
   return new Promise((resolve) => {
     server.listen(0, '127.0.0.1', () => resolve({ server, state, url: `http://127.0.0.1:${server.address().port}` }));
@@ -440,6 +521,8 @@ const cloudApi = await startCloudApi();
 const putioApi = await startPutioApi();
 const debridApi = await startDebridApis(`${site.url}test/.tmp/debrid-payload.bin`);
 log('cloud API stubs at', cloudApi.url, ',', putioApi.url, 'and', debridApi.url);
+const corsProxy = await startCorsProxy({ ALLOWED_ORIGINS: new URL(site.url).origin, API_HOSTS: new URL(debridApi.url).host });
+log('CORS proxy worker at', corsProxy.url);
 
 // BROWSER=webkit runs the same suite on Safari's engine (what every browser on iOS uses).
 const BROWSER = process.env.BROWSER || 'chromium';
@@ -1140,6 +1223,7 @@ try {
   await waitFor(() => ios.$eval('#cloud-info', (e) => /Key accepted \(phone@example\.com\)/.test(e.textContent)), { label: 'cloud key accepted', timeout: 15000 });
   await ios.click('#settings-dialog button[type="submit"]');
   await ios.waitForSelector('#settings-dialog[open]', { state: 'detached', timeout: 5000 }).catch(() => {});
+  await savedService(ios, 'torbox');
   log('cloud key validated and saved');
 
   const privateCard = ios.locator('.torrent', { has: ios.locator('.name', { hasText: 'private release.bin' }) }).first();
@@ -1206,6 +1290,7 @@ try {
   await waitFor(() => ios.$eval('#cloud-info', (e) => /Key accepted \(phone-user\)/.test(e.textContent)), { label: 'put.io token accepted', timeout: 15000 });
   await ios.click('#settings-dialog button[type="submit"]');
   await ios.waitForSelector('#settings-dialog[open]', { state: 'detached', timeout: 5000 }).catch(() => {});
+  await savedService(ios, 'putio');
 
   const putioCard = ios.locator('.torrent', { has: ios.locator('.name', { hasText: 'putio release.bin' }) }).first();
   await putioCard.locator('.nopeers-cloud-btn').click();
@@ -1227,7 +1312,46 @@ try {
   // the API it was started on.
   const torboxLink = await restoredCard.locator('.cloud-files a').first().getAttribute('href');
   assert.ok(torboxLink.startsWith(cloudApi.url), 'the TorBox transfer still links to TorBox after switching provider');
-  log('per-transfer service kept across a provider switch');
+
+  // And across a reload, which is where it used to be lost: only the id was stored, so the
+  // TorBox transfer came back polling put.io — with put.io's key.
+  await ios.reload();
+  await ios.waitForFunction(() => window.__phoneTorrent?.client);
+  const torboxAgain = ios.locator('.torrent', { has: ios.locator('.name', { hasText: 'private release.bin' }) }).first();
+  const putioAgain = ios.locator('.torrent', { has: ios.locator('.name', { hasText: 'putio release.bin' }) }).first();
+  await waitFor(() => torboxAgain.locator('.cloud-state').textContent().then((t) => /Ready on TorBox/.test(t)).catch(() => false), { label: 'TorBox transfer restored on TorBox after a switch and a reload', timeout: 30000 });
+  await waitFor(() => putioAgain.locator('.cloud-state').textContent().then((t) => /Ready on put\.io/.test(t)).catch(() => false), { label: 'put.io transfer restored on put.io', timeout: 30000 });
+  const torboxHref = await torboxAgain.locator('.cloud-files a').first().getAttribute('href');
+  assert.ok(torboxHref.startsWith(`${cloudApi.url}/v1/api/torrents/requestdl`), 'the restored TorBox link points at TorBox');
+  assert.equal(new URL(torboxHref).searchParams.get('token'), 'test-api-key', "and carries TorBox's key, not put.io's");
+  log('per-transfer service kept across a provider switch and a reload, key included');
+
+  // TorBox with every slot taken queues the torrent: a queued id, found in /queued, which
+  // becomes an ordinary torrent id once it starts. Neither step may read as a lost transfer.
+  cloudApi.state.queueNext = true;
+  const queued = await ios.evaluate(async (base) => {
+    const ctx = window.__phoneTorrent.cloudCtx({ provider: 'torbox', base, key: 'test-api-key' });
+    const id = await ctx.api.submit(ctx, { magnet: `magnet:?xt=urn:btih:${'5'.repeat(40)}` });
+    const waiting = await ctx.api.status(ctx, id);
+    const listed = (await ctx.api.list(ctx)).find((t) => t.id === id);
+    await ctx.api.remove(ctx, id);
+    return { id, waiting, listed };
+  }, cloudApi.url);
+  assert.match(String(queued.id), /^queued:5:/, 'a queued submit is remembered as queued');
+  assert.equal(queued.waiting.state, 'queued', 'and reads as queued, not as gone');
+  assert.equal(queued.waiting.ready, false);
+  assert.ok(queued.listed && queued.listed.state === 'queued', 'the library lists the queued torrent');
+  assert.deepEqual(cloudApi.state.queueControlled, { queued_id: 5, operation: 'delete', type: 'torrent' }, 'deleting it goes to the queue');
+  cloudApi.state.queued = false;
+  cloudApi.state.started = true;
+  const started = await ios.evaluate(async ({ base, id }) => {
+    const ctx = window.__phoneTorrent.cloudCtx({ provider: 'torbox', base, key: 'test-api-key' });
+    return ctx.api.status(ctx, id);
+  }, { base: cloudApi.url, id: queued.id });
+  assert.equal(started.id, 78, 'once started, the transfer carries the torrent id TorBox gave it');
+  assert.equal(started.ready, true);
+  cloudApi.state.started = false;
+  log('TorBox queue: queued, listed, deleted, and followed once it starts');
 
   /* ---------- the cloud library: the account itself, no local torrent involved ---------- */
   await ios.click('.tab[data-tab="cloud"]');
@@ -1263,13 +1387,62 @@ try {
   assert.match(putioApi.state.deletedFiles, /file_ids=1234/);
   log('cloud library OK: listed, streamed link, magnet sent, deleted');
 
+  // A video playing in the library survives the polls that run while something else is still
+  // downloading: rows are updated, not rebuilt.
+  putioApi.state.extra = true;
+  await ios.click('#cloud-refresh-btn');
+  const clipRow = ios.locator('.cloud-item', { has: ios.locator('.cloud-item-name', { hasText: 'clip.mp4' }) });
+  await clipRow.waitFor({ timeout: 15000 });
+  await clipRow.locator('.cloud-item-files-btn').click();
+  await clipRow.locator('.cloud-play').click();
+  await ios.evaluate(() => { document.querySelector('.cloud-player video').dataset.mark = 'the same one'; });
+  const listCalls = putioApi.state.listCalls;
+  await waitFor(() => putioApi.state.listCalls >= listCalls + 2, { label: 'two library polls', timeout: 20000 });
+  assert.equal(await ios.evaluate(() => document.querySelector('.cloud-player video')?.dataset.mark), 'the same one', 'the player is still there, untouched');
+  assert.equal(await clipRow.locator('.cloud-item-files').isHidden(), false, 'and its file list is still open');
+  // A transfer that failed is not downloading: the library stops asking about it.
+  putioApi.state.extraFailed = true;
+  await waitFor(() => ios.$$eval('.cloud-item-meta', (els) => els.some((e) => /failed: error/.test(e.textContent))), { label: 'failed transfer shown', timeout: 20000 });
+  const settledCalls = putioApi.state.listCalls;
+  await new Promise((r) => setTimeout(r, 12000));
+  assert.equal(putioApi.state.listCalls, settledCalls, 'no polling once the only unfinished transfer has failed');
+  putioApi.state.extra = false;
+  log('library: a playing video survives the polls, and a failed transfer stops them');
+
+  // "Test the key" tries what is typed, and Cancel leaves everything as it was. And in Simple
+  // mode, where a hosted service's address is hidden, switching away from your server must not
+  // carry the server's address along to where the service's key is sent.
+  await ios.click('#settings-btn');
+  await ios.waitForSelector('#settings-dialog[open]');
+  await ios.click('#mode-simple');
+  await ios.selectOption('#cloud-provider', 'server');
+  await ios.fill('#cloud-base', 'https://home.example');
+  await ios.selectOption('#cloud-provider', 'torbox');
+  assert.equal(await ios.isVisible('#cloud-base'), false, 'a hosted service hides its address in Simple mode');
+  assert.equal(await ios.inputValue('#cloud-base'), cloudApi.url, "TorBox shows its own address, not the server's");
+  assert.equal(await ios.inputValue('#cloud-key'), 'test-api-key', 'and its own key');
+  await ios.fill('#cloud-key', 'typed-but-not-saved');
+  await ios.click('#cloud-test-btn');
+  await waitFor(() => ios.$eval('#cloud-info', (e) => /^Key /.test(e.textContent)), { label: 'test answered', timeout: 15000 });
+  await ios.keyboard.press('Escape');
+  await ios.waitForSelector('#settings-dialog[open]', { state: 'detached', timeout: 5000 }).catch(() => {});
+  const after = await ios.evaluate(() => {
+    const ctx = window.__phoneTorrent.cloudCtx();
+    return { provider: ctx.provider, key: ctx.key, base: ctx.base };
+  });
+  assert.deepEqual(after, { provider: 'putio', key: 'putio-token', base: putioApi.url }, 'a tested, cancelled key changes nothing');
+  log('settings: Test changes nothing until Save; each service keeps its own address and key');
+
   /* ---------- Real-Debrid and AllDebrid: the same table, two other dialects ---------- */
   // Driven through the app's own provider functions rather than the UI, which
   // put.io and TorBox already cover: what is under test here is the mapping.
   const debridPayload = rnd(4096, 51);
   writeFileSync(path.join(TMP, 'debrid-payload.bin'), debridPayload);
 
-  for (const [provider, label, account] of [['realdebrid', 'Real-Debrid', 'rd-user'], ['alldebrid', 'AllDebrid', 'ad-user']]) {
+  const debridTorrent = privateTorrent(debridPayload, 'debrid.bin').toString('base64');
+  // Real-Debrid goes through the CORS proxy worker, which is where its PUT (add a .torrent) and
+  // DELETE were refused; AllDebrid goes straight to its API.
+  for (const [provider, label, account, viaProxy, fileCount] of [['realdebrid', 'Real-Debrid', 'rd-user', true, 1], ['alldebrid', 'AllDebrid', 'ad-user', false, 60]]) {
     // Point the app at the stand-in through its own settings dialog, which is
     // also the only place the new services have to appear.
     await ios.click('#settings-btn');
@@ -1278,32 +1451,47 @@ try {
     await ios.selectOption('#cloud-provider', provider);
     await ios.fill('#cloud-key', 'debrid-key');
     await ios.fill('#cloud-base', debridApi.url);
+    await ios.fill('#corsproxy-input', `${corsProxy.url}/?url={url}`);
+    await ios.setChecked('#cloud-proxy-toggle', viaProxy);
     await ios.click('#cloud-test-btn');
     await waitFor(() => ios.$eval('#cloud-info', (e) => /Key accepted/.test(e.textContent)), { label: `${label} key accepted`, timeout: 15000 });
     await ios.click('#settings-dialog button[type="submit"]');
     await ios.waitForSelector('#settings-dialog[open]', { state: 'detached', timeout: 5000 }).catch(() => {});
+    await savedService(ios, provider);
 
-    const result = await ios.evaluate(async () => {
+    const proxyCalls = corsProxy.state.methods.length;
+    const result = await ios.evaluate(async (torrentB64) => {
       const ctx = window.__phoneTorrent.cloudCtx();
       const who = await ctx.api.check(ctx);
+      const bytes = Uint8Array.from(atob(torrentB64), (c) => c.charCodeAt(0));
+      const fromFile = await ctx.api.submit(ctx, { bytes, name: 'debrid' });
       const id = await ctx.api.submit(ctx, { magnet: 'magnet:?xt=urn:btih:' + '4'.repeat(40) });
       const status = await ctx.api.status(ctx, id);
       const listed = await ctx.api.list(ctx);
       const link = ctx.api.fileLink(ctx, id, status.files[0]);
       const { detail } = await ctx.api.account(ctx);
       await ctx.api.remove(ctx, id, status);
-      return { who, id, status, listed: listed.length, link, detail };
-    });
+      return { who, id, fromFile, status, listed: listed.length, link, detail };
+    }, debridTorrent);
 
     assert.equal(result.who, account, `${label} says who the key belongs to`);
     assert.ok(result.id, `${label} returned a transfer id`);
+    assert.ok(result.fromFile, `${label} returned a transfer id for a .torrent file`);
     assert.equal(result.status.ready, true, `${label} reports a finished transfer`);
-    assert.equal(result.status.files.length, 1, `${label} lists the file`);
+    assert.equal(result.status.files.length, fileCount, `${label} lists every file`);
     assert.equal(result.status.files[0].size, 4096);
     assert.equal(result.link, `${site.url}test/.tmp/debrid-payload.bin`, `${label} hands back a link that needs no key`);
     assert.ok(result.listed >= 1, `${label} lists the account's transfers`);
-    log(`${label} OK: ${result.who} · ${result.detail} · ${result.status.files[0].name}`);
+    const methods = corsProxy.state.methods.slice(proxyCalls);
+    if (viaProxy) {
+      assert.ok(methods.includes('PUT') && methods.includes('DELETE'), `${label}'s PUT and DELETE went through the proxy (${methods.join(' ')})`);
+    }
+    log(`${label} OK: ${result.who} · ${result.detail} · ${result.status.files[0].name} · ${result.status.files.length} file(s)${viaProxy ? ' · via the CORS proxy' : ''}`);
   }
+  assert.ok(debridApi.state.rdBytes && debridApi.state.rdBytes.includes('debrid.bin'), 'the .torrent reached Real-Debrid through the proxy');
+  assert.equal(debridApi.state.rdDeleted, 'DELETE', 'and so did the delete');
+  assert.ok(debridApi.state.adUploaded && debridApi.state.adUploaded.includes('debrid.bin'), 'the .torrent reached AllDebrid');
+  assert.equal(debridApi.state.adUnlocks, 60, 'every AllDebrid file was unlocked, not the first fifty');
   // Served by your own server, the address to call is the one you are already on:
   // `docker compose up`, open it, and there is nothing to type in settings. Compared
   // against the address the test itself served from, so the page cannot agree with itself.
@@ -1313,6 +1501,18 @@ try {
   });
   assert.equal(serverFallback, new URL(site.url).origin, 'with no address of its own, the server provider means this page — which is where a server that serves the app is');
   log('a server with no address means this page itself:', serverFallback);
+
+  // A server that signs its links hands one per file, used as it is: no token added to it.
+  const serverLinks = await ios.evaluate(() => {
+    const ctx = window.__phoneTorrent.cloudCtx({ provider: 'server', base: 'https://box.example', key: 'secret' });
+    return [
+      ctx.api.fileLink(ctx, 'ab', { id: 0, link: '/api/transfers/ab/files/0?expires=1&sig=x' }),
+      ctx.api.fileLink(ctx, 'ab', { id: 0 }),
+    ];
+  });
+  assert.equal(serverLinks[0], 'https://box.example/api/transfers/ab/files/0?expires=1&sig=x', 'the signed link is the link');
+  assert.match(serverLinks[1], /token=secret/, 'a server from before signed links still gets the token');
+  log('server file links: the signed one as it is, the token only for an older server');
 
   assert.ok(debridApi.state.rdSelected, 'Real-Debrid was told to select every file, without which it downloads nothing');
   assert.match(debridApi.state.rdUnrestricted, /link=https/, 'the restricted link was unrestricted');
@@ -1370,6 +1570,7 @@ try {
   cloudApi.server.close();
   putioApi.server.close();
   debridApi.server.close();
+  corsProxy.server.close();
   tracker.close();
   process.exit(failed ? 1 : 0);
 }

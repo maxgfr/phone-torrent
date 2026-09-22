@@ -12,9 +12,12 @@
  */
 
 const PASS_REQUEST_HEADERS = ['range', 'accept', 'if-none-match', 'if-modified-since'];
-// Cloud-fetch API calls need POST and an Authorization header. That header carries the user's API
-// key, so it is only ever forwarded to hosts named in API_HOSTS — never to an arbitrary ?url=.
-const API_METHODS = ['GET', 'HEAD', 'POST'];
+// Cloud-fetch API calls need POST (and PUT and DELETE: Real-Debrid adds a .torrent with PUT and
+// deletes with DELETE, and so does your own server) and an Authorization header. That header
+// carries the user's API key, so it and every method that writes are only ever forwarded to
+// hosts named in API_HOSTS — never to an arbitrary ?url=.
+const API_METHODS = ['GET', 'HEAD', 'POST', 'PUT', 'DELETE'];
+const WRITE_METHODS = ['POST', 'PUT', 'DELETE'];
 const PASS_RESPONSE_HEADERS = ['content-type', 'content-length', 'content-range', 'accept-ranges', 'etag', 'last-modified', 'content-disposition'];
 
 export default {
@@ -27,7 +30,7 @@ export default {
     const maxBytes = Number(env && env.MAX_BYTES) || 4 * 1024 * 1024 * 1024; // 4 GiB per request by default
     const cors = {
       'Access-Control-Allow-Origin': origin,
-      'Access-Control-Allow-Methods': 'GET, HEAD, POST, OPTIONS',
+      'Access-Control-Allow-Methods': 'GET, HEAD, POST, PUT, DELETE, OPTIONS',
       'Access-Control-Allow-Headers': 'Range, Accept, Authorization, Content-Type, If-None-Match, If-Modified-Since',
       'Access-Control-Expose-Headers': PASS_RESPONSE_HEADERS.join(', '),
       'Access-Control-Max-Age': '86400',
@@ -41,7 +44,7 @@ export default {
     // Hosts allowed to receive an Authorization header (cloud-fetch APIs), e.g. "api.torbox.app".
     const apiHosts = (env && env.API_HOSTS ? env.API_HOSTS.split(',') : []).map((s) => s.trim()).filter(Boolean);
     const isApiHost = apiHosts.includes(new URL(target).host);
-    if (request.method === 'POST' && !isApiHost) return new Response('POST is only allowed to API_HOSTS', { status: 403, headers: cors });
+    if (WRITE_METHODS.includes(request.method) && !isApiHost) return new Response(`${request.method} is only allowed to API_HOSTS`, { status: 403, headers: cors });
 
     const headers = new Headers();
     for (const h of PASS_REQUEST_HEADERS) {
@@ -61,7 +64,7 @@ export default {
       upstream = await fetch(target, {
         method: request.method,
         headers,
-        body: request.method === 'POST' ? request.body : undefined,
+        body: request.method === 'POST' || request.method === 'PUT' ? request.body : undefined,
         redirect: 'follow',
       });
     } catch (err) {
