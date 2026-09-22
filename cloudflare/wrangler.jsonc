@@ -1,8 +1,7 @@
 {
   // Run the server on Cloudflare's network, with no machine of your own.
   //
-  //   npm install -g wrangler
-  //   cd cloudflare && wrangler deploy
+  //   cd cloudflare && npm install && npx wrangler deploy
   //
   // Read cloudflare/README.md first: Containers need a Workers paid plan, the
   // disk is ephemeral, and a container with no inbound port reaches fewer peers

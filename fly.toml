@@ -24,14 +24,17 @@ primary_region = "cdg"
   auto_start_machines = true
   min_machines_running = 1
 
-  [http_service.checks]
-    [http_service.checks.health]
-      path = "/api/health"
-      interval = "30s"
-      timeout = "5s"
+  # An array of tables: flyctl reads `checks` as a list, and a single table there
+  # fails to parse into it.
+  [[http_service.checks]]
+    grace_period = "10s"
+    interval = "30s"
+    method = "GET"
+    path = "/api/health"
+    timeout = "5s"
 
-# The BitTorrent port, so peers can reach this machine rather than only the
-# other way round.
+# The BitTorrent port (TCP), so peers can reach this machine rather than only the
+# other way round. The server listens on 6881 for it; see TORRENT_PORT.
 [[services]]
   internal_port = 6881
   protocol = "tcp"

@@ -15,14 +15,17 @@ services:
     pull_policy: always
     ports:
       - "8080:8080"
-      # The BitTorrent port. Forward it on your router and peers can connect to
-      # you as well as the other way round; without it you can still download.
+      # The BitTorrent ports: TCP and uTP on 6881, the DHT on 6882. Forward them
+      # on your router and peers can connect to you as well as the other way
+      # round; without them you can still download.
       - "6881:6881/tcp"
       - "6881:6881/udp"
+      - "6882:6882/udp"
     environment:
-      # Same-origin by default, because this container serves the app too. Add
-      # your GitHub Pages URL here if you use the hosted page against it.
-      ALLOWED_ORIGINS: "*"
+      # Same-origin by default, because this container serves the app too: no
+      # other site the browser has open can call it. Name your GitHub Pages
+      # origin here only if you use the hosted page against this server.
+      # ALLOWED_ORIGINS: "https://<user>.github.io"
       # Set this the moment the server is reachable from outside your network.
       # AUTH_TOKEN: "change-me"
       # Keep seeding once a download finishes: it is how the swarm survives.
