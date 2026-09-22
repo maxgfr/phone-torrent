@@ -682,6 +682,9 @@ try {
   // Merge rather than replace: this context also saves settings through the app's own
   // dialog later on, and a rewrite on every navigation would quietly undo that.
   await phone.addInitScript(({ listUrl, metaUrl, rtc }) => {
+    // The share-target step loads a plain form with setContent, on about:blank,
+    // which has no storage to read; only the app's own pages need the settings.
+    if (!location.protocol.startsWith('http')) return;
     let current = {};
     try { current = JSON.parse(localStorage.getItem('phone-torrent:settings') || '{}'); } catch { /* first load */ }
     localStorage.setItem('phone-torrent:settings', JSON.stringify({
