@@ -90,6 +90,8 @@ const els = {
   wakelockToggle: $('#wakelock-toggle'),
   debugToggle: $('#debug-toggle'),
   resetTrackersBtn: $('#reset-trackers-btn'),
+  settingsForm: $('#settings-dialog form'),
+  settingsError: $('#settings-error'),
   clearStorageBtn: $('#clear-storage-btn'),
   copyDiagBtn: $('#copy-diag-btn'),
   storageInfo: $('#storage-info'),
@@ -365,6 +367,22 @@ async function cleanOrphanStores(records) {
   } catch { /* ignore */ }
 }
 
+const TAB_LOCK = 'phone-torrent:open-tab';
+
+/**
+ * A seed is never remembered, so to the housekeeping above the files another open tab is sharing
+ * look orphaned. Every tab holds a shared lock for as long as it is open, and the cleanup only runs
+ * when that lock can be had exclusively — when this is the only tab. Without Web Locks there is no
+ * way to know, and the cleanup runs as it always did.
+ */
+async function cleanOrphanStoresIfAlone(records) {
+  if (!navigator.locks?.request) return cleanOrphanStores(records);
+  try {
+    await navigator.locks.request(TAB_LOCK, { mode: 'exclusive', ifAvailable: true }, (lock) => (lock ? cleanOrphanStores(records) : null));
+  } catch { /* no cleanup this time; it is only housekeeping */ }
+  navigator.locks.request(TAB_LOCK, { mode: 'shared' }, () => new Promise(() => {})).catch(() => {});
+}
+
 /** Resolves once persisted records are loaded and orphan stores are cleaned; adding waits for it. */
 let storageReady = Promise.resolve([]);
 
@@ -386,12 +404,27 @@ async function probeOpfs() {
   }
 }
 
+/**
+ * Memory stores by name ("<torrent name> - <first 8 hex of info hash>", as WebTorrent names them).
+ * A retry, or coming back to a frozen tab, removes a torrent and adds it again; with OPFS the new
+ * torrent finds its pieces on disk, and this is what lets it find them in memory too.
+ */
+const memoryStores = new Map();
+
 /** Minimal in-memory chunk store with the interface WebTorrent expects. */
 class MemoryChunkStore {
-  constructor(chunkLength) {
+  constructor(chunkLength, opts = {}) {
+    // The same torrent added again gets the store it had, pieces and all: close() kept them.
+    const kept = opts.name ? memoryStores.get(opts.name) : null;
+    if (kept && kept.chunkLength === Number(chunkLength)) {
+      kept.closed = false;
+      return kept;
+    }
+    this.name = opts.name || '';
     this.chunkLength = Number(chunkLength);
     this.chunks = new Map();
     this.closed = false;
+    if (this.name) memoryStores.set(this.name, this);
   }
 
   put(index, buf, cb = () => {}) {
@@ -417,6 +450,7 @@ class MemoryChunkStore {
 
   destroy(cb = () => {}) {
     this.chunks.clear();
+    if (memoryStores.get(this.name) === this) memoryStores.delete(this.name);
     this.close(cb);
   }
 }
@@ -461,16 +495,28 @@ function toast(message, { error = false, timeout = 4500 } = {}) {
 function parseTorrentText(text) {
   const t = (text || '').trim();
   if (!t) return null;
-  if (/^magnet:\?/i.test(t)) return t;
+  // A magnet anywhere in the text wins, and only the magnet: the app's own link carries one in its
+  // fragment (https://…/#magnet:?…), which is not a .torrent to fetch, and shared text often has a
+  // title on the next line, which is not part of the last parameter.
+  const magnet = t.match(/magnet:\?[^\s"<>]+/i);
+  if (magnet) return magnet[0];
   if (/^[a-f0-9]{40}$/i.test(t) || /^[a-z2-7]{32}$/i.test(t)) return `magnet:?xt=urn:btih:${t}`;
   if (/^https?:\/\/\S+$/i.test(t)) return t;
-  const embedded = t.match(/magnet:\?\S+/i);
-  if (embedded) return embedded[0];
   return null;
 }
 
 function safeDecode(text) {
   try { return decodeURIComponent(text); } catch { return text; }
+}
+
+/**
+ * The magnet in this page's fragment. It is kept as it is — its parameters are percent-encoded
+ * already, and decoding the whole of it turns a "%26" inside a name into a separator — unless the
+ * magnet itself arrived encoded (#magnet%3A%3F…).
+ */
+function magnetFromHash() {
+  const raw = location.hash.slice(1);
+  return parseTorrentText(/^magnet%3a/i.test(raw) ? safeDecode(raw) : raw);
 }
 
 function describeTorrentId(id) {
@@ -509,6 +555,8 @@ async function copyText(text) {
     ta.style.opacity = '0';
     document.body.appendChild(ta);
     ta.select();
+    // iOS ignores select() on a read-only field: without a selection range, "copy" copies nothing.
+    ta.setSelectionRange(0, ta.value.length);
     let ok = false;
     try { ok = document.execCommand('copy'); } catch { /* ignore */ }
     ta.remove();
@@ -1817,7 +1865,9 @@ function createTorrentView(torrent, record, seeding) {
   }
 
   torrent.on('infoHash', () => {
-    if (!torrent.name) $('.name', el).textContent = torrent.infoHash;
+    // A magnet's display name (dn) is already torrent.name here, before any metadata: show it, or
+    // the info hash without one, rather than "Fetching metadata…" — the state line says that.
+    if (!torrent.metadata) $('.name', el).textContent = torrent.name || torrent.infoHash;
     logEvent(view, `info hash ${torrent.infoHash}`);
     if (!torrent.metadata && !view.seeding) {
       scheduleMetadataFallback(view);
@@ -1836,6 +1886,12 @@ function createTorrentView(torrent, record, seeding) {
       }
     }
     renderFiles(view);
+  });
+  // Before a torrent is ready WebTorrent checks which pieces it already has, and selects every one
+  // it does not — which undoes a file unticked in the meantime, right after adding, while its box
+  // stays unticked. Nothing has been requested yet at this point, so the ticks go back on here.
+  torrent.on('ready', () => {
+    if (view.fileEls.length && !view.seeding) applySelection(view);
   });
   torrent.on('done', () => {
     el.classList.add('done');
@@ -1876,9 +1932,9 @@ function renderFiles(view) {
     }
 
     checkbox.addEventListener('change', () => {
-      if (checkbox.checked) file.select();
-      else file.deselect();
+      applySelection(view);
       li.classList.toggle('deselected', !checkbox.checked);
+      resumeAutoStopped(view);
       persistTorrent(view);
       refreshView(view);
       updateWakeLock();
@@ -1900,17 +1956,27 @@ function selectedFiles(view) {
   });
 }
 
+/**
+ * Hand the ticks to WebTorrent. A file is a range of pieces, and two neighbours share the piece
+ * where one ends and the next begins: deselecting a file drops that piece from the selection too,
+ * and the neighbour still wanted could then never finish — it sat at 99% for ever. So the unwanted
+ * files are deselected first and the wanted ones selected after, which puts their edges back.
+ */
+function applySelection(view) {
+  const wanted = view.torrent.files.map((file, i) => !view.fileEls[i] || $('input[type="checkbox"]', view.fileEls[i]).checked);
+  view.torrent.files.forEach((file, i) => { if (!wanted[i]) file.deselect(); });
+  view.torrent.files.forEach((file, i) => { if (wanted[i]) file.select(); });
+}
+
 function setAllSelected(torrent, selected) {
   const view = views.get(torrent);
   if (!view) return;
-  view.fileEls.forEach((li, i) => {
-    const checkbox = $('input[type="checkbox"]', li);
-    if (checkbox.checked === selected) return;
-    checkbox.checked = selected;
+  view.fileEls.forEach((li) => {
+    $('input[type="checkbox"]', li).checked = selected;
     li.classList.toggle('deselected', !selected);
-    if (selected) torrent.files[i].select();
-    else torrent.files[i].deselect();
   });
+  applySelection(view);
+  resumeAutoStopped(view);
   persistTorrent(view);
   refreshView(view);
   updateWakeLock();
@@ -1945,7 +2011,9 @@ function refreshView(view) {
 
   const selected = selectedFiles(view);
   const selectedBytes = selected.reduce((n, f) => n + f.length, 0);
-  const selectedDownloaded = selected.reduce((n, f) => n + f.downloaded, 0);
+  // WebTorrent's File.downloaded counts one piece short for a file that ends exactly on a piece
+  // boundary, so a finished download would sit at 99% for ever; a file that is done is all there.
+  const selectedDownloaded = selected.reduce((n, f) => n + (f.done ? f.length : Math.max(0, f.downloaded)), 0);
   const progress = torrent.files.length
     ? (selectedBytes ? selectedDownloaded / selectedBytes : 0)
     : torrent.progress;
@@ -2023,7 +2091,7 @@ function refreshView(view) {
   torrent.files.forEach((file, i) => {
     const li = view.fileEls[i];
     if (!li) return;
-    const fp = Math.min(100, Math.floor(file.progress * 100));
+    const fp = file.done ? 100 : Math.max(0, Math.min(100, Math.floor(file.progress * 100)));
     $('.file-progress .bar', li).style.width = `${fp}%`;
     const done = file.done || file.progress >= 1;
     li.classList.toggle('done', done);
@@ -2081,6 +2149,22 @@ function stopTransfer(torrent) {
   torrent.pause();
   // pause() only stops new connections; drop the current ones so transfer really stops.
   for (const wire of [...torrent.wires]) wire.destroy();
+}
+
+/**
+ * With "keep seeding" off, a finished torrent is stopped — finished meaning every selected file.
+ * Selecting one more makes it unfinished again, and that stop no longer applies: without this it
+ * would sit paused for ever while its card said it was looking for peers. Selecting nothing at all
+ * leaves nothing to fetch, so that keeps it stopped.
+ */
+function resumeAutoStopped(view) {
+  const { torrent } = view;
+  if (!view.autoStopped || !torrent.paused || !selectedFiles(view).length || isComplete(torrent)) return;
+  view.autoStopped = false;
+  view.completed = false;
+  torrent.resume();
+  askTrackersNow(torrent);
+  logEvent(view, 'resumed for the newly selected files');
 }
 
 function togglePause(torrent) {
@@ -2432,18 +2516,29 @@ async function tryAddTorrent(id) {
   }
 }
 
+/** Far above any real .torrent, which is kilobytes to a few megabytes of piece hashes. */
+const TORRENT_FILE_MAX = 64 * 1024 * 1024;
+
 async function addTorrentFiles(fileList) {
   for (const f of fileList) {
+    const notATorrent = () => toast(`"${f.name}" is not a .torrent file. To share a file of your own, use the "Seed & share" tab.`, { error: true });
     let buf;
     try {
+      // The picker cannot filter by file type on iOS, so a video from the photo library is one tap
+      // away. Reading gigabytes just to refuse them would take the tab down: a .torrent is a small
+      // bencoded dictionary, so its size and first byte say enough before anything else is read.
+      if (f.size > TORRENT_FILE_MAX || new Uint8Array(await f.slice(0, 1).arrayBuffer())[0] !== 0x64) {
+        notATorrent();
+        continue;
+      }
       buf = new Uint8Array(await f.arrayBuffer());
     } catch (err) {
       toast(`Could not read ${f.name}: ${err.message}`, { error: true });
       continue;
     }
-    // The picker cannot filter by file type on iOS, so the bytes have the last word.
+    // The bytes have the last word.
     if (!torrentReach(buf)) {
-      toast(`"${f.name}" is not a .torrent file. To share a file of your own, use the "Seed & share" tab.`, { error: true });
+      notATorrent();
       continue;
     }
     try {
@@ -2552,12 +2647,14 @@ els.seedUrlForm.addEventListener('submit', async (event) => {
   }
 });
 
-$$('.tab').forEach((tab) => tab.addEventListener('click', () => {
+// Only the add card's tabs: the Simple / Expert switch in Settings looks like one (class "tab") but
+// has no panel, and matching it too hid every panel the moment the mode was changed.
+$$('.tabs .tab').forEach((tab) => tab.addEventListener('click', () => {
   if (tab.dataset.tab === 'cloud') {
     cloudAccountLine();
     refreshCloudLibrary({ quiet: true });
   }
-  $$('.tab').forEach((t) => {
+  $$('.tabs .tab').forEach((t) => {
     const active = t === tab;
     t.classList.toggle('active', active);
     t.setAttribute('aria-selected', String(active));
@@ -2766,16 +2863,28 @@ els.resetTrackersBtn.addEventListener('click', () => {
   els.trackersInput.value = DEFAULT_TRACKERS.join('\n');
 });
 
-els.settingsDialog.addEventListener('close', () => {
-  if (els.settingsDialog.returnValue !== 'save') return;
+/** The dialog's checked values, set on submit and saved on close. */
+let checkedSettings = null;
+
+/**
+ * Checked on submit, while the dialog is still open: a field that cannot be saved says so next to
+ * the Save button and keeps everything else that was typed. Checked on close instead, one typo
+ * used to shut the dialog and throw every other change away with it.
+ */
+els.settingsForm.addEventListener('submit', (event) => {
+  checkedSettings = null;
+  els.settingsError.hidden = true;
+  if (event.submitter && event.submitter.value !== 'save') return;
+  const refuse = (message, field) => {
+    event.preventDefault();
+    els.settingsError.textContent = message;
+    els.settingsError.hidden = false;
+    if (!field.closest('[hidden]')) field.focus();
+  };
 
   const typed = els.trackersInput.value.split('\n').map((s) => s.trim()).filter((s) => /^wss?:\/\//i.test(s));
   const trackers = typed.filter(usableTracker);
-  if (typed.length !== trackers.length) toast(`Ignored ${typed.length - trackers.length} tracker(s) on a port browsers refuse to open.`, { error: true });
-  if (trackers.length === 0) {
-    toast('Keeping the previous trackers: at least one wss:// tracker is needed.', { error: true });
-    return;
-  }
+  if (trackers.length === 0) return refuse('At least one wss:// tracker is needed.', els.trackersInput);
 
   let rtcConfig = null;
   const rtcText = els.rtcInput.value.trim();
@@ -2784,16 +2893,23 @@ els.settingsDialog.addEventListener('close', () => {
       rtcConfig = JSON.parse(rtcText);
       if (!rtcConfig || typeof rtcConfig !== 'object') throw new Error('not an object');
     } catch (err) {
-      toast(`WebRTC configuration is not valid JSON: ${err.message}`, { error: true });
-      return;
+      return refuse(`WebRTC configuration is not valid JSON: ${err.message}`, els.rtcInput);
     }
   }
 
   const trackerListUrl = els.trackerListUrl.value.trim();
   if (els.trackerListToggle.checked && !/^https?:\/\//i.test(trackerListUrl)) {
-    toast('The tracker list URL must start with http(s)://', { error: true });
-    return;
+    return refuse('The tracker list URL must start with http(s)://', els.trackerListUrl);
   }
+  checkedSettings = { typed, trackers, rtcConfig, trackerListUrl };
+});
+
+els.settingsDialog.addEventListener('close', () => {
+  els.settingsError.hidden = true;
+  if (els.settingsDialog.returnValue !== 'save' || !checkedSettings) return;
+  const { typed, trackers, rtcConfig, trackerListUrl } = checkedSettings;
+  checkedSettings = null;
+  if (typed.length !== trackers.length) toast(`Ignored ${typed.length - trackers.length} tracker(s) on a port browsers refuse to open.`, { error: true });
 
   const rtcChanged = JSON.stringify(rtcConfig) !== JSON.stringify(settings.rtcConfig || null);
   const listChanged = els.trackerListToggle.checked !== Boolean(settings.trackerList) || trackerListUrl !== settings.trackerListUrl;
@@ -2973,7 +3089,7 @@ function maybeShowIosInstallHint() {
 
 // A magnet pasted into the address bar of the already open app arrives as a hash change.
 window.addEventListener('hashchange', async () => {
-  const id = parseTorrentText(safeDecode(location.hash.slice(1)));
+  const id = magnetFromHash();
   if (!id) return;
   history.replaceState(null, '', location.pathname);
   if (confirmExternalAdd(describeTorrentId(id))) await tryAddTorrent(id);
@@ -2988,7 +3104,7 @@ window.addEventListener('hashchange', async () => {
     if (!opfsOk) console.warn('OPFS unavailable: pieces are kept in memory for this session');
     const records = await dbAll();
     records.sort((a, b) => a.addedAt - b.addedAt);
-    await cleanOrphanStores(records);
+    await cleanOrphanStoresIfAlone(records);
     return records;
   })();
   const [records] = await Promise.all([storageReady, saver.init()]);
@@ -3015,7 +3131,7 @@ window.addEventListener('hashchange', async () => {
 
   const params = new URLSearchParams(location.search);
   const fromQuery = parseTorrentText(params.get('magnet') || '');
-  const fromHash = parseTorrentText(safeDecode(location.hash.slice(1)));
+  const fromHash = magnetFromHash();
   if (fromQuery || fromHash || params.has('shared')) {
     history.replaceState(null, '', location.pathname);
   }

@@ -80,6 +80,10 @@ body {
   gap: 16px;
 }
 
+/* A grid item is as wide as its widest unbreakable content by default, and a text input's is its
+   intrinsic width: on a 320px screen that alone made the page scroll sideways. */
+.container > * { min-width: 0; }
+
 .card {
   background: var(--card);
   border: 1px solid var(--border);
@@ -103,7 +107,7 @@ body {
   background: var(--bg);
   color: var(--text);
 }
-.add-row input[type="text"], .add-row input[type="url"]:focus { outline: 2px solid var(--primary); outline-offset: 1px; }
+.add-row input[type="text"]:focus, .add-row input[type="url"]:focus { outline: 2px solid var(--primary); outline-offset: 1px; }
 
 .btn {
   font: inherit;
@@ -175,7 +179,8 @@ body {
 }
 .stats .pct { color: var(--text); font-weight: 600; }
 
-.actions { display: flex; gap: 8px; margin: 12px 0 8px; }
+/* Five buttons do not fit on one line of a narrow card at any width, so the row always wraps. */
+.actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 8px; }
 .actions .zip-btn { flex: 1; }
 
 .files { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
@@ -253,7 +258,6 @@ body {
 .notice.error { color: var(--danger); }
 
 @media (max-width: 480px) {
-  .actions { flex-wrap: wrap; }
   .actions .zip-btn { flex-basis: 100%; }
   .actions .ghost { flex: 1; }
 }
@@ -262,7 +266,12 @@ body {
 .tabs { display: flex; gap: 4px; background: var(--bg); border-radius: 10px; padding: 4px; margin-bottom: 14px; }
 .tab {
   flex: 1; font: inherit; font-weight: 600; padding: 9px 12px; border-radius: 8px; border: none;
-  background: transparent; color: var(--muted); cursor: pointer; min-height: 40px;
+  background: transparent; color: var(--muted); cursor: pointer; min-height: 40px; min-width: 0;
+}
+/* Three tabs on a 320px screen (an iPhone SE, or any iPhone with Display Zoom) are wider than the
+   card at the usual padding, and the whole page would scroll sideways. */
+@media (max-width: 360px) {
+  .tab { padding: 9px 4px; font-size: 0.9rem; }
 }
 .tab.active { background: var(--card); color: var(--text); box-shadow: var(--shadow); }
 
@@ -367,3 +376,12 @@ body {
   background: var(--card); border: 1px solid var(--border); border-radius: 14px; box-shadow: 0 8px 30px rgba(0,0,0,0.25); z-index: 11;
 }
 .save-ready .primary { flex: 1; }
+
+/* ---- settings: a field that cannot be saved says so next to Save ---- */
+#settings-error { margin: 0; color: var(--danger); }
+
+/* ---- iOS zooms into a text field under 16px as it takes focus, and stays zoomed. Set here for
+   iOS alone and always, not on :focus, so nothing jumps in size under the finger. ---- */
+@supports (-webkit-touch-callout: none) {
+  .field input, .field textarea, .field select, .share-field input { font-size: 16px; }
+}

@@ -7,7 +7,7 @@
  */
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, truncateSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -545,7 +545,10 @@ try {
   await seeder.waitForFunction(() => window.__phoneTorrent?.client);
 
   const FILE_A = 3 * 1024 * 1024 + 123; // > one piece, uneven size
-  const FILE_B = 700 * 1024;
+  // …and the torrent ends exactly on a piece boundary (16 KiB pieces), which WebTorrent's
+  // File.downloaded counts one piece short: every wait for "100%" below also proves the card
+  // does not stop at 99% on such a file.
+  const FILE_B = 704 * 1024 - 123;
   const rnd = (n, seed) => {
     const out = Buffer.alloc(n);
     let x = seed;
@@ -634,7 +637,31 @@ try {
   assert.equal(await readPieces(), true, 'orphan cleanup leaves live seed data intact');
   const opfs = await seeder.evaluate(() => window.__phoneTorrent.opfsOk);
   log('piece storage:', opfs ? 'OPFS' : 'memory (OPFS unavailable in this browser build)');
-  log('seed store survives housekeeping');
+  assert.equal(await seeder.evaluate(() => {
+    const t = window.__phoneTorrent.client.torrents[0];
+    return t.length % t.pieceLength;
+  }), 0, 'the fixture ends on a piece boundary');
+  if (opfs && await seeder.evaluate(() => Boolean(navigator.locks?.query))) {
+    // A seed is never remembered, so to a second tab's housekeeping its files look orphaned: opening
+    // the app again (a link from a chat, the home-screen icon) must not delete what this one shares.
+    const secondTab = await seederCtx.newPage();
+    secondTab.on('pageerror', (e) => console.error('second tab page error:', e));
+    await secondTab.addInitScript(({ t, rtc }) => localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], trackerList: false, rtcConfig: rtc })), { t: trackerUrl, rtc: rtcConfig });
+    await secondTab.goto(site.url);
+    await secondTab.waitForFunction(() => window.__phoneTorrent?.client);
+    // Both tabs hold the open-tab lock once the second one is past its housekeeping.
+    await waitFor(() => secondTab.evaluate(async () => (await navigator.locks.query()).held
+      .filter((l) => l.name === 'phone-torrent:open-tab').length === 2), { label: 'second tab past its housekeeping', timeout: 15000 });
+    const storeDirs = await secondTab.evaluate(async () => {
+      const names = [];
+      for await (const name of (await navigator.storage.getDirectory()).keys()) names.push(name);
+      return names;
+    });
+    const seedHash = await seeder.evaluate(() => window.__phoneTorrent.client.torrents[0].infoHash);
+    assert.ok(storeDirs.some((n) => n.endsWith(` - ${seedHash.slice(0, 8)}`)), `a second tab leaves the seed's store alone (found: ${storeDirs.join(', ')})`);
+    await secondTab.close();
+  }
+  log('seed store survives housekeeping, in this tab and from a second one');
   log('seeding', files.map((f) => `${f.name} (${f.size} B)`).join(', '));
 
   /* ---------- downloader ("the phone") ---------- */
@@ -686,6 +713,32 @@ try {
   }), { label: 'app shell precache', timeout: 15000 });
   log('PWA manifest + app shell cache OK');
 
+  // A network that answers nothing — a weak signal, a Wi-Fi that stalled — must not keep the
+  // installed app on a blank page: after a few seconds the cached shell takes over. Here the server
+  // accepts every connection and never replies.
+  if (await phone.evaluate(() => Boolean(navigator.serviceWorker?.controller))) {
+    const answering = site.server.listeners('request');
+    const unanswered = [];
+    site.server.removeAllListeners('request');
+    site.server.on('request', (req, res) => { unanswered.push(res); });
+    try {
+      const stalled = await phoneCtx.newPage();
+      const started = Date.now();
+      stalled.goto(site.url, { timeout: 30000 }).catch(() => {});
+      await stalled.waitForFunction(() => window.__phoneTorrent?.client, null, { timeout: 20000 });
+      log(`stalled network: the app came up from the cache in ${Date.now() - started} ms`);
+      await stalled.close();
+    } finally {
+      site.server.removeAllListeners('request');
+      for (const fn of answering) site.server.on('request', fn);
+      // The worker's own requests are still waiting on these, and would hold the browser's few
+      // connections to this host for the rest of the suite: end them as a dropped network would.
+      for (const res of unanswered) res.socket?.destroy();
+    }
+  } else {
+    log('stalled network: skipped, the page is not controlled by the service worker in this engine');
+  }
+
   // Network check: live tracker reachable, dead hostname flagged as dead, unreachable IP flagged as blocked.
   const netcheck = await phone.evaluate(() => window.__phoneTorrent.runNetworkCheck());
   const byUrl = Object.fromEntries(netcheck.map((r) => [r.url, r]));
@@ -721,6 +774,17 @@ try {
   const names = await phone.$$eval('.torrent .file .file-name', (els) => els.map((e) => e.textContent));
   assert.deepEqual([...names].sort(), files.map((f) => f.name).sort());
   log('file list rendered:', names.join(', '));
+
+  // No sideways scrolling at any phone width: 320px is an iPhone SE, or any iPhone with Display Zoom,
+  // and between 481px and ~530px the card's five buttons used to stay on one line.
+  for (const width of [320, 500, 390]) {
+    await phone.setViewportSize({ width, height: 844 });
+    const overflow = await phone.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+    assert.equal(overflow, 0, `no horizontal scroll at ${width}px`);
+  }
+  // The list is rewritten every 750 ms; as a live region, a screen reader would read out every tick.
+  assert.equal(await phone.$eval('#torrents', (e) => e.getAttribute('aria-live')), null, 'the torrent list is not a live region');
+  log('layout fits 320px and 500px; the list does not chatter to screen readers');
 
   try {
     await waitForFromSeeder(() => phone.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 'download to finish', timeout: 180000 });
@@ -876,6 +940,9 @@ try {
   assert.equal(await phone.$$eval('#settings-dialog [data-expert]', (els) => els.filter((e) => e.hidden).length), 0);
   await phone.screenshot({ path: path.join(TMP, 'settings-expert.png') });
   await phone.keyboard.press('Escape');
+  // Simple and Expert look like tabs but have no panel: switching them leaves the add card alone.
+  assert.equal(await phone.$eval('#tab-download', (e) => e.hidden), false, 'the add card keeps its panel after a mode switch');
+  assert.equal(await phone.$eval('.tabs .tab[data-tab="download"]', (e) => e.getAttribute('aria-selected')), 'true');
 
   // The choice is a setting: it survives a reload like the others.
   await phone.reload();
@@ -883,6 +950,21 @@ try {
   await phone.click('#settings-btn');
   await phone.waitForSelector('#settings-dialog[open]');
   assert.equal(await phone.isVisible('#trackers-input'), true, 'Expert is remembered');
+
+  // A field that cannot be saved keeps the dialog open, says why, and keeps everything else typed.
+  const rtcTyped = await phone.inputValue('#rtc-input');
+  await phone.uncheck('#wakelock-toggle');
+  await phone.fill('#rtc-input', '{"iceServers": [ { urls: "stun:typo" } ]}');
+  await phone.click('#settings-dialog button[type="submit"]');
+  assert.equal(await phone.$eval('#settings-dialog', (e) => e.open), true, 'an invalid field keeps the dialog open');
+  assert.match(await phone.$eval('#settings-error', (e) => (e.hidden ? '' : e.textContent)), /not valid JSON/, 'and says why');
+  assert.equal(await phone.isChecked('#wakelock-toggle'), false, 'what else was changed is still there');
+  await phone.fill('#rtc-input', rtcTyped);
+  await phone.click('#settings-dialog button[type="submit"]');
+  await waitFor(() => phone.$eval('#settings-dialog', (e) => !e.open), { label: 'settings saved once the field is fixed', timeout: 5000 });
+  assert.equal(await phone.evaluate(() => JSON.parse(localStorage.getItem('phone-torrent:settings')).wakeLock), false, 'and it is saved with the fix');
+  await phone.click('#settings-btn');
+  await phone.waitForSelector('#settings-dialog[open]');
   await phone.click('#mode-simple');
   await phone.keyboard.press('Escape');
   log('settings: Simple by default, Expert when asked, remembered');
@@ -949,12 +1031,22 @@ try {
   assert.ok(dialogs > dialogsBeforeUrl, 'URL magnet asked for confirmation');
   // Fragment form as well (app links / #magnet:…): as a fresh load, and as a hash change on the open app.
   await phone.goto('about:blank');
-  await phone.goto(`${site.url}#magnet:?xt=urn:btih:${'1'.repeat(40)}&dn=fragment`);
+  // The name is percent-encoded inside the magnet, "&" included: it must survive as one name.
+  await phone.goto(`${site.url}#magnet:?xt=urn:btih:${'1'.repeat(40)}&dn=${encodeURIComponent('Tom & Jerry')}`);
   await waitFor(() => phone.$$('.torrent').then((l) => l.length === 3), { label: 'magnet from fragment to be added (pending magnets survive reload)' });
   assert.equal(new URL(phone.url()).hash, '', 'fragment is cleaned up');
+  const cardNames = () => phone.$$eval('.torrent .name', (els) => els.map((e) => e.textContent));
+  // While the metadata is still to come, the card is called by the magnet's display name.
+  await waitFor(() => cardNames().then((n) => n.includes('Tom & Jerry')), { label: 'a pending magnet titled by its dn', timeout: 5000 });
   await phone.evaluate((h) => { location.hash = h; }, `#magnet:?xt=urn:btih:${'2'.repeat(40)}&dn=hashchange`);
   await waitFor(() => phone.$$('.torrent').then((l) => l.length === 4), { label: 'magnet from hashchange to be added' });
-  log('magnet from URL and fragment OK');
+  // The app link that Share hands out, pasted into the app itself — how it gets from Safari into the
+  // installed app on an iPhone — is a magnet, not a .torrent address to fetch.
+  await phone.fill('#magnet-input', `${site.url}#magnet:?xt=urn:btih:${'3'.repeat(40)}&dn=pasted%20app%20link`);
+  await phone.click('#magnet-form button[type="submit"]');
+  await waitFor(() => phone.$$('.torrent').then((l) => l.length === 5), { label: 'pasted app link to be added' });
+  await waitFor(() => cardNames().then((n) => n.includes('pasted app link')), { label: 'the pasted app link titled by its dn', timeout: 5000 });
+  log('magnet from URL, fragment and pasted app link OK');
 
   /* ---------- magnet-sourced torrent: restored from stored metadata, retry keeps it ---------- */
   for (const t of await phone.$$('.torrent .remove-btn')) await t.click();
@@ -1174,7 +1266,17 @@ try {
   await ios.setInputFiles('#torrent-file-input', { name: 'IMG_0001.HEIC', mimeType: 'image/heic', buffer: Buffer.from('ftypheic not a torrent') });
   await waitFor(() => ios.$$eval('.toast', (els) => els.some((e) => /is not a \.torrent file/.test(e.textContent))), { label: 'non-torrent rejected', timeout: 10000 });
   assert.equal((await ios.$$('.torrent')).length, torrentsBefore, 'a non-torrent file is not added');
-  log('non-torrent file refused with an explanation');
+  // A video from the photo library is as easy to pick. Read whole before being refused, 1.5 GB took
+  // 13 s and as much memory, which an iPhone does not survive; now its first byte says enough. The
+  // file is sparse, so it costs no disk.
+  const bigVideo = path.join(TMP, 'IMG_0002.MOV');
+  writeFileSync(bigVideo, '');
+  truncateSync(bigVideo, 3 * 1024 ** 3);
+  const bigPicked = Date.now();
+  await ios.setInputFiles('#torrent-file-input', bigVideo);
+  await waitFor(() => ios.$$eval('.toast', (els) => els.some((e) => /"IMG_0002\.MOV" is not a \.torrent file/.test(e.textContent))), { label: 'a 3 GB non-torrent refused without reading it', timeout: 5000 });
+  log(`non-torrent file refused with an explanation; a 3 GB one in ${Date.now() - bigPicked} ms`);
+  rmSync(bigVideo, { force: true });
 
   // A .torrent handed over as a link (what you get from a tracker on a phone) is fetched by the app.
   const hostedTorrent = path.join(TMP, 'hosted.torrent');
@@ -1536,19 +1638,64 @@ try {
   log('a debrid link downloads to the phone');
   await iosCtx.close();
 
-  /* ---------- fallback: browser without service workers ---------- */
+  /* ---------- a file unticked right after adding is not downloaded ---------- */
+  // Before a torrent is ready, WebTorrent selects every piece it does not have yet. With the pieces on
+  // disk that check runs after the file list is shown, and used to undo a file unticked in the
+  // meantime: its box stayed empty while it downloaded anyway.
+  const untickCtx = await browser.newContext();
+  const untick = await untickCtx.newPage();
+  untick.on('pageerror', (e) => console.error('untick page error:', e));
+  await untick.addInitScript(({ t, rtc }) => localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], trackerList: false, rtcConfig: rtc, downloadLimit: 1000 })), { t: trackerUrl, rtc: rtcConfig });
+  await untick.goto(site.url);
+  await untick.waitForFunction(() => window.__phoneTorrent?.client);
+  await untick.setInputFiles('#torrent-file-input', { name: 'test.torrent', mimeType: 'application/x-bittorrent', buffer: Buffer.from(torrentFile) });
+  await untick.waitForSelector('.torrent .file', { timeout: 15000 });
+  const untickNames = await untick.$$eval('.torrent .file .file-name', (els) => els.map((e) => e.textContent));
+  await untick.locator('.torrent .file input[type="checkbox"]').nth(untickNames.indexOf(files[1].name)).uncheck();
+  const fileState = (name) => untick.evaluate((n) => {
+    const f = window.__phoneTorrent.client.torrents[0].files.find((x) => x.name === n);
+    return { done: f.done, progress: f.progress };
+  }, name);
+  await waitForFromSeeder(() => fileState(files[0].name).then((s) => s.done), { label: 'the file still ticked to arrive', timeout: 180000 });
+  await new Promise((r) => setTimeout(r, 1500)); // time for anything else it would fetch
+  const unticked = await fileState(files[1].name);
+  // Only the piece it shares with its neighbour, which that one needs.
+  assert.ok(!unticked.done && unticked.progress < 0.1, `an unticked file is not downloaded (it got to ${Math.round(unticked.progress * 100)}%)`);
+  await untickCtx.close();
+  log('a file unticked right after adding is left alone');
+
+  /* ---------- fallback: a browser without service workers or OPFS ---------- */
+  // What a page opened over plain http on a LAN address gets: saves go through memory, and so do the
+  // pieces. "Keep seeding" is off here, and the download is throttled so that a file can be unticked
+  // before it arrives.
   const legacyCtx = await browser.newContext({ acceptDownloads: true, serviceWorkers: 'block' });
   const legacy = await legacyCtx.newPage();
   legacy.on('pageerror', (e) => console.error('legacy page error:', e));
-  await legacy.addInitScript(({ t, rtc }) => localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], trackerList: false, rtcConfig: rtc })), { t: trackerUrl, rtc: rtcConfig });
+  await legacy.addInitScript(({ t, rtc }) => {
+    localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], trackerList: false, rtcConfig: rtc, seedAfterDone: false, downloadLimit: 1000 }));
+    delete StorageManager.prototype.getDirectory;
+  }, { t: trackerUrl, rtc: rtcConfig });
   await legacy.goto(site.url);
   await legacy.waitForFunction(() => window.__phoneTorrent?.client);
   const legacyMode = (await waitSaver(legacy)).mode;
   assert.equal(legacyMode, 'blob', 'falls back to in-memory saving without a service worker');
+  assert.equal(await legacy.evaluate(() => window.__phoneTorrent.opfsOk), false, 'and keeps the pieces in memory without OPFS');
   await legacy.setInputFiles('#torrent-file-input', { name: 'test.torrent', mimeType: 'application/x-bittorrent', buffer: Buffer.from(torrentFile) });
   await legacy.waitForSelector('.torrent .file', { timeout: 15000 });
-  await waitForFromSeeder(() => legacy.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 'legacy download', timeout: 180000 });
   const legacyNames = await legacy.$$eval('.torrent .file .file-name', (els) => els.map((e) => e.textContent));
+  const legacyNotes = legacy.locator('.torrent .file input[type="checkbox"]').nth(legacyNames.indexOf(files[1].name));
+  const legacyPaused = () => legacy.evaluate(() => window.__phoneTorrent.client.torrents[0].paused);
+
+  // Only the video for now: once it is in, "keep seeding" being off stops the torrent.
+  await legacyNotes.uncheck();
+  await waitForFromSeeder(() => legacy.$eval('.torrent .state', (e) => e.textContent === 'complete').catch(() => false), { label: 'the selected file to finish', timeout: 180000 });
+  assert.equal(await legacyPaused(), true, 'finished, with "keep seeding" off: stopped');
+  // Wanting one more file makes it unfinished again, and that stop no longer applies.
+  await legacyNotes.check();
+  assert.equal(await legacyPaused(), false, 'a newly selected file restarts a torrent stopped for being finished');
+  await waitForFromSeeder(() => legacy.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 'legacy download', timeout: 180000 });
+  log('"keep seeding" off: one more file selected after the stop is fetched');
+
   const [legacyDownload] = await Promise.all([
     legacy.waitForEvent('download', { timeout: 30000 }),
     legacy.locator('.torrent .file .save-btn').nth(legacyNames.indexOf(files[1].name)).click(),
@@ -1558,6 +1705,17 @@ try {
   assert.equal(legacyDownload.suggestedFilename(), files[1].name);
   assert.equal(sha(readFileSync(legacyPath)), files[1].sha, 'blob-mode save matches the seeded file');
   log('blob fallback save OK:', legacyDownload.suggestedFilename());
+
+  // A retry, and coming back to a frozen tab, which does the same, remove the torrent and add it
+  // again. With the pieces in memory that used to start it over from 0%. The seeder is paused, so
+  // only what this page already had can bring it back to 100%.
+  await seederPause();
+  await legacy.click('.torrent .details-btn');
+  await legacy.click('.torrent .retry-btn');
+  await waitFor(() => legacy.$$eval('.torrent .log li', (els) => els.some((e) => /re-announced/.test(e.textContent))), { label: 'retry with the pieces in memory', timeout: 15000 });
+  await waitFor(() => legacy.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 'the pieces in memory to survive the retry', timeout: 15000 });
+  await seederPause(); // resume
+  log('memory store: a retry keeps every piece');
 
   console.log('\nAll end-to-end checks passed.');
 } catch (err) {
