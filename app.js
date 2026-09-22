@@ -491,16 +491,28 @@ function toast(message, { error = false, timeout = 4500 } = {}) {
 function parseTorrentText(text) {
   const t = (text || '').trim();
   if (!t) return null;
-  if (/^magnet:\?/i.test(t)) return t;
+  // A magnet anywhere in the text wins, and only the magnet: the app's own link carries one in its
+  // fragment (https://…/#magnet:?…), which is not a .torrent to fetch, and shared text often has a
+  // title on the next line, which is not part of the last parameter.
+  const magnet = t.match(/magnet:\?[^\s"<>]+/i);
+  if (magnet) return magnet[0];
   if (/^[a-f0-9]{40}$/i.test(t) || /^[a-z2-7]{32}$/i.test(t)) return `magnet:?xt=urn:btih:${t}`;
   if (/^https?:\/\/\S+$/i.test(t)) return t;
-  const embedded = t.match(/magnet:\?\S+/i);
-  if (embedded) return embedded[0];
   return null;
 }
 
 function safeDecode(text) {
   try { return decodeURIComponent(text); } catch { return text; }
+}
+
+/**
+ * The magnet in this page's fragment. It is kept as it is — its parameters are percent-encoded
+ * already, and decoding the whole of it turns a "%26" inside a name into a separator — unless the
+ * magnet itself arrived encoded (#magnet%3A%3F…).
+ */
+function magnetFromHash() {
+  const raw = location.hash.slice(1);
+  return parseTorrentText(/^magnet%3a/i.test(raw) ? safeDecode(raw) : raw);
 }
 
 function describeTorrentId(id) {
@@ -1716,7 +1728,9 @@ function createTorrentView(torrent, record, seeding) {
   }
 
   torrent.on('infoHash', () => {
-    if (!torrent.name) $('.name', el).textContent = torrent.infoHash;
+    // A magnet's display name (dn) is already torrent.name here, before any metadata: show it, or
+    // the info hash without one, rather than "Fetching metadata…" — the state line says that.
+    if (!torrent.metadata) $('.name', el).textContent = torrent.name || torrent.infoHash;
     logEvent(view, `info hash ${torrent.infoHash}`);
     if (!torrent.metadata && !view.seeding) {
       scheduleMetadataFallback(view);
@@ -2363,18 +2377,29 @@ async function tryAddTorrent(id) {
   }
 }
 
+/** Far above any real .torrent, which is kilobytes to a few megabytes of piece hashes. */
+const TORRENT_FILE_MAX = 64 * 1024 * 1024;
+
 async function addTorrentFiles(fileList) {
   for (const f of fileList) {
+    const notATorrent = () => toast(`"${f.name}" is not a .torrent file. To share a file of your own, use the "Seed & share" tab.`, { error: true });
     let buf;
     try {
+      // The picker cannot filter by file type on iOS, so a video from the photo library is one tap
+      // away. Reading gigabytes just to refuse them would take the tab down: a .torrent is a small
+      // bencoded dictionary, so its size and first byte say enough before anything else is read.
+      if (f.size > TORRENT_FILE_MAX || new Uint8Array(await f.slice(0, 1).arrayBuffer())[0] !== 0x64) {
+        notATorrent();
+        continue;
+      }
       buf = new Uint8Array(await f.arrayBuffer());
     } catch (err) {
       toast(`Could not read ${f.name}: ${err.message}`, { error: true });
       continue;
     }
-    // The picker cannot filter by file type on iOS, so the bytes have the last word.
+    // The bytes have the last word.
     if (!torrentReach(buf)) {
-      toast(`"${f.name}" is not a .torrent file. To share a file of your own, use the "Seed & share" tab.`, { error: true });
+      notATorrent();
       continue;
     }
     try {
@@ -2885,7 +2910,7 @@ function maybeShowIosInstallHint() {
 
 // A magnet pasted into the address bar of the already open app arrives as a hash change.
 window.addEventListener('hashchange', async () => {
-  const id = parseTorrentText(safeDecode(location.hash.slice(1)));
+  const id = magnetFromHash();
   if (!id) return;
   history.replaceState(null, '', location.pathname);
   if (confirmExternalAdd(describeTorrentId(id))) await tryAddTorrent(id);
@@ -2927,7 +2952,7 @@ window.addEventListener('hashchange', async () => {
 
   const params = new URLSearchParams(location.search);
   const fromQuery = parseTorrentText(params.get('magnet') || '');
-  const fromHash = parseTorrentText(safeDecode(location.hash.slice(1)));
+  const fromHash = magnetFromHash();
   if (fromQuery || fromHash || params.has('shared')) {
     history.replaceState(null, '', location.pathname);
   }

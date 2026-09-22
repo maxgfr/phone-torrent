@@ -7,7 +7,7 @@
  */
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, truncateSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -893,12 +893,22 @@ try {
   assert.ok(dialogs > dialogsBeforeUrl, 'URL magnet asked for confirmation');
   // Fragment form as well (app links / #magnet:…): as a fresh load, and as a hash change on the open app.
   await phone.goto('about:blank');
-  await phone.goto(`${site.url}#magnet:?xt=urn:btih:${'1'.repeat(40)}&dn=fragment`);
+  // The name is percent-encoded inside the magnet, "&" included: it must survive as one name.
+  await phone.goto(`${site.url}#magnet:?xt=urn:btih:${'1'.repeat(40)}&dn=${encodeURIComponent('Tom & Jerry')}`);
   await waitFor(() => phone.$$('.torrent').then((l) => l.length === 3), { label: 'magnet from fragment to be added (pending magnets survive reload)' });
   assert.equal(new URL(phone.url()).hash, '', 'fragment is cleaned up');
+  const cardNames = () => phone.$$eval('.torrent .name', (els) => els.map((e) => e.textContent));
+  // While the metadata is still to come, the card is called by the magnet's display name.
+  await waitFor(() => cardNames().then((n) => n.includes('Tom & Jerry')), { label: 'a pending magnet titled by its dn', timeout: 5000 });
   await phone.evaluate((h) => { location.hash = h; }, `#magnet:?xt=urn:btih:${'2'.repeat(40)}&dn=hashchange`);
   await waitFor(() => phone.$$('.torrent').then((l) => l.length === 4), { label: 'magnet from hashchange to be added' });
-  log('magnet from URL and fragment OK');
+  // The app link that Share hands out, pasted into the app itself — how it gets from Safari into the
+  // installed app on an iPhone — is a magnet, not a .torrent address to fetch.
+  await phone.fill('#magnet-input', `${site.url}#magnet:?xt=urn:btih:${'3'.repeat(40)}&dn=pasted%20app%20link`);
+  await phone.click('#magnet-form button[type="submit"]');
+  await waitFor(() => phone.$$('.torrent').then((l) => l.length === 5), { label: 'pasted app link to be added' });
+  await waitFor(() => cardNames().then((n) => n.includes('pasted app link')), { label: 'the pasted app link titled by its dn', timeout: 5000 });
+  log('magnet from URL, fragment and pasted app link OK');
 
   /* ---------- magnet-sourced torrent: restored from stored metadata, retry keeps it ---------- */
   for (const t of await phone.$$('.torrent .remove-btn')) await t.click();
@@ -1118,7 +1128,17 @@ try {
   await ios.setInputFiles('#torrent-file-input', { name: 'IMG_0001.HEIC', mimeType: 'image/heic', buffer: Buffer.from('ftypheic not a torrent') });
   await waitFor(() => ios.$$eval('.toast', (els) => els.some((e) => /is not a \.torrent file/.test(e.textContent))), { label: 'non-torrent rejected', timeout: 10000 });
   assert.equal((await ios.$$('.torrent')).length, torrentsBefore, 'a non-torrent file is not added');
-  log('non-torrent file refused with an explanation');
+  // A video from the photo library is as easy to pick. Read whole before being refused, 1.5 GB took
+  // 13 s and as much memory, which an iPhone does not survive; now its first byte says enough. The
+  // file is sparse, so it costs no disk.
+  const bigVideo = path.join(TMP, 'IMG_0002.MOV');
+  writeFileSync(bigVideo, '');
+  truncateSync(bigVideo, 3 * 1024 ** 3);
+  const bigPicked = Date.now();
+  await ios.setInputFiles('#torrent-file-input', bigVideo);
+  await waitFor(() => ios.$$eval('.toast', (els) => els.some((e) => /"IMG_0002\.MOV" is not a \.torrent file/.test(e.textContent))), { label: 'a 3 GB non-torrent refused without reading it', timeout: 5000 });
+  log(`non-torrent file refused with an explanation; a 3 GB one in ${Date.now() - bigPicked} ms`);
+  rmSync(bigVideo, { force: true });
 
   // A .torrent handed over as a link (what you get from a tracker on a phone) is fetched by the app.
   const hostedTorrent = path.join(TMP, 'hosted.torrent');
