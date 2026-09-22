@@ -392,6 +392,13 @@ const tracker = new TrackerServer({ udp: false, http: false, ws: true, stats: fa
 await new Promise((resolve) => tracker.listen(0, '127.0.0.1', resolve));
 const trackerUrl = `ws://127.0.0.1:${tracker.ws.address().port}`;
 log('tracker at', trackerUrl);
+// DIAG: every tracker socket that closes, and whose it was.
+const t0 = Date.now();
+tracker.ws.on('connection', (socket) => {
+  let who = '?';
+  socket.on('message', () => { if (socket.peerId) who = Buffer.from(socket.peerId, 'binary').toString('hex').slice(0, 12); });
+  socket.on('close', (code) => console.error(`DIAG tracker: socket of ${who} closed (code ${code}) at ${Math.round((Date.now() - t0) / 1000)}s`));
+});
 
 const site = await startServer(0);
 log('site at', site.url);
@@ -438,6 +445,7 @@ try {
   await seeder.setInputFiles('#seed-file-input', files.map((f, i) => ({ name: f.name, mimeType: 'application/octet-stream', buffer: seedBuffers[i] })));
   await seeder.waitForSelector('.torrent.seeding .file', { timeout: 30000 });
   await waitFor(() => seeder.evaluate(() => window.__phoneTorrent.client.torrents[0]?.ready), { label: 'seeder ready' });
+  console.error('DIAG seeder peerId:', (await seeder.evaluate(() => window.__phoneTorrent.client.peerId)).slice(0, 12));
 
   /**
    * Wait for something that first needs a fresh connection to the seeder, nudging the seeder to
@@ -445,17 +453,46 @@ try {
    * WebKit page under memory pressure loses its socket — and then nobody can find it again until
    * its next announce. The condition is unchanged; it just stops depending on that cadence.
    */
-  const waitForFromSeeder = (fn, opts) => {
+  // DIAG: what each side's trackers and peers look like, to see why a wait is long.
+  const swarmState = (page) => page.evaluate(() => {
+    const pt = window.__phoneTorrent;
+    const hex = (s) => (typeof s === 'string' ? s.slice(0, 12) : String(s));
+    return {
+      peerId: hex(pt.client.peerId),
+      torrents: pt.client.torrents.map((t) => ({
+        infoHash: (t.infoHash || '').slice(0, 8), paused: t.paused, progress: Math.round((t.progress || 0) * 100), peers: t.numPeers, wires: t.wires.length,
+        peerIds: [...(t._peers?.keys?.() || [])].map(hex),
+        trackers: (t.discovery?.tracker?._trackers || []).map((tr) => ({ url: tr.announceUrl, destroyed: tr.destroyed, reconnecting: tr.reconnecting, retries: tr.retries, connected: Boolean(tr.socket?.connected) })),
+      })),
+    };
+  }).catch((e) => ({ error: String(e) }));
+  const waitForFromSeeder = async (fn, opts) => {
     let nudged = 0;
-    return waitFor(async () => {
-      if (Date.now() - nudged > 15000) {
-        nudged = Date.now();
-        await seeder.evaluate(() => {
-          try { window.__phoneTorrent.client.torrents[0]?.discovery?.tracker?.update?.(); } catch { /* page may be gone */ }
-        }).catch(() => {});
-      }
-      return fn();
-    }, opts);
+    const started = Date.now();
+    let sawDown = false;
+    try {
+      const v = await waitFor(async () => {
+        if (Date.now() - nudged > 15000) {
+          nudged = Date.now();
+          const down = await seeder.evaluate(() => {
+            const t = window.__phoneTorrent.client.torrents[0];
+            const d = (t?.discovery?.tracker?._trackers || []).filter((tr) => tr.reconnecting).map((tr) => `${tr.announceUrl} retries=${tr.retries}`);
+            try { t?.discovery?.tracker?.update?.(); } catch { /* page may be gone */ }
+            return d;
+          }).catch(() => []);
+          if (down.length && !sawDown) { sawDown = true; console.error(`DIAG ${opts.label}: seeder tracker socket down, update() is a no-op:`, down.join(', ')); }
+        }
+        return fn();
+      }, opts);
+      console.error(`DIAG ${opts.label}: ${Math.round((Date.now() - started) / 1000)}s`);
+      return v;
+    } catch (err) {
+      console.error(`DIAG ${opts.label} timed out. seeder:`, JSON.stringify(await swarmState(seeder)));
+      if (opts.page) console.error(`DIAG ${opts.label} timed out. waiting page:`, JSON.stringify(await swarmState(opts.page)));
+      const swarm = Object.entries(tracker.torrents).map(([h, sw]) => ({ h: h.slice(0, 8), peers: sw.peers?.keys?.length ?? sw.peers?.length, complete: sw.complete, incomplete: sw.incomplete }));
+      console.error(`DIAG ${opts.label} timed out. tracker swarms:`, JSON.stringify(swarm));
+      throw err;
+    }
   };
   const torrentFile = await seeder.evaluate(() => Array.from(window.__phoneTorrent.client.torrents[0].torrentFile));
   assert.equal(await seeder.$eval('.torrent .name', (e) => e.textContent), 'Phone Torrent Test');
@@ -570,7 +607,7 @@ try {
   log('file list rendered:', names.join(', '));
 
   try {
-    await waitForFromSeeder(() => phone.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 'download to finish', timeout: 180000 });
+    await waitForFromSeeder(() => phone.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { page: phone, label: 'download to finish', timeout: 180000 });
   } catch (err) {
     const dump = (page) => page.evaluate(() => window.__phoneTorrent.client.torrents.map((t) => ({
       name: t.name, peers: t.numPeers, progress: t.progress, paused: t.paused, ready: t.ready, done: t.done,
@@ -610,7 +647,7 @@ try {
   assert.equal(await phone.evaluate(() => window.__phoneTorrent.client.torrents[0].paused), false);
   assert.ok(!(await phone.$('.torrent.paused')), 'torrent resumed');
   const resumeStart = Date.now();
-  await waitForFromSeeder(() => phone.evaluate(() => window.__phoneTorrent.client.torrents[0].numPeers > 0), { label: 'peers reacquired after resume', timeout: 120000 });
+  await waitForFromSeeder(() => phone.evaluate(() => window.__phoneTorrent.client.torrents[0].numPeers > 0), { page: phone, label: 'peers reacquired after resume', timeout: 120000 });
   log(`pause/resume OK (peers reacquired in ${Math.round((Date.now() - resumeStart) / 1000)}s)`);
 
   // Sharing shows the links themselves: a toast saying "copied" is not a link.
@@ -756,11 +793,11 @@ try {
   await waitFor(() => phone.$$('.torrent').then((l) => l.length === 0), { label: 'delete all' });
   await phone.setInputFiles('#torrent-file-input', { name: 'test.torrent', mimeType: 'application/x-bittorrent', buffer: Buffer.from(torrentFile) });
   await phone.waitForSelector('.torrent .file', { timeout: 15000 });
-  await waitForFromSeeder(() => phone.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 're-download after delete all', timeout: 180000 });
+  await waitForFromSeeder(() => phone.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { page: phone, label: 're-download after delete all', timeout: 180000 });
   await waitFor(() => phone.evaluate(() => window.__phoneTorrent.views.values().next().value.record?.infoHash), { label: 'record persisted after delete all' });
   await phone.reload();
   await phone.waitForSelector('.torrent .file', { timeout: 15000 });
-  await waitForFromSeeder(() => phone.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 'restore after delete-all cycle', timeout: 180000 });
+  await waitForFromSeeder(() => phone.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { page: phone, label: 'restore after delete-all cycle', timeout: 180000 });
   log('delete-all then re-add persists OK');
 
   // Removing deletes it from the list and from the persisted set.
@@ -783,7 +820,7 @@ try {
   await phone.waitForSelector('.torrent .file', { timeout: 15000 });
   assert.ok(dialogs > dialogsBeforeShare, 'shared torrent asked for confirmation before being added');
   assert.equal(await phone.$eval('.torrent .name', (e) => e.textContent), 'Phone Torrent Test');
-  await waitForFromSeeder(() => phone.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 'shared torrent download', timeout: 180000 });
+  await waitForFromSeeder(() => phone.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { page: phone, label: 'shared torrent download', timeout: 180000 });
   log('share target OK');
 
   // Opening the app with a magnet in the URL adds it (protocol handler / shared link).
@@ -810,7 +847,7 @@ try {
   await phone.click('#magnet-form button[type="submit"]');
   // A magnet has no metadata of its own: it comes from the seeder, so this waits like a download.
   try {
-    await waitForFromSeeder(() => phone.$('.torrent .file').then(Boolean), { label: 'magnet metadata from the seeder', timeout: 180000 });
+    await waitForFromSeeder(() => phone.$('.torrent .file').then(Boolean), { page: phone, label: 'magnet metadata from the seeder', timeout: 180000 });
   } catch (err) {
     // Both sides of the swarm, so a failure says whether the two ever found each other at all.
     const swarm = tracker.torrents[mainHash];
@@ -833,7 +870,7 @@ try {
     })));
     throw err;
   }
-  await waitForFromSeeder(() => phone.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 'magnet download', timeout: 180000 });
+  await waitForFromSeeder(() => phone.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { page: phone, label: 'magnet download', timeout: 180000 });
   await phone.evaluate(() => Promise.race([window.__phoneTorrent.views.values().next().value.persisted, new Promise((r) => setTimeout(r, 5000))]));
   await seederPause(); // no peers available from here on
   await phone.reload();
@@ -998,7 +1035,7 @@ try {
   assert.equal(await ios.$eval('#torrent-file-input', (e) => e.getAttribute('accept')), null, 'no accept filter (it would hide .torrent files on iOS)');
   await ios.setInputFiles('#torrent-file-input', { name: 'test.torrent', mimeType: 'application/x-bittorrent', buffer: Buffer.from(torrentFile) });
   await ios.waitForSelector('.torrent .file', { timeout: 15000 });
-  await waitForFromSeeder(() => ios.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 'iOS download', timeout: 180000 });
+  await waitForFromSeeder(() => ios.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { page: ios, label: 'iOS download', timeout: 180000 });
   const iosNames = await ios.$$eval('.torrent .file .file-name', (els) => els.map((e) => e.textContent));
   const [iosDownload] = await Promise.all([
     ios.waitForEvent('download', { timeout: 30000 }),
@@ -1276,7 +1313,7 @@ try {
   assert.equal(legacyMode, 'blob', 'falls back to in-memory saving without a service worker');
   await legacy.setInputFiles('#torrent-file-input', { name: 'test.torrent', mimeType: 'application/x-bittorrent', buffer: Buffer.from(torrentFile) });
   await legacy.waitForSelector('.torrent .file', { timeout: 15000 });
-  await waitForFromSeeder(() => legacy.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 'legacy download', timeout: 180000 });
+  await waitForFromSeeder(() => legacy.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { page: legacy, label: 'legacy download', timeout: 180000 });
   const legacyNames = await legacy.$$eval('.torrent .file .file-name', (els) => els.map((e) => e.textContent));
   const [legacyDownload] = await Promise.all([
     legacy.waitForEvent('download', { timeout: 30000 }),
