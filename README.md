@@ -270,7 +270,17 @@ require it.
 
 ## Privacy
 
-The page talks to the trackers and peers BitTorrent needs, and to nothing else. A cloud key is stored
+The page talks to the trackers and peers BitTorrent needs, and beyond them only to:
+
+- the public list of `wss://` trackers, fetched from GitHub (or its jsDelivr and Statically mirrors)
+  every six hours — **Settings → Expert** turns it off or points it somewhere else;
+- for a magnet whose metadata no peer delivers, the torrent caches that serve a `.torrent` by info
+  hash (`itorrents.org` and `torrage.info`), which therefore learn that info hash — the list is in
+  **Settings → Expert**, and an empty one asks nobody. A `.torrent` you add, private or not, never
+  goes there: it already has its metadata;
+- the DNS‑over‑HTTPS resolver you choose, and only when you run the network check.
+
+A cloud key is stored
 on the device and sent only to that service (or, if you turn it on, through your own proxy). The
 files a cloud service or your own server holds are downloaded straight from it by the browser: they
 never pass through this app.
