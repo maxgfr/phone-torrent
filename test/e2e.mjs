@@ -630,6 +630,32 @@ try {
   }), { label: 'app shell precache', timeout: 15000 });
   log('PWA manifest + app shell cache OK');
 
+  // A network that answers nothing — a weak signal, a Wi-Fi that stalled — must not keep the
+  // installed app on a blank page: after a few seconds the cached shell takes over. Here the server
+  // accepts every connection and never replies.
+  if (await phone.evaluate(() => Boolean(navigator.serviceWorker?.controller))) {
+    const answering = site.server.listeners('request');
+    const unanswered = [];
+    site.server.removeAllListeners('request');
+    site.server.on('request', (req, res) => { unanswered.push(res); });
+    try {
+      const stalled = await phoneCtx.newPage();
+      const started = Date.now();
+      stalled.goto(site.url, { timeout: 30000 }).catch(() => {});
+      await stalled.waitForFunction(() => window.__phoneTorrent?.client, null, { timeout: 20000 });
+      log(`stalled network: the app came up from the cache in ${Date.now() - started} ms`);
+      await stalled.close();
+    } finally {
+      site.server.removeAllListeners('request');
+      for (const fn of answering) site.server.on('request', fn);
+      // The worker's own requests are still waiting on these, and would hold the browser's few
+      // connections to this host for the rest of the suite: end them as a dropped network would.
+      for (const res of unanswered) res.socket?.destroy();
+    }
+  } else {
+    log('stalled network: skipped, the page is not controlled by the service worker in this engine');
+  }
+
   // Network check: live tracker reachable, dead hostname flagged as dead, unreachable IP flagged as blocked.
   const netcheck = await phone.evaluate(() => window.__phoneTorrent.runNetworkCheck());
   const byUrl = Object.fromEntries(netcheck.map((r) => [r.url, r]));
