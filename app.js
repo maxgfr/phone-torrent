@@ -90,6 +90,8 @@ const els = {
   wakelockToggle: $('#wakelock-toggle'),
   debugToggle: $('#debug-toggle'),
   resetTrackersBtn: $('#reset-trackers-btn'),
+  settingsForm: $('#settings-dialog form'),
+  settingsError: $('#settings-error'),
   clearStorageBtn: $('#clear-storage-btn'),
   copyDiagBtn: $('#copy-diag-btn'),
   storageInfo: $('#storage-info'),
@@ -117,7 +119,9 @@ function loadSettings() {
     corsProxy: '',
     // Cloud fetch: a remote client (TorBox and anything speaking its API) downloads what a browser
     // cannot reach — private trackers, http(s)-only trackers, swarms without a single WebRTC peer.
-    cloud: { provider: DEFAULT_CLOUD_PROVIDER, apiKey: '', apiBase: '', viaProxy: false },
+    // `accounts` keeps the key and address of every service used before, so a transfer
+    // started on one still answers after switching to another.
+    cloud: { provider: DEFAULT_CLOUD_PROVIDER, apiKey: '', apiBase: '', viaProxy: false, accounts: {} },
     // Simple by default: the trackers, the fallbacks and the storage are already
     // set to what works, and nothing in Expert has to be touched to download.
     expert: false,
@@ -363,6 +367,22 @@ async function cleanOrphanStores(records) {
   } catch { /* ignore */ }
 }
 
+const TAB_LOCK = 'phone-torrent:open-tab';
+
+/**
+ * A seed is never remembered, so to the housekeeping above the files another open tab is sharing
+ * look orphaned. Every tab holds a shared lock for as long as it is open, and the cleanup only runs
+ * when that lock can be had exclusively — when this is the only tab. Without Web Locks there is no
+ * way to know, and the cleanup runs as it always did.
+ */
+async function cleanOrphanStoresIfAlone(records) {
+  if (!navigator.locks?.request) return cleanOrphanStores(records);
+  try {
+    await navigator.locks.request(TAB_LOCK, { mode: 'exclusive', ifAvailable: true }, (lock) => (lock ? cleanOrphanStores(records) : null));
+  } catch { /* no cleanup this time; it is only housekeeping */ }
+  navigator.locks.request(TAB_LOCK, { mode: 'shared' }, () => new Promise(() => {})).catch(() => {});
+}
+
 /** Resolves once persisted records are loaded and orphan stores are cleaned; adding waits for it. */
 let storageReady = Promise.resolve([]);
 
@@ -384,12 +404,27 @@ async function probeOpfs() {
   }
 }
 
+/**
+ * Memory stores by name ("<torrent name> - <first 8 hex of info hash>", as WebTorrent names them).
+ * A retry, or coming back to a frozen tab, removes a torrent and adds it again; with OPFS the new
+ * torrent finds its pieces on disk, and this is what lets it find them in memory too.
+ */
+const memoryStores = new Map();
+
 /** Minimal in-memory chunk store with the interface WebTorrent expects. */
 class MemoryChunkStore {
-  constructor(chunkLength) {
+  constructor(chunkLength, opts = {}) {
+    // The same torrent added again gets the store it had, pieces and all: close() kept them.
+    const kept = opts.name ? memoryStores.get(opts.name) : null;
+    if (kept && kept.chunkLength === Number(chunkLength)) {
+      kept.closed = false;
+      return kept;
+    }
+    this.name = opts.name || '';
     this.chunkLength = Number(chunkLength);
     this.chunks = new Map();
     this.closed = false;
+    if (this.name) memoryStores.set(this.name, this);
   }
 
   put(index, buf, cb = () => {}) {
@@ -415,6 +450,7 @@ class MemoryChunkStore {
 
   destroy(cb = () => {}) {
     this.chunks.clear();
+    if (memoryStores.get(this.name) === this) memoryStores.delete(this.name);
     this.close(cb);
   }
 }
@@ -459,16 +495,28 @@ function toast(message, { error = false, timeout = 4500 } = {}) {
 function parseTorrentText(text) {
   const t = (text || '').trim();
   if (!t) return null;
-  if (/^magnet:\?/i.test(t)) return t;
+  // A magnet anywhere in the text wins, and only the magnet: the app's own link carries one in its
+  // fragment (https://…/#magnet:?…), which is not a .torrent to fetch, and shared text often has a
+  // title on the next line, which is not part of the last parameter.
+  const magnet = t.match(/magnet:\?[^\s"<>]+/i);
+  if (magnet) return magnet[0];
   if (/^[a-f0-9]{40}$/i.test(t) || /^[a-z2-7]{32}$/i.test(t)) return `magnet:?xt=urn:btih:${t}`;
   if (/^https?:\/\/\S+$/i.test(t)) return t;
-  const embedded = t.match(/magnet:\?\S+/i);
-  if (embedded) return embedded[0];
   return null;
 }
 
 function safeDecode(text) {
   try { return decodeURIComponent(text); } catch { return text; }
+}
+
+/**
+ * The magnet in this page's fragment. It is kept as it is — its parameters are percent-encoded
+ * already, and decoding the whole of it turns a "%26" inside a name into a separator — unless the
+ * magnet itself arrived encoded (#magnet%3A%3F…).
+ */
+function magnetFromHash() {
+  const raw = location.hash.slice(1);
+  return parseTorrentText(/^magnet%3a/i.test(raw) ? safeDecode(raw) : raw);
 }
 
 function describeTorrentId(id) {
@@ -507,6 +555,8 @@ async function copyText(text) {
     ta.style.opacity = '0';
     document.body.appendChild(ta);
     ta.select();
+    // iOS ignores select() on a read-only field: without a selection range, "copy" copies nothing.
+    ta.setSelectionRange(0, ta.value.length);
     let ok = false;
     try { ok = document.execCommand('copy'); } catch { /* ignore */ }
     ta.remove();
@@ -709,7 +759,15 @@ function pick(obj, ...names) {
 }
 
 function cloudReady() {
-  return Boolean(settings.cloud && settings.cloud.apiKey);
+  // Your own server may run without a token, alone on your machine; every hosted service needs a key.
+  return Boolean(settings.cloud && (settings.cloud.apiKey || settings.cloud.provider === 'server'));
+}
+
+/** The key and address saved for one service: the current one, or one used before. */
+function cloudAccount(provider) {
+  if (provider === settings.cloud.provider) return { apiKey: settings.cloud.apiKey || '', apiBase: settings.cloud.apiBase || '' };
+  const saved = (settings.cloud.accounts || {})[provider] || {};
+  return { apiKey: saved.apiKey || '', apiBase: saved.apiBase || '' };
 }
 
 /**
@@ -720,23 +778,31 @@ function providerBase(api) {
   return (typeof api.defaultBase === 'function' ? api.defaultBase() : api.defaultBase) || '';
 }
 
-/** Where a transfer lives: which API, at which base URL. Stored with the torrent so it survives a reload. */
+/**
+ * Where a transfer lives: which API, at which base URL, with which key. The provider and base are
+ * stored with the torrent so it survives a reload; the key is that service's own, not whichever
+ * service is selected now. `over.key` and `over.viaProxy` let the settings dialog try what is typed
+ * before it is saved.
+ */
 function cloudCtx(over = {}) {
-  const provider = CLOUD_PROVIDERS[over.provider] ? over.provider : (CLOUD_PROVIDERS[settings.cloud.provider] ? settings.cloud.provider : 'torbox');
+  const provider = CLOUD_PROVIDERS[over.provider] ? over.provider : (CLOUD_PROVIDERS[settings.cloud.provider] ? settings.cloud.provider : DEFAULT_CLOUD_PROVIDER);
   const api = CLOUD_PROVIDERS[provider];
-  const base = (over.base || settings.cloud.apiBase || providerBase(api)).replace(/\/+$/, '');
-  return { provider, base, key: settings.cloud.apiKey, api };
+  const account = cloudAccount(provider);
+  const base = (over.base || account.apiBase || providerBase(api)).replace(/\/+$/, '');
+  const key = over.key !== undefined ? over.key : account.apiKey;
+  const viaProxy = over.viaProxy !== undefined ? Boolean(over.viaProxy) : Boolean(settings.cloud.viaProxy);
+  return { provider, base, key, api, json: (url, opts = {}) => cloudJson(url, { ...opts, key, viaProxy }) };
 }
 
 /**
  * One call to a cloud API. The key travels in an Authorization header, which makes this a request
  * the API must allow with CORS; when it does not, the user's own proxy relays it instead.
  */
-async function cloudFetch(url, { method = 'GET', body, json = false, contentType } = {}) {
+async function cloudFetch(url, { method = 'GET', body, json = false, contentType, key = '', viaProxy: onlyProxy = false } = {}) {
   const viaProxy = proxied(url);
   const hasProxy = viaProxy !== url;
-  const targets = settings.cloud.viaProxy && hasProxy ? [viaProxy] : hasProxy ? [url, viaProxy] : [url];
-  const headers = { Authorization: `Bearer ${settings.cloud.apiKey}` };
+  const targets = onlyProxy && hasProxy ? [viaProxy] : hasProxy ? [url, viaProxy] : [url];
+  const headers = key ? { Authorization: `Bearer ${key}` } : {};
   if (json) headers['Content-Type'] = 'application/json';
   if (contentType) headers['Content-Type'] = contentType;
   let last = null;
@@ -765,9 +831,10 @@ async function cloudJson(url, opts) {
   let json = null;
   try { json = JSON.parse(text); } catch { /* an error page, not JSON */ }
   // Each service says "no" in its own dialect: TorBox with success:false, put.io
-  // with status ERROR, AllDebrid with status error and an {error:{message}}.
+  // with status ERROR, AllDebrid with status error and an {error:{message}}. A
+  // Real-Debrid torrent whose own status is "error" is an answer, not a failed call.
   const status = json && typeof json.status === 'string' ? json.status.toLowerCase() : '';
-  const failed = !res.ok || (json && json.success === false) || status === 'error';
+  const failed = !res.ok || (json && json.success === false) || (status === 'error' && Boolean(json.error || json.error_message));
   if (failed) {
     const detail = (json && (json.detail || json.error_message
       || (json.error && (json.error.message || (typeof json.error === 'string' ? json.error : ''))))) 
@@ -787,7 +854,7 @@ const CLOUD_PROVIDERS = {
     keyPlaceholder: 'TorBox API key',
 
     async check(ctx) {
-      const { data } = await cloudJson(`${ctx.base}/v1/api/user/me?settings=false`);
+      const { data } = await ctx.json(`${ctx.base}/v1/api/user/me?settings=false`);
       return pick(data || {}, 'email', 'customer', 'id');
     },
 
@@ -795,18 +862,39 @@ const CLOUD_PROVIDERS = {
       const form = new FormData();
       if (bytes) form.append('file', new Blob([bytes], { type: 'application/x-bittorrent' }), `${name}.torrent`);
       else form.append('magnet', magnet);
-      const { data } = await cloudJson(`${ctx.base}/v1/api/torrents/createtorrent`, { method: 'POST', body: form });
-      const id = pick(data || {}, 'torrent_id', 'torrentId', 'queued_id', 'queuedId', 'id');
-      if (id === undefined) throw new Error('the API did not return a torrent id');
-      return id;
+      const { data } = await ctx.json(`${ctx.base}/v1/api/torrents/createtorrent`, { method: 'POST', body: form });
+      const id = pick(data || {}, 'torrent_id', 'torrentId', 'id');
+      if (id !== undefined) return id;
+      // With every active slot taken, TorBox queues the torrent instead: it gets a queued id,
+      // lives in /queued rather than /torrents, and gets a torrent id of its own once it starts.
+      const queuedId = pick(data || {}, 'queued_id', 'queuedId');
+      if (queuedId === undefined) throw new Error('the API did not return a torrent id');
+      return this.queuedKey(queuedId, pick(data || {}, 'hash'));
+    },
+
+    /** A queued transfer's id: its queue id, and the info hash that finds it once it has started. */
+    queuedKey(queuedId, hash) {
+      return `queued:${queuedId}:${String(hash || '').toLowerCase()}`;
+    },
+
+    queued(id) {
+      const m = String(id).match(/^queued:(\d+):([a-f0-9]*)$/i);
+      return m ? { id: m[1], hash: m[2].toLowerCase() } : null;
+    },
+
+    normalizeQueued(raw) {
+      return { state: 'queued', progress: 0, ready: false, failed: false, name: pick(raw, 'name') || '', size: Number(pick(raw, 'size') || 0), files: [] };
     },
 
     normalize(raw) {
       const ready = Boolean(pick(raw, 'download_present', 'downloadPresent')) || Boolean(pick(raw, 'download_finished', 'downloadFinished'));
+      const state = String(pick(raw, 'download_state', 'downloadState') || 'unknown');
       return {
-        state: String(pick(raw, 'download_state', 'downloadState') || 'unknown'),
+        state,
         progress: Number(pick(raw, 'progress') || 0),
         ready,
+        // Nothing left to wait for: polling it again would only ask the same question.
+        failed: !ready && /error|fail/i.test(state),
         name: pick(raw, 'name') || '',
         size: Number(pick(raw, 'size') || 0),
         files: (Array.isArray(raw.files) ? raw.files : []).map((f) => ({
@@ -818,20 +906,47 @@ const CLOUD_PROVIDERS = {
     },
 
     async status(ctx, id) {
-      const { data } = await cloudJson(`${ctx.base}/v1/api/torrents/mylist?id=${encodeURIComponent(id)}&bypass_cache=true`);
+      const queued = this.queued(id);
+      if (queued) {
+        const waiting = await ctx.json(`${ctx.base}/v1/api/queued/getqueued?id=${queued.id}&type=torrent&bypass_cache=true`).catch(() => ({}));
+        const row = Array.isArray(waiting.data) ? waiting.data[0] : waiting.data;
+        if (row) return { id, ...this.normalizeQueued(row) };
+        // It has left the queue: an ordinary torrent now, under the id TorBox gave it.
+        const { data } = await ctx.json(`${ctx.base}/v1/api/torrents/mylist?bypass_cache=true`);
+        const started = (Array.isArray(data) ? data : []).find((t) => queued.hash && String(pick(t, 'hash') || '').toLowerCase() === queued.hash);
+        if (!started) throw new Error('the cloud no longer knows this transfer');
+        return { id: pick(started, 'id'), ...this.normalize(started) };
+      }
+      const { data } = await ctx.json(`${ctx.base}/v1/api/torrents/mylist?id=${encodeURIComponent(id)}&bypass_cache=true`);
       const raw = Array.isArray(data) ? data[0] : data;
       if (!raw) throw new Error('the cloud no longer knows this transfer');
       return this.normalize(raw);
     },
 
     async list(ctx) {
-      const { data } = await cloudJson(`${ctx.base}/v1/api/torrents/mylist?bypass_cache=true`);
+      const [{ data }, waiting] = await Promise.all([
+        ctx.json(`${ctx.base}/v1/api/torrents/mylist?bypass_cache=true`),
+        ctx.json(`${ctx.base}/v1/api/queued/getqueued?type=torrent&bypass_cache=true`).catch(() => ({})),
+      ]);
       const rows = Array.isArray(data) ? data : (data ? [data] : []);
-      return rows.map((raw) => ({ id: pick(raw, 'id'), ...this.normalize(raw) }));
+      const queue = Array.isArray(waiting.data) ? waiting.data : [];
+      return [
+        ...rows.map((raw) => ({ id: pick(raw, 'id'), ...this.normalize(raw) })),
+        ...queue.map((raw) => ({ id: this.queuedKey(pick(raw, 'id'), pick(raw, 'hash')), ...this.normalizeQueued(raw) })),
+      ];
     },
 
     async remove(ctx, id) {
-      await cloudJson(`${ctx.base}/v1/api/torrents/controltorrent`, {
+      const queued = this.queued(id);
+      if (queued) {
+        await ctx.json(`${ctx.base}/v1/api/queued/controlqueued`, {
+          method: 'POST',
+          body: JSON.stringify({ queued_id: Number(queued.id), operation: 'delete', type: 'torrent' }),
+          json: true,
+        });
+        return;
+      }
+      await ctx.json(`${ctx.base}/v1/api/torrents/controltorrent`, {
         method: 'POST',
         body: JSON.stringify({ torrent_id: Number(id), operation: 'delete' }),
         json: true,
@@ -839,7 +954,7 @@ const CLOUD_PROVIDERS = {
     },
 
     async account(ctx) {
-      const { data } = await cloudJson(`${ctx.base}/v1/api/user/me?settings=false`);
+      const { data } = await ctx.json(`${ctx.base}/v1/api/user/me?settings=false`);
       const who = pick(data || {}, 'email', 'customer', 'id');
       const plan = pick(data || {}, 'plan');
       return { who: who ? String(who) : '', detail: plan !== undefined ? `plan ${plan}` : '' };
@@ -868,42 +983,44 @@ const CLOUD_PROVIDERS = {
     keyPlaceholder: 'Server token (AUTH_TOKEN)',
 
     async check(ctx) {
-      const { who, detail } = await cloudJson(`${ctx.base}/api/account`);
+      const { who, detail } = await ctx.json(`${ctx.base}/api/account`);
       return [who, detail].filter(Boolean).join(' · ');
     },
 
     async submit(ctx, { bytes, magnet }) {
       const { transfer } = bytes
-        ? await cloudJson(`${ctx.base}/api/transfers`, { method: 'POST', body: bytes, contentType: 'application/x-bittorrent' })
-        : await cloudJson(`${ctx.base}/api/transfers`, { method: 'POST', body: JSON.stringify({ magnet }), json: true });
+        ? await ctx.json(`${ctx.base}/api/transfers`, { method: 'POST', body: bytes, contentType: 'application/x-bittorrent' })
+        : await ctx.json(`${ctx.base}/api/transfers`, { method: 'POST', body: JSON.stringify({ magnet }), json: true });
       if (!transfer || !transfer.id) throw new Error('the server did not return a transfer');
       return transfer.id;
     },
 
     async status(ctx, id) {
-      const { transfer } = await cloudJson(`${ctx.base}/api/transfers/${encodeURIComponent(id)}`);
+      const { transfer } = await ctx.json(`${ctx.base}/api/transfers/${encodeURIComponent(id)}`);
       if (!transfer) throw new Error('the server no longer knows this transfer');
       return transfer;
     },
 
     async list(ctx) {
-      const { transfers } = await cloudJson(`${ctx.base}/api/transfers`);
+      const { transfers } = await ctx.json(`${ctx.base}/api/transfers`);
       return transfers || [];
     },
 
     async remove(ctx, id) {
-      await cloudJson(`${ctx.base}/api/transfers/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      await ctx.json(`${ctx.base}/api/transfers/${encodeURIComponent(id)}`, { method: 'DELETE' });
     },
 
     async account(ctx) {
-      const { who, detail } = await cloudJson(`${ctx.base}/api/account`);
+      const { who, detail } = await ctx.json(`${ctx.base}/api/account`);
       return { who: who || 'your server', detail: detail || '' };
     },
 
-    // A <video> cannot send an Authorization header, so the token rides in the
-    // query string for this one — the same link the phone downloads with.
+    // A <video> cannot send an Authorization header. The server hands out a link per
+    // file, signed with the token rather than carrying it, good for one file and one day.
+    // A server from before those links takes the token in the query string instead.
     fileLink(ctx, id, file) {
       if (!file) return '';
+      if (file.link) return `${ctx.base}${file.link}`;
       const url = new URL(`${ctx.base}/api/transfers/${encodeURIComponent(id)}/files/${encodeURIComponent(file.id)}`);
       if (ctx.key) url.searchParams.set('token', ctx.key);
       return url.toString();
@@ -919,17 +1036,17 @@ const CLOUD_PROVIDERS = {
     keyPlaceholder: 'Real-Debrid API token',
 
     async check(ctx) {
-      const user = await cloudJson(`${ctx.base}/rest/1.0/user`);
+      const user = await ctx.json(`${ctx.base}/rest/1.0/user`);
       return user && (user.username || user.email);
     },
 
     async submit(ctx, { bytes, magnet }) {
       const added = bytes
-        ? await cloudJson(`${ctx.base}/rest/1.0/torrents/addTorrent`, { method: 'PUT', body: bytes, contentType: 'application/x-bittorrent' })
-        : await cloudJson(`${ctx.base}/rest/1.0/torrents/addMagnet`, { method: 'POST', body: new URLSearchParams({ magnet }) });
+        ? await ctx.json(`${ctx.base}/rest/1.0/torrents/addTorrent`, { method: 'PUT', body: bytes, contentType: 'application/x-bittorrent' })
+        : await ctx.json(`${ctx.base}/rest/1.0/torrents/addMagnet`, { method: 'POST', body: new URLSearchParams({ magnet }) });
       if (!added || !added.id) throw new Error('Real-Debrid did not return a torrent id');
       // Nothing downloads until files are chosen; "all" is what a torrent client does.
-      await cloudJson(`${ctx.base}/rest/1.0/torrents/selectFiles/${encodeURIComponent(added.id)}`, {
+      await ctx.json(`${ctx.base}/rest/1.0/torrents/selectFiles/${encodeURIComponent(added.id)}`, {
         method: 'POST',
         body: new URLSearchParams({ files: 'all' }),
       });
@@ -943,6 +1060,7 @@ const CLOUD_PROVIDERS = {
         state,
         progress: Number(raw.progress || 0) / 100,
         ready: state === 'downloaded',
+        failed: ['magnet_error', 'error', 'virus', 'dead'].includes(state),
         name: raw.filename || raw.original_filename || '',
         size: Number(raw.bytes || raw.original_bytes || 0),
         files: [],
@@ -950,7 +1068,7 @@ const CLOUD_PROVIDERS = {
     },
 
     async status(ctx, id) {
-      const raw = await cloudJson(`${ctx.base}/rest/1.0/torrents/info/${encodeURIComponent(id)}`);
+      const raw = await ctx.json(`${ctx.base}/rest/1.0/torrents/info/${encodeURIComponent(id)}`);
       if (!raw || !raw.id) throw new Error('Real-Debrid no longer knows this transfer');
       const out = this.normalize(raw);
       if (!out.ready) return out;
@@ -958,7 +1076,7 @@ const CLOUD_PROVIDERS = {
       const selected = (raw.files || []).filter((f) => f.selected);
       const links = raw.links || [];
       out.files = await Promise.all(selected.slice(0, links.length).map(async (f, i) => {
-        const unrestricted = await cloudJson(`${ctx.base}/rest/1.0/unrestrict/link`, {
+        const unrestricted = await ctx.json(`${ctx.base}/rest/1.0/unrestrict/link`, {
           method: 'POST',
           body: new URLSearchParams({ link: links[i] }),
         });
@@ -973,16 +1091,16 @@ const CLOUD_PROVIDERS = {
     },
 
     async list(ctx) {
-      const rows = await cloudJson(`${ctx.base}/rest/1.0/torrents`);
+      const rows = await ctx.json(`${ctx.base}/rest/1.0/torrents`);
       return (Array.isArray(rows) ? rows : []).map((raw) => this.normalize(raw));
     },
 
     async remove(ctx, id) {
-      await cloudJson(`${ctx.base}/rest/1.0/torrents/delete/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      await ctx.json(`${ctx.base}/rest/1.0/torrents/delete/${encodeURIComponent(id)}`, { method: 'DELETE' });
     },
 
     async account(ctx) {
-      const user = await cloudJson(`${ctx.base}/rest/1.0/user`);
+      const user = await ctx.json(`${ctx.base}/rest/1.0/user`);
       const days = user && user.premium ? Math.round(Number(user.premium) / 86400) : 0;
       return {
         who: (user && (user.username || user.email)) || '',
@@ -1009,7 +1127,7 @@ const CLOUD_PROVIDERS = {
     },
 
     async check(ctx) {
-      const { data } = await cloudJson(`${ctx.base}/v4/user?${this.query(ctx)}`);
+      const { data } = await ctx.json(`${ctx.base}/v4/user?${this.query(ctx)}`);
       return data && data.user && data.user.username;
     },
 
@@ -1018,12 +1136,13 @@ const CLOUD_PROVIDERS = {
       if (bytes) {
         const form = new FormData();
         form.append('files[]', new Blob([bytes], { type: 'application/x-bittorrent' }), `${name || 'torrent'}.torrent`);
-        ({ data: { magnets } = {} } = await cloudJson(`${ctx.base}/v4/magnet/upload/file?${this.query(ctx)}`, { method: 'POST', body: form }));
+        // A file upload answers with data.files (each { file, name, id, ... }), not data.magnets.
+        ({ data: { files: magnets } = {} } = await ctx.json(`${ctx.base}/v4/magnet/upload/file?${this.query(ctx)}`, { method: 'POST', body: form }));
       } else {
-        ({ data: { magnets } = {} } = await cloudJson(`${ctx.base}/v4/magnet/upload?${this.query(ctx, { 'magnets[]': magnet })}`, { method: 'POST' }));
+        ({ data: { magnets } = {} } = await ctx.json(`${ctx.base}/v4/magnet/upload?${this.query(ctx, { 'magnets[]': magnet })}`, { method: 'POST' }));
       }
       const first = Array.isArray(magnets) ? magnets[0] : magnets;
-      if (!first || first.id === undefined) throw new Error((first && first.error && first.error.message) || 'AllDebrid did not return a magnet id');
+      if (!first || first.id === undefined) throw new Error((first && first.error && first.error.message) || 'AllDebrid did not return a transfer id');
       return first.id;
     },
 
@@ -1035,6 +1154,8 @@ const CLOUD_PROVIDERS = {
         state,
         progress: size ? Math.min(1, Number(raw.downloaded || 0) / size) : 0,
         ready: state === 'ready',
+        // statusCode 5 and up: an error, or expired. It will not become ready.
+        failed: Number(raw.statusCode) >= 5,
         name: raw.filename || '',
         size,
         files: [],
@@ -1042,12 +1163,12 @@ const CLOUD_PROVIDERS = {
     },
 
     async status(ctx, id) {
-      const { data } = await cloudJson(`${ctx.base}/v4.1/magnet/status?${this.query(ctx, { id })}`);
+      const { data } = await ctx.json(`${ctx.base}/v4.1/magnet/status?${this.query(ctx, { id })}`);
       const raw = data && (data.magnets && !Array.isArray(data.magnets) ? data.magnets : (data.magnets || [])[0]);
       if (!raw) throw new Error('AllDebrid no longer knows this transfer');
       const out = this.normalize(raw);
       if (!out.ready) return out;
-      const files = await cloudJson(`${ctx.base}/v4/magnet/files?${this.query(ctx, { 'id[]': id })}`);
+      const files = await ctx.json(`${ctx.base}/v4/magnet/files?${this.query(ctx, { 'id[]': id })}`);
       const entry = ((files.data && files.data.magnets) || [])[0] || {};
       // Its file tree nests folders; a flat list is what the app shows.
       const flat = [];
@@ -1058,25 +1179,30 @@ const CLOUD_PROVIDERS = {
         }
       };
       walk(entry.files, '');
-      out.files = await Promise.all(flat.slice(0, 50).map(async (f, i) => {
-        const unlocked = await cloudJson(`${ctx.base}/v4/link/unlock?${this.query(ctx, { link: f.link })}`);
-        return { id: i, name: f.name, size: f.size, url: unlocked.data && unlocked.data.link };
-      }));
+      // Every file, a few at a time: a season pack has more than fifty, and the API
+      // rate-limits a burst of unlocks.
+      out.files = [];
+      for (let i = 0; i < flat.length; i += 8) {
+        out.files.push(...await Promise.all(flat.slice(i, i + 8).map(async (f, j) => {
+          const unlocked = await ctx.json(`${ctx.base}/v4/link/unlock?${this.query(ctx, { link: f.link })}`);
+          return { id: i + j, name: f.name, size: f.size, url: unlocked.data && unlocked.data.link };
+        })));
+      }
       return out;
     },
 
     async list(ctx) {
-      const { data } = await cloudJson(`${ctx.base}/v4.1/magnet/status?${this.query(ctx)}`);
+      const { data } = await ctx.json(`${ctx.base}/v4.1/magnet/status?${this.query(ctx)}`);
       const rows = data && (Array.isArray(data.magnets) ? data.magnets : Object.values(data.magnets || {}));
       return (rows || []).map((raw) => this.normalize(raw));
     },
 
     async remove(ctx, id) {
-      await cloudJson(`${ctx.base}/v4/magnet/delete?${this.query(ctx, { id })}`);
+      await ctx.json(`${ctx.base}/v4/magnet/delete?${this.query(ctx, { id })}`);
     },
 
     async account(ctx) {
-      const { data } = await cloudJson(`${ctx.base}/v4/user?${this.query(ctx)}`);
+      const { data } = await ctx.json(`${ctx.base}/v4/user?${this.query(ctx)}`);
       const user = (data && data.user) || {};
       return { who: user.username || '', detail: user.isPremium ? 'premium' : (user.isSubscribed ? 'subscribed' : 'free') };
     },
@@ -1093,7 +1219,7 @@ const CLOUD_PROVIDERS = {
     keyPlaceholder: 'put.io OAuth token',
 
     async check(ctx) {
-      const { info } = await cloudJson(`${ctx.base}/v2/account/info`);
+      const { info } = await ctx.json(`${ctx.base}/v2/account/info`);
       return info && (info.username || info.mail);
     },
 
@@ -1103,9 +1229,9 @@ const CLOUD_PROVIDERS = {
         const form = new FormData();
         form.append('file', new Blob([bytes], { type: 'application/x-bittorrent' }), `${name}.torrent`);
         // put.io takes uploads on upload.put.io; a custom base (a stand-in, a clone) keeps its host.
-        json = await cloudJson(`${ctx.base.replace('://api.', '://upload.')}/v2/files/upload`, { method: 'POST', body: form });
+        json = await ctx.json(`${ctx.base.replace('://api.', '://upload.')}/v2/files/upload`, { method: 'POST', body: form });
       } else {
-        json = await cloudJson(`${ctx.base}/v2/transfers/add`, { method: 'POST', body: new URLSearchParams({ url: magnet }) });
+        json = await ctx.json(`${ctx.base}/v2/transfers/add`, { method: 'POST', body: new URLSearchParams({ url: magnet }) });
       }
       const id = json.transfer && json.transfer.id;
       if (id === undefined) throw new Error('put.io did not start a transfer for that torrent');
@@ -1113,7 +1239,7 @@ const CLOUD_PROVIDERS = {
     },
 
     async status(ctx, id) {
-      const { transfer } = await cloudJson(`${ctx.base}/v2/transfers/${encodeURIComponent(id)}`);
+      const { transfer } = await ctx.json(`${ctx.base}/v2/transfers/${encodeURIComponent(id)}`);
       if (!transfer) throw new Error('the cloud no longer knows this transfer');
       const state = String(transfer.status || 'unknown').toLowerCase();
       if (state === 'error') throw new Error(transfer.error_message || 'the transfer failed');
@@ -1127,12 +1253,12 @@ const CLOUD_PROVIDERS = {
       };
       if (!ready || transfer.file_id === undefined || transfer.file_id === null) return out;
       // A transfer points at one file, or at the folder holding them.
-      const { file } = await cloudJson(`${ctx.base}/v2/files/${encodeURIComponent(transfer.file_id)}`);
+      const { file } = await ctx.json(`${ctx.base}/v2/files/${encodeURIComponent(transfer.file_id)}`);
       if (file && file.file_type !== 'FOLDER') {
         out.files = [{ id: file.id, name: file.name, size: Number(file.size || 0) }];
         return out;
       }
-      const listed = await cloudJson(`${ctx.base}/v2/files/list?parent_id=${encodeURIComponent(transfer.file_id)}&per_page=1000`);
+      const listed = await ctx.json(`${ctx.base}/v2/files/list?parent_id=${encodeURIComponent(transfer.file_id)}&per_page=1000`);
       // A sub-folder keeps its own link: put.io serves a folder as a zip.
       out.files = (listed.files || []).map((f) => ({
         id: f.id,
@@ -1143,7 +1269,7 @@ const CLOUD_PROVIDERS = {
     },
 
     async list(ctx) {
-      const { transfers } = await cloudJson(`${ctx.base}/v2/transfers/list`);
+      const { transfers } = await ctx.json(`${ctx.base}/v2/transfers/list`);
       return (transfers || []).map((t) => {
         const state = String(t.status || 'unknown').toLowerCase();
         return {
@@ -1152,6 +1278,7 @@ const CLOUD_PROVIDERS = {
           state,
           progress: Number(t.percent_done || 0) / 100,
           ready: state === 'completed' || state === 'seeding',
+          failed: state === 'error',
           name: t.name || '',
           size: Number(t.size || 0),
           files: [],
@@ -1160,16 +1287,16 @@ const CLOUD_PROVIDERS = {
     },
 
     async remove(ctx, id, item) {
-      await cloudJson(`${ctx.base}/v2/transfers/cancel`, { method: 'POST', body: new URLSearchParams({ transfer_ids: String(id) }) });
+      await ctx.json(`${ctx.base}/v2/transfers/cancel`, { method: 'POST', body: new URLSearchParams({ transfer_ids: String(id) }) });
       // Cancelling only drops the transfer; the file it produced is what takes up the account's space.
       const fileId = item && (item.fileId !== undefined && item.fileId !== null ? item.fileId : (item.files && item.files[0] && item.files[0].id));
       if (fileId !== undefined && fileId !== null) {
-        await cloudJson(`${ctx.base}/v2/files/delete`, { method: 'POST', body: new URLSearchParams({ file_ids: String(fileId) }) });
+        await ctx.json(`${ctx.base}/v2/files/delete`, { method: 'POST', body: new URLSearchParams({ file_ids: String(fileId) }) });
       }
     },
 
     async account(ctx) {
-      const { info } = await cloudJson(`${ctx.base}/v2/account/info`);
+      const { info } = await ctx.json(`${ctx.base}/v2/account/info`);
       const disk = (info && info.disk) || {};
       return {
         who: (info && (info.username || info.mail)) || '',
@@ -1218,10 +1345,13 @@ async function refreshCloudLibrary({ quiet = false } = {}) {
   scheduleCloudPoll();
 }
 
-/** Poll while something is still downloading up there, and leave it alone once nothing is. */
+/**
+ * Poll while something is still downloading up there, and leave it alone once nothing is. A
+ * transfer that failed is not downloading: it will not change until someone deletes it.
+ */
 function scheduleCloudPoll() {
   clearTimeout(cloudPollTimer);
-  if (!cloudReady() || !cloudItems.some((i) => !i.ready)) return;
+  if (!cloudReady() || !cloudItems.some((i) => !i.ready && !i.failed)) return;
   cloudPollTimer = setTimeout(() => refreshCloudLibrary({ quiet: true }), CLOUD_POLL_MS);
 }
 
@@ -1246,6 +1376,10 @@ async function cloudExpand(item, el) {
     return;
   }
   filesEl.hidden = false;
+  await fillCloudFiles(item, filesEl);
+}
+
+async function fillCloudFiles(item, filesEl) {
   if (item.files.length) return renderCloudFiles(item, filesEl);
   filesEl.textContent = 'Loading…';
   const ctx = cloudCtx();
@@ -1319,25 +1453,59 @@ async function cloudRemoveItem(item) {
   }
 }
 
+/**
+ * The rows on screen, by service and transfer id. A poll updates them in place rather than
+ * rebuilding the list, so an open file list, a link being copied or a video playing in the
+ * page survives the next poll — which, while anything downloads, is every few seconds.
+ */
+const cloudRows = new Map();
+
 function renderCloudLibrary() {
-  els.cloudList.textContent = '';
   els.cloudEmpty.hidden = Boolean(cloudItems.length);
   // Without a key there is no account to show; the Cloud tab is where you learn about it.
   els.cloudLibrary.hidden = !cloudReady();
-  if (!cloudReady()) return;
+  if (!cloudReady()) {
+    els.cloudList.textContent = '';
+    cloudRows.clear();
+    return;
+  }
   els.cloudEmpty.textContent = 'Nothing in your cloud account yet. Send a magnet or a .torrent above.';
-  for (const item of cloudItems) {
-    const el = els.cloudItemTemplate.content.firstElementChild.cloneNode(true);
+  const seen = new Set();
+  cloudItems.forEach((item, index) => {
+    const key = `${settings.cloud.provider}:${item.id}`;
+    seen.add(key);
+    let row = cloudRows.get(key);
+    if (!row) {
+      const el = els.cloudItemTemplate.content.firstElementChild.cloneNode(true);
+      row = { el, item };
+      $('.cloud-item-files-btn', el).addEventListener('click', () => cloudExpand(row.item, el));
+      $('.cloud-item-delete', el).addEventListener('click', () => cloudRemoveItem(row.item));
+      cloudRows.set(key, row);
+    } else {
+      const becameReady = !row.item.ready && item.ready;
+      // Files fetched on demand stay with the row while the transfer is what it was.
+      if (!becameReady && !item.files.length && row.item.files.length) item.files = row.item.files;
+      row.item = item;
+      const filesEl = $('.cloud-item-files', row.el);
+      if (becameReady && !filesEl.hidden) fillCloudFiles(item, filesEl);
+    }
+    const { el } = row;
     const pct = Math.min(100, Math.round((item.progress || 0) * 100));
     $('.cloud-item-name', el).textContent = item.name || `Transfer ${item.id}`;
     $('.cloud-item-meta', el).textContent = item.ready
       ? `${formatBytes(item.size)} · ready`
-      : `${formatBytes(item.size)} · ${item.state}${pct ? ` ${pct}%` : ''}`;
+      : item.failed
+        ? `${formatBytes(item.size)} · failed: ${item.state}`
+        : `${formatBytes(item.size)} · ${item.state}${pct ? ` ${pct}%` : ''}`;
     $('.cloud-item-bar', el).style.width = `${pct}%`;
     el.classList.toggle('ready', Boolean(item.ready));
-    $('.cloud-item-files-btn', el).addEventListener('click', () => cloudExpand(item, el));
-    $('.cloud-item-delete', el).addEventListener('click', () => cloudRemoveItem(item));
-    els.cloudList.appendChild(el);
+    // Moved only when out of place, so a playing <video> inside is left alone.
+    if (els.cloudList.children[index] !== el) els.cloudList.insertBefore(el, els.cloudList.children[index] || null);
+  });
+  for (const [key, row] of cloudRows) {
+    if (seen.has(key)) continue;
+    row.el.remove();
+    cloudRows.delete(key);
   }
 }
 
@@ -1371,7 +1539,16 @@ function startCloudPoll(view) {
   const tick = async () => {
     if (!views.has(view.torrent)) return stopCloudPoll(view);
     try {
+      const before = view.cloud && view.cloud.id;
       const cloud = await cloudRefresh(view);
+      // A TorBox transfer that waited in the queue gets a torrent id of its own when it
+      // starts; the stored one must follow, or a reload would look for the queue entry.
+      if (cloud && cloud.id !== before) persistTorrent(view);
+      if (cloud && cloud.failed) {
+        stopCloudPoll(view);
+        logEvent(view, `cloud transfer failed: ${cloud.state}`);
+        return;
+      }
       if (cloud && cloud.ready) {
         stopCloudPoll(view);
         if (!view.cloudAnnounced) {
@@ -1433,7 +1610,9 @@ function renderCloud(view, error) {
     ? `${ctx.api.label}: ${error}`
     : cloud.ready
       ? `Ready on ${ctx.api.label} — tap a file to download it to your phone.`
-      : `${ctx.api.label}: ${cloud.state}${pct ? ` ${pct}%` : ''}…`;
+      : cloud.failed
+        ? `${ctx.api.label}: failed (${cloud.state}).`
+        : `${ctx.api.label}: ${cloud.state}${pct ? ` ${pct}%` : ''}…`;
   const list = $('.cloud-files', box);
   list.textContent = '';
   if (!cloud.ready) return;
@@ -1678,13 +1857,17 @@ function createTorrentView(torrent, record, seeding) {
   }
   // A transfer started before a reload keeps going in the cloud; pick it up again.
   if (record && record.cloud && record.cloud.id !== undefined) {
-    view.cloud = { id: record.cloud.id, state: 'checking', progress: 0, ready: false, files: [] };
+    const { id, provider, base } = record.cloud;
+    view.cloud = { id, provider, base, state: 'checking', progress: 0, ready: false, files: [] };
     renderCloud(view);
-    if (cloudReady()) startCloudPoll(view);
+    const ctx = cloudCtx(view.cloud);
+    if (ctx.key || ctx.provider === 'server') startCloudPoll(view);
   }
 
   torrent.on('infoHash', () => {
-    if (!torrent.name) $('.name', el).textContent = torrent.infoHash;
+    // A magnet's display name (dn) is already torrent.name here, before any metadata: show it, or
+    // the info hash without one, rather than "Fetching metadata…" — the state line says that.
+    if (!torrent.metadata) $('.name', el).textContent = torrent.name || torrent.infoHash;
     logEvent(view, `info hash ${torrent.infoHash}`);
     if (!torrent.metadata && !view.seeding) {
       scheduleMetadataFallback(view);
@@ -1703,6 +1886,12 @@ function createTorrentView(torrent, record, seeding) {
       }
     }
     renderFiles(view);
+  });
+  // Before a torrent is ready WebTorrent checks which pieces it already has, and selects every one
+  // it does not — which undoes a file unticked in the meantime, right after adding, while its box
+  // stays unticked. Nothing has been requested yet at this point, so the ticks go back on here.
+  torrent.on('ready', () => {
+    if (view.fileEls.length && !view.seeding) applySelection(view);
   });
   torrent.on('done', () => {
     el.classList.add('done');
@@ -1743,9 +1932,9 @@ function renderFiles(view) {
     }
 
     checkbox.addEventListener('change', () => {
-      if (checkbox.checked) file.select();
-      else file.deselect();
+      applySelection(view);
       li.classList.toggle('deselected', !checkbox.checked);
+      resumeAutoStopped(view);
       persistTorrent(view);
       refreshView(view);
       updateWakeLock();
@@ -1767,17 +1956,27 @@ function selectedFiles(view) {
   });
 }
 
+/**
+ * Hand the ticks to WebTorrent. A file is a range of pieces, and two neighbours share the piece
+ * where one ends and the next begins: deselecting a file drops that piece from the selection too,
+ * and the neighbour still wanted could then never finish — it sat at 99% for ever. So the unwanted
+ * files are deselected first and the wanted ones selected after, which puts their edges back.
+ */
+function applySelection(view) {
+  const wanted = view.torrent.files.map((file, i) => !view.fileEls[i] || $('input[type="checkbox"]', view.fileEls[i]).checked);
+  view.torrent.files.forEach((file, i) => { if (!wanted[i]) file.deselect(); });
+  view.torrent.files.forEach((file, i) => { if (wanted[i]) file.select(); });
+}
+
 function setAllSelected(torrent, selected) {
   const view = views.get(torrent);
   if (!view) return;
-  view.fileEls.forEach((li, i) => {
-    const checkbox = $('input[type="checkbox"]', li);
-    if (checkbox.checked === selected) return;
-    checkbox.checked = selected;
+  view.fileEls.forEach((li) => {
+    $('input[type="checkbox"]', li).checked = selected;
     li.classList.toggle('deselected', !selected);
-    if (selected) torrent.files[i].select();
-    else torrent.files[i].deselect();
   });
+  applySelection(view);
+  resumeAutoStopped(view);
   persistTorrent(view);
   refreshView(view);
   updateWakeLock();
@@ -1797,7 +1996,9 @@ function persistTorrent(view) {
     torrentFile: torrent.metadata ? new Uint8Array(torrent.torrentFile) : null,
     deselected,
     paused: Boolean(torrent.paused) && !view.autoStopped,
-    cloud: view.cloud ? { id: view.cloud.id } : ((view.record && view.record.cloud) || null),
+    // The service and address go with the id: switching services later must not send this
+    // transfer's id to another one.
+    cloud: view.cloud ? { id: view.cloud.id, provider: view.cloud.provider, base: view.cloud.base } : ((view.record && view.record.cloud) || null),
     addedAt: (view.record && view.record.addedAt) || Date.now(),
   };
   view.persisted = dbPut(view.record);
@@ -1810,7 +2011,9 @@ function refreshView(view) {
 
   const selected = selectedFiles(view);
   const selectedBytes = selected.reduce((n, f) => n + f.length, 0);
-  const selectedDownloaded = selected.reduce((n, f) => n + f.downloaded, 0);
+  // WebTorrent's File.downloaded counts one piece short for a file that ends exactly on a piece
+  // boundary, so a finished download would sit at 99% for ever; a file that is done is all there.
+  const selectedDownloaded = selected.reduce((n, f) => n + (f.done ? f.length : Math.max(0, f.downloaded)), 0);
   const progress = torrent.files.length
     ? (selectedBytes ? selectedDownloaded / selectedBytes : 0)
     : torrent.progress;
@@ -1888,7 +2091,7 @@ function refreshView(view) {
   torrent.files.forEach((file, i) => {
     const li = view.fileEls[i];
     if (!li) return;
-    const fp = Math.min(100, Math.floor(file.progress * 100));
+    const fp = file.done ? 100 : Math.max(0, Math.min(100, Math.floor(file.progress * 100)));
     $('.file-progress .bar', li).style.width = `${fp}%`;
     const done = file.done || file.progress >= 1;
     li.classList.toggle('done', done);
@@ -1946,6 +2149,22 @@ function stopTransfer(torrent) {
   torrent.pause();
   // pause() only stops new connections; drop the current ones so transfer really stops.
   for (const wire of [...torrent.wires]) wire.destroy();
+}
+
+/**
+ * With "keep seeding" off, a finished torrent is stopped — finished meaning every selected file.
+ * Selecting one more makes it unfinished again, and that stop no longer applies: without this it
+ * would sit paused for ever while its card said it was looking for peers. Selecting nothing at all
+ * leaves nothing to fetch, so that keeps it stopped.
+ */
+function resumeAutoStopped(view) {
+  const { torrent } = view;
+  if (!view.autoStopped || !torrent.paused || !selectedFiles(view).length || isComplete(torrent)) return;
+  view.autoStopped = false;
+  view.completed = false;
+  torrent.resume();
+  askTrackersNow(torrent);
+  logEvent(view, 'resumed for the newly selected files');
 }
 
 function togglePause(torrent) {
@@ -2297,18 +2516,29 @@ async function tryAddTorrent(id) {
   }
 }
 
+/** Far above any real .torrent, which is kilobytes to a few megabytes of piece hashes. */
+const TORRENT_FILE_MAX = 64 * 1024 * 1024;
+
 async function addTorrentFiles(fileList) {
   for (const f of fileList) {
+    const notATorrent = () => toast(`"${f.name}" is not a .torrent file. To share a file of your own, use the "Seed & share" tab.`, { error: true });
     let buf;
     try {
+      // The picker cannot filter by file type on iOS, so a video from the photo library is one tap
+      // away. Reading gigabytes just to refuse them would take the tab down: a .torrent is a small
+      // bencoded dictionary, so its size and first byte say enough before anything else is read.
+      if (f.size > TORRENT_FILE_MAX || new Uint8Array(await f.slice(0, 1).arrayBuffer())[0] !== 0x64) {
+        notATorrent();
+        continue;
+      }
       buf = new Uint8Array(await f.arrayBuffer());
     } catch (err) {
       toast(`Could not read ${f.name}: ${err.message}`, { error: true });
       continue;
     }
-    // The picker cannot filter by file type on iOS, so the bytes have the last word.
+    // The bytes have the last word.
     if (!torrentReach(buf)) {
-      toast(`"${f.name}" is not a .torrent file. To share a file of your own, use the "Seed & share" tab.`, { error: true });
+      notATorrent();
       continue;
     }
     try {
@@ -2417,12 +2647,14 @@ els.seedUrlForm.addEventListener('submit', async (event) => {
   }
 });
 
-$$('.tab').forEach((tab) => tab.addEventListener('click', () => {
+// Only the add card's tabs: the Simple / Expert switch in Settings looks like one (class "tab") but
+// has no panel, and matching it too hid every panel the moment the mode was changed.
+$$('.tabs .tab').forEach((tab) => tab.addEventListener('click', () => {
   if (tab.dataset.tab === 'cloud') {
     cloudAccountLine();
     refreshCloudLibrary({ quiet: true });
   }
-  $$('.tab').forEach((t) => {
+  $$('.tabs .tab').forEach((t) => {
     const active = t === tab;
     t.classList.toggle('active', active);
     t.setAttribute('aria-selected', String(active));
@@ -2509,11 +2741,15 @@ els.settingsBtn.addEventListener('click', async () => {
   els.cloudProviderSelect.value = CLOUD_PROVIDERS[settings.cloud.provider] ? settings.cloud.provider : DEFAULT_CLOUD_PROVIDER;
   els.cloudKeyInput.value = settings.cloud.apiKey || '';
   els.cloudBaseInput.value = settings.cloud.apiBase || '';
+  cloudDraft = { ...(settings.cloud.accounts || {}), [els.cloudProviderSelect.value]: { apiKey: settings.cloud.apiKey || '', apiBase: settings.cloud.apiBase || '' } };
+  cloudDraftProvider = els.cloudProviderSelect.value;
   applyCloudProviderFields();
   els.cloudProxyToggle.checked = Boolean(settings.cloud.viaProxy);
-  els.cloudInfo.textContent = cloudReady()
+  els.cloudInfo.textContent = settings.cloud.apiKey
     ? 'A key is set. Torrents no browser can reach offer "Fetch it in the cloud".'
-    : 'Without a key, cloud fetch stays hidden and nothing is sent anywhere.';
+    : settings.cloud.provider === 'server'
+      ? 'No token: fine for a server alone on your machine. Set AUTH_TOKEN before anyone else can reach it.'
+      : 'Without a key, cloud fetch stays hidden and nothing is sent anywhere.';
   els.fallbackDelayInput.value = String(settings.fallbackDelay || 20);
   els.rtcInput.value = settings.rtcConfig ? JSON.stringify(settings.rtcConfig) : '';
   els.wakelockToggle.checked = Boolean(settings.wakeLock);
@@ -2578,29 +2814,42 @@ for (const [button, expert] of [[els.modeSimpleBtn, false], [els.modeExpertBtn, 
   });
 }
 
+/** The key and address of each service, as typed in the dialog since it opened. Saved on Save. */
+let cloudDraft = {};
+let cloudDraftProvider = DEFAULT_CLOUD_PROVIDER;
+
+function typedCloudBase() {
+  const typed = els.cloudBaseInput.value.trim();
+  return /^https?:\/\//i.test(typed) ? typed.replace(/\/+$/, '') : '';
+}
+
 els.cloudProviderSelect.addEventListener('change', () => {
-  // A base URL typed for the other provider would not answer; only a custom one is worth keeping.
-  const known = Object.values(CLOUD_PROVIDERS).map(providerBase);
-  if (known.includes(els.cloudBaseInput.value.trim())) els.cloudBaseInput.value = '';
+  // Each service keeps its own key and address. The ones typed for the previous service stay
+  // with it, and the one chosen now shows its own: your server's address, hidden in Simple
+  // mode for a hosted service, must not become where that service's key is sent.
+  cloudDraft[cloudDraftProvider] = { apiKey: els.cloudKeyInput.value.trim(), apiBase: typedCloudBase() };
+  cloudDraftProvider = els.cloudProviderSelect.value;
+  const saved = cloudDraft[cloudDraftProvider] || {};
+  els.cloudKeyInput.value = saved.apiKey || '';
+  els.cloudBaseInput.value = saved.apiBase || '';
   applyCloudProviderFields();
   els.cloudInfo.textContent = '';
 });
 
 els.cloudTestBtn.addEventListener('click', async () => {
-  // Use what is typed in the dialog, even before Save.
-  settings = {
-    ...settings,
-    cloud: {
-      provider: els.cloudProviderSelect.value,
-      apiKey: els.cloudKeyInput.value.trim(),
-      apiBase: /^https?:\/\//i.test(els.cloudBaseInput.value.trim()) ? els.cloudBaseInput.value.trim().replace(/\/+$/, '') : '',
-      viaProxy: els.cloudProxyToggle.checked,
-    },
-  };
+  // Try what is typed in the dialog, as it is. Nothing is saved, and nothing else in the app
+  // starts using it: Cancel leaves the settings exactly as they were.
+  const provider = els.cloudProviderSelect.value;
+  const api = CLOUD_PROVIDERS[provider] || CLOUD_PROVIDERS[DEFAULT_CLOUD_PROVIDER];
   els.cloudTestBtn.disabled = true;
   els.cloudInfo.textContent = 'Checking…';
   try {
-    const ctx = cloudCtx();
+    const ctx = cloudCtx({
+      provider,
+      base: typedCloudBase() || providerBase(api),
+      key: els.cloudKeyInput.value.trim(),
+      viaProxy: els.cloudProxyToggle.checked,
+    });
     const who = await ctx.api.check(ctx);
     els.cloudInfo.textContent = `Key accepted${who ? ` (${who})` : ''}. Save to keep it.`;
   } catch (err) {
@@ -2614,16 +2863,28 @@ els.resetTrackersBtn.addEventListener('click', () => {
   els.trackersInput.value = DEFAULT_TRACKERS.join('\n');
 });
 
-els.settingsDialog.addEventListener('close', () => {
-  if (els.settingsDialog.returnValue !== 'save') return;
+/** The dialog's checked values, set on submit and saved on close. */
+let checkedSettings = null;
+
+/**
+ * Checked on submit, while the dialog is still open: a field that cannot be saved says so next to
+ * the Save button and keeps everything else that was typed. Checked on close instead, one typo
+ * used to shut the dialog and throw every other change away with it.
+ */
+els.settingsForm.addEventListener('submit', (event) => {
+  checkedSettings = null;
+  els.settingsError.hidden = true;
+  if (event.submitter && event.submitter.value !== 'save') return;
+  const refuse = (message, field) => {
+    event.preventDefault();
+    els.settingsError.textContent = message;
+    els.settingsError.hidden = false;
+    if (!field.closest('[hidden]')) field.focus();
+  };
 
   const typed = els.trackersInput.value.split('\n').map((s) => s.trim()).filter((s) => /^wss?:\/\//i.test(s));
   const trackers = typed.filter(usableTracker);
-  if (typed.length !== trackers.length) toast(`Ignored ${typed.length - trackers.length} tracker(s) on a port browsers refuse to open.`, { error: true });
-  if (trackers.length === 0) {
-    toast('Keeping the previous trackers: at least one wss:// tracker is needed.', { error: true });
-    return;
-  }
+  if (trackers.length === 0) return refuse('At least one wss:// tracker is needed.', els.trackersInput);
 
   let rtcConfig = null;
   const rtcText = els.rtcInput.value.trim();
@@ -2632,16 +2893,23 @@ els.settingsDialog.addEventListener('close', () => {
       rtcConfig = JSON.parse(rtcText);
       if (!rtcConfig || typeof rtcConfig !== 'object') throw new Error('not an object');
     } catch (err) {
-      toast(`WebRTC configuration is not valid JSON: ${err.message}`, { error: true });
-      return;
+      return refuse(`WebRTC configuration is not valid JSON: ${err.message}`, els.rtcInput);
     }
   }
 
   const trackerListUrl = els.trackerListUrl.value.trim();
   if (els.trackerListToggle.checked && !/^https?:\/\//i.test(trackerListUrl)) {
-    toast('The tracker list URL must start with http(s)://', { error: true });
-    return;
+    return refuse('The tracker list URL must start with http(s)://', els.trackerListUrl);
   }
+  checkedSettings = { typed, trackers, rtcConfig, trackerListUrl };
+});
+
+els.settingsDialog.addEventListener('close', () => {
+  els.settingsError.hidden = true;
+  if (els.settingsDialog.returnValue !== 'save' || !checkedSettings) return;
+  const { typed, trackers, rtcConfig, trackerListUrl } = checkedSettings;
+  checkedSettings = null;
+  if (typed.length !== trackers.length) toast(`Ignored ${typed.length - trackers.length} tracker(s) on a port browsers refuse to open.`, { error: true });
 
   const rtcChanged = JSON.stringify(rtcConfig) !== JSON.stringify(settings.rtcConfig || null);
   const listChanged = els.trackerListToggle.checked !== Boolean(settings.trackerList) || trackerListUrl !== settings.trackerListUrl;
@@ -2662,8 +2930,10 @@ els.settingsDialog.addEventListener('close', () => {
     cloud: {
       provider: els.cloudProviderSelect.value,
       apiKey: els.cloudKeyInput.value.trim(),
-      apiBase: /^https?:\/\//i.test(els.cloudBaseInput.value.trim()) ? els.cloudBaseInput.value.trim().replace(/\/+$/, '') : '',
+      apiBase: typedCloudBase(),
       viaProxy: els.cloudProxyToggle.checked,
+      // Every service's key, so transfers started on one keep working after a switch.
+      accounts: { ...cloudDraft, [els.cloudProviderSelect.value]: { apiKey: els.cloudKeyInput.value.trim(), apiBase: typedCloudBase() } },
     },
     fallbackDelay: Math.max(5, Number(els.fallbackDelayInput.value) || 20),
     dohResolver: els.dohSelect.value || DEFAULT_DOH,
@@ -2819,7 +3089,7 @@ function maybeShowIosInstallHint() {
 
 // A magnet pasted into the address bar of the already open app arrives as a hash change.
 window.addEventListener('hashchange', async () => {
-  const id = parseTorrentText(safeDecode(location.hash.slice(1)));
+  const id = magnetFromHash();
   if (!id) return;
   history.replaceState(null, '', location.pathname);
   if (confirmExternalAdd(describeTorrentId(id))) await tryAddTorrent(id);
@@ -2834,7 +3104,7 @@ window.addEventListener('hashchange', async () => {
     if (!opfsOk) console.warn('OPFS unavailable: pieces are kept in memory for this session');
     const records = await dbAll();
     records.sort((a, b) => a.addedAt - b.addedAt);
-    await cleanOrphanStores(records);
+    await cleanOrphanStoresIfAlone(records);
     return records;
   })();
   const [records] = await Promise.all([storageReady, saver.init()]);
@@ -2861,7 +3131,7 @@ window.addEventListener('hashchange', async () => {
 
   const params = new URLSearchParams(location.search);
   const fromQuery = parseTorrentText(params.get('magnet') || '');
-  const fromHash = parseTorrentText(safeDecode(location.hash.slice(1)));
+  const fromHash = magnetFromHash();
   if (fromQuery || fromHash || params.has('shared')) {
     history.replaceState(null, '', location.pathname);
   }

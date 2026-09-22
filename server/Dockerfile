@@ -18,6 +18,8 @@ COPY vendor ./web/vendor
 ENV WEB_DIR=/app/web \
     DOWNLOAD_DIR=/data/downloads \
     PORT=8080 \
+    TORRENT_PORT=6881 \
+    DHT_PORT=6882 \
     NODE_ENV=production
 
 # Downloaded files live here. Without a volume they sit in the container's
@@ -25,10 +27,12 @@ ENV WEB_DIR=/app/web \
 VOLUME ["/data"]
 
 EXPOSE 8080
-# The BitTorrent side listens here; forward it and peers can connect back to you,
-# which is the difference between leeching and taking part.
+# The BitTorrent side listens here — TCP and uTP on 6881, the DHT on 6882 — forward
+# them and peers can connect back to you, which is the difference between leeching
+# and taking part.
 EXPOSE 6881/tcp
 EXPOSE 6881/udp
+EXPOSE 6882/udp
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
   CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||8080)+'/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"

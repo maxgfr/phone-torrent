@@ -14,7 +14,8 @@ docker compose up -d          # then open http://localhost:8080
 
 That is the whole thing: the API, the client, and the app on one origin — no
 CORS to configure, nothing else to deploy. Downloads land in the `downloads`
-volume and survive restarts; unfinished transfers resume by themselves.
+volume and survive restarts; unfinished transfers resume by themselves. With no
+`ALLOWED_ORIGINS`, no other website open in your browser can call it.
 
 Set `AUTH_TOKEN` in `docker-compose.yml` the moment the server is reachable
 from anywhere but your own machine, and put the same value in the app as the
@@ -34,8 +35,8 @@ the same image; the main README compares them.
 
 ## Point the app at it
 
-**Settings → Cloud fetch → service “My own server”**, `AUTH_TOKEN` as the key,
-then **Test the key**. Opened from this server, the base URL can stay empty —
+**Settings → Cloud fetch → service “My own server”**, `AUTH_TOKEN` as the key
+(nothing, for a server with no token), then **Test the key**. Opened from this server, the base URL can stay empty —
 empty means this page’s own address, which is already the right one. Fill it in
 only to drive a server somewhere else. From then on the Cloud tab and the
 library drive this server exactly as they drive TorBox or put.io: send a magnet
@@ -44,19 +45,26 @@ or a `.torrent`, watch the progress, then play or save each file.
 ## The API
 
 Everything under `/api` needs the token (`Authorization: Bearer …`, or
-`?token=…` for links a `<video>` or a download has to follow on its own).
+`?token=…`). A file can also be fetched with the `link` the API hands out for
+it: signed with the token instead of containing it, it opens that one file for a
+day and nothing else — which is what a `<video>`, a download manager or another
+device gets, rather than the key to the whole server.
 
 | | |
 |---|---|
 | `GET /api/health` | no token; `{ ok, torrents }` |
 | `GET /api/account` | `{ who, detail }` — transfer count and free space |
 | `GET /api/transfers` | `{ transfers: [...] }` |
-| `POST /api/transfers` | `{"magnet": "..."}` as JSON, or the `.torrent` bytes as the body |
+| `POST /api/transfers` | `{"magnet": "..."}` as `application/json`, or the `.torrent` bytes as `application/x-bittorrent`; anything else is `415` |
 | `GET /api/transfers/{infoHash}` | one transfer |
 | `DELETE /api/transfers/{infoHash}` | removes it **and its files** |
-| `GET /api/transfers/{infoHash}/files/{index}` | the file, with `Range` support |
+| `GET /api/transfers/{infoHash}/files/{index}` | the file, with `Range` support; the token, or the file's signed `link` |
 
-A transfer is `{ id, name, size, progress, state, ready, peers, files: [{ id, name, size }] }`.
+A transfer is `{ id, name, size, progress, state, ready, peers, files: [{ id, name, size, link }] }`.
+
+The list of transfers is kept as `transfers.json` in the download directory, so
+a torrent whose top-level name is `transfers.json` is refused rather than
+allowed to write over it.
 
 ## Settings
 
@@ -64,14 +72,16 @@ A transfer is `{ id, name, size, progress, state, ready, peers, files: [{ id, na
 |---|---|---|
 | `PORT` | `8080` | |
 | `AUTH_TOKEN` | *(none)* | set it whenever the server is not alone on your machine |
-| `ALLOWED_ORIGINS` | `*` | comma-separated origins allowed to call the API from a browser |
-| `DOWNLOAD_DIR` | `/data/downloads` | where files land |
+| `ALLOWED_ORIGINS` | *(none)* | comma-separated origins allowed to call the API from a browser; none means only the page this server serves, `*` means any |
+| `DOWNLOAD_DIR` | `/data/downloads` | where files land (`downloads/` beside `server/` when run from a checkout; never served as static files) |
 | `WEB_DIR` | the app | the static files served at `/` |
 | `SEED_AFTER_DONE` | `1` | keep seeding once a download finishes |
+| `TORRENT_PORT` | `6881` | BitTorrent over TCP and uTP |
+| `DHT_PORT` | `6882` | the DHT, over UDP |
 
-Port `6881` (TCP and UDP) is the BitTorrent side. Forward it and peers can
-connect to you as well as the other way round; without it you can still
-download, from fewer peers.
+Ports `6881` (TCP and UDP) and `6882` (UDP) are the BitTorrent side. Forward
+them and peers can connect to you as well as the other way round; without them
+you can still download, from fewer peers. Fly forwards the TCP one.
 
 ## A note on the dependency pin
 

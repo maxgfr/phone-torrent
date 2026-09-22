@@ -98,7 +98,9 @@ there is no CORS to configure and nothing else to deploy. Open it and the app al
 its server is: the address field can stay empty, because empty means *this page*.
 
 Set `AUTH_TOKEN` before the server is reachable by anyone else, and put the same value in the app as
-the key. [`server/README.md`](server/README.md) documents the API and every setting.
+the key. Until you name one in `ALLOWED_ORIGINS`, no other website can call it from your browser.
+Forward `6881` (TCP and UDP) and `6882` (UDP) and peers can connect to you, not only you to them.
+[`server/README.md`](server/README.md) documents the API and every setting.
 
 Away from home, without opening a port:
 
@@ -135,18 +137,26 @@ Five services, five dialects, one table in the app:
 
 | | submit | watch | the link per file |
 |---|---|---|---|
-| **TorBox** | `POST /v1/api/torrents/createtorrent` | `/v1/api/torrents/mylist` | `requestdl?token=…&redirect=true` |
+| **TorBox** | `POST /v1/api/torrents/createtorrent`; with every slot taken it is queued, and followed in `/v1/api/queued/getqueued` until it starts | `/v1/api/torrents/mylist` | `requestdl?token=…&redirect=true` |
 | **put.io** | `POST /v2/files/upload`, or `/v2/transfers/add` | `/v2/transfers/{id}` | `/v2/files/{id}/download?oauth_token=…` |
 | **Real‑Debrid** | `addMagnet` / `addTorrent`, then `selectFiles` — without which it downloads nothing | `/torrents/info/{id}` | `unrestrict/link`, resolved when the transfer turns ready |
-| **AllDebrid** | `/v4/magnet/upload` | `/v4.1/magnet/status` | `/v4/link/unlock`; its nested folders are flattened |
-| **Your own server** | `POST /api/transfers` | `/api/transfers/{infoHash}` | `/api/transfers/{id}/files/{i}`, with `Range` |
+| **AllDebrid** | `/v4/magnet/upload`, or `/v4/magnet/upload/file` | `/v4.1/magnet/status` | `/v4/link/unlock` for every file; its nested folders are flattened |
+| **Your own server** | `POST /api/transfers` | `/api/transfers/{infoHash}` | `/api/transfers/{id}/files/{i}`, signed for that one file, with `Range` |
 
-The library polls while something is running and leaves the API alone once nothing is. Playback is a
-plain `<video>`/`<audio>` on the same direct link, so seeking is whatever the other end supports.
-Each transfer remembers the service it started on, so switching services does not break older links.
-The key stays on the device, and no payload ever passes through this app. If an API refuses browser
-requests, the call is retried through your own CORS proxy automatically — the worker in
-[`proxy/`](proxy/) forwards `Authorization` only to the hosts in its `API_HOSTS` variable.
+The library polls while something is running and leaves the API alone once nothing is — a transfer
+that failed is not running. Playback is a plain `<video>`/`<audio>` on the same direct link, so
+seeking is whatever the other end supports, and the next poll leaves a playing video alone. Each
+transfer remembers the service it started on, and each service keeps its own key and address in
+Settings, so switching services does not break older links. The key stays on the device, and no
+payload ever passes through this app. If an API refuses browser requests, the call is retried through
+your own CORS proxy automatically — the worker in [`proxy/`](proxy/) forwards `Authorization` only to
+the hosts in its `API_HOSTS` variable.
+
+**A TorBox or put.io link is your key.** Their file links carry it — TorBox's permalink as `token=`,
+put.io's download link as `oauth_token=` — because that is what lets a `<video>` or a download follow
+them without an API call. Anyone who has such a link can use your whole account, so **Copy link** is
+for your own devices, not for sharing. Real‑Debrid and AllDebrid links carry no key, and your own
+server hands out a link signed for one file, which opens that file for a day and nothing else.
 
 ---
 
@@ -203,11 +213,18 @@ from a URL, an unreachable URL reported, a private torrent explained and kept of
 trackers, two complete cloud round trips against stand‑ins speaking TorBox's and put.io's own wire
 formats, the whole cloud library (account line, listing, a file downloaded from its link
 byte‑for‑byte, a magnet sent with nothing added locally, a delete that cancels the transfer and drops
-its file), and the Real‑Debrid and AllDebrid mappings against stand‑ins speaking theirs.
+its file), and the Real‑Debrid and AllDebrid mappings against stand‑ins speaking theirs — a TorBox
+torrent that waits in the queue, an AllDebrid `.torrent` upload and a sixty‑file season, Real‑Debrid
+through the CORS proxy worker, cloud transfers that keep their service across a switch and a reload,
+a video that keeps playing through the library's polls, and a key tested then cancelled.
 
 `test/server.mjs` is the other half, with no browser anywhere: a plain BitTorrent client seeds a file
 over an http tracker, the server is asked for it through its API, and the file comes back out whole
-and by `Range`, byte for byte, before being deleted. CI runs both on Chromium and on WebKit
+and by `Range` (suffix ranges and ranges past the end included), byte for byte, through the token and
+through a signed link, before being deleted. On the way it is sent requests it cannot parse and
+torrents that are not torrents, and must answer them; it must not serve its downloads as static files,
+nor answer another origin; it refuses a torrent that would overwrite its list of transfers; and it is
+restarted, and picks the transfer up again. CI runs both on Chromium and on WebKit
 (`BROWSER=webkit npm test`), and publishes the server image on every change to it.
 
 Real‑world peer discovery is the one thing the suite cannot cover: public trackers are unreachable
@@ -270,7 +287,18 @@ require it.
 
 ## Privacy
 
-The page talks to the trackers and peers BitTorrent needs, and to nothing else. A cloud key is stored
-on the device and sent only to that service (or, if you turn it on, through your own proxy). The
+The page talks to the trackers and peers BitTorrent needs, and beyond them only to:
+
+- the public list of `wss://` trackers, fetched from GitHub (or its jsDelivr and Statically mirrors)
+  every six hours — **Settings → Expert** turns it off or points it somewhere else;
+- for a magnet whose metadata no peer delivers, the torrent caches that serve a `.torrent` by info
+  hash (`itorrents.org` and `torrage.info`), which therefore learn that info hash — the list is in
+  **Settings → Expert**, and an empty one asks nobody. A `.torrent` you add, private or not, never
+  goes there: it already has its metadata;
+- the DNS‑over‑HTTPS resolver you choose, and only when you run the network check.
+
+A cloud key is stored
+on the device and sent only to that service (or, if you turn it on, through your own proxy) — and,
+for TorBox and put.io, inside the file links, as above. The
 files a cloud service or your own server holds are downloaded straight from it by the browser: they
 never pass through this app.

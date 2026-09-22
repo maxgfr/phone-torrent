@@ -19,6 +19,8 @@ on:
       - "sw.js"
       - "styles.css"
       - "manifest.webmanifest"
+      - "icon.svg"
+      - "icons/**"
       - "vendor/**"
       - ".github/workflows/image.yml"
   workflow_dispatch:

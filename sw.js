@@ -56,21 +56,49 @@ function isShellRequest(url) {
   return SHELL_PATHS.has(url.pathname);
 }
 
+/* How long the network gets to start answering before the cached shell is used instead. A network
+ * that is down fails at once; one that answers nothing — a weak signal, a Wi-Fi that stalled —
+ * would otherwise keep the installed app on a blank page for as long as the browser cares to wait.
+ * This is the time to the first byte, not to the whole file, so a slow network still wins. */
+const NETWORK_TIMEOUT_MS = 4000;
+/* A page asks for index.html, then its stylesheet and script, then the script's imports: waiting
+ * the timeout out at every step made a stalled network cost three of them. Once one request has
+ * timed out, the ones right behind it use the cache straight away, until the network answers. */
+const STALL_MEMORY_MS = 30000;
+let stalledSince = 0;
+
+async function fromCache(cache, request) {
+  const cached = await cache.match(request, { ignoreSearch: true });
+  if (cached) return cached;
+  if (request.mode === 'navigate') return cache.match('./index.html');
+  return undefined;
+}
+
 async function networkFirst(request) {
   const cache = await caches.open(SHELL_CACHE);
   const url = new URL(request.url);
-  try {
-    const fresh = await fetch(request);
+  let answered = false;
+  const network = fetch(request).then((fresh) => {
+    answered = true;
+    stalledSince = 0;
     // Only store canonical shell URLs, never query-string variants (?magnet=…, ?shared=1).
+    // A response that arrives after the timeout still refreshes the cache for the next launch.
     if (fresh.ok && url.search === '' && isShellRequest(url)) cache.put(request, fresh.clone()).catch(() => {});
     return fresh;
+  });
+  const wait = Date.now() - stalledSince < STALL_MEMORY_MS ? 0 : NETWORK_TIMEOUT_MS;
+  const cachedAfterTimeout = new Promise((resolve) => setTimeout(resolve, wait))
+    .then(() => {
+      if (!answered) stalledSince = Date.now();
+      return fromCache(cache, request);
+    })
+    // Nothing cached to fall back on: keep waiting for the network after all.
+    .then((cached) => cached || network);
+  try {
+    return await Promise.race([network, cachedAfterTimeout]);
   } catch (err) {
-    const cached = await cache.match(request, { ignoreSearch: true });
+    const cached = await fromCache(cache, request);
     if (cached) return cached;
-    if (request.mode === 'navigate') {
-      const index = await cache.match('./index.html');
-      if (index) return index;
-    }
     throw err;
   }
 }
