@@ -1923,6 +1923,25 @@ function openDetails(torrent, force) {
   }
 }
 
+/**
+ * Ask a torrent's trackers for peers now. update() alone is not always enough: once a tracker's
+ * WebSocket has closed, bittorrent-tracker drops every announce until it has reconnected, and it
+ * waits ten seconds plus a random delay of up to five minutes before it tries. A tracker in that
+ * state is reconnected on the spot instead, and announces by itself as soon as the socket opens.
+ */
+function askTrackersNow(torrent) {
+  const trackers = torrent.discovery?.tracker;
+  if (!trackers || trackers.destroyed || torrent.destroyed) return;
+  for (const tracker of trackers._trackers || []) {
+    // Waiting out that delay, a tracker has destroyed itself and only its timer brings it back.
+    if (!tracker.reconnecting || !tracker.destroyed || typeof tracker._openSocket !== 'function') continue;
+    clearTimeout(tracker.reconnectTimer);
+    tracker.retries += 1; // as the timer would: a tracker that is really gone still backs off
+    tracker._openSocket();
+  }
+  try { trackers.update(); } catch { /* ignore */ }
+}
+
 function stopTransfer(torrent) {
   torrent.pause();
   // pause() only stops new connections; drop the current ones so transfer really stops.
@@ -1937,9 +1956,8 @@ function togglePause(torrent) {
     torrent.resume();
     // resume() only lifts the pause flag; ask the trackers for peers again right away, and once
     // more shortly after if nobody showed up (an announce can race the socket reconnect).
-    const reannounce = () => { try { torrent.discovery?.tracker?.update?.(); } catch { /* ignore */ } };
-    reannounce();
-    setTimeout(() => { if (!torrent.destroyed && !torrent.paused && torrent.numPeers === 0) reannounce(); }, 8000);
+    askTrackersNow(torrent);
+    setTimeout(() => { if (!torrent.destroyed && !torrent.paused && torrent.numPeers === 0) askTrackersNow(torrent); }, 8000);
     logEvent(view, 'resumed');
   } else {
     view.autoStopped = false;
@@ -2057,7 +2075,7 @@ async function pickUpWhereWeLeftOff(why) {
       logEvent(view, `${why}: asking the trackers again`);
       refreshView(view);
     }
-    try { torrent.discovery?.tracker?.update?.(); } catch { /* the socket may be gone; the retry below covers it */ }
+    askTrackersNow(torrent);
   }
   // An announce on a socket that died while the tab was frozen goes nowhere. Give it
   // a few seconds, then rebuild discovery for whoever is still alone.
@@ -2866,4 +2884,4 @@ window.addEventListener('hashchange', async () => {
 })();
 
 // Expose for debugging and tests.
-window.__phoneTorrent = { client, views, saver, addTorrent, seedFiles, torrentReach, unreachableReason, cloudCtx, CLOUD_PROVIDERS, cloudSend, refreshCloudLibrary, effectiveTrackers, refreshTrackerList, fetchMetadataFallback, verifyTorrentBytes, findInfoSpan, runNetworkCheck, cleanOrphanStores, isComplete, get opfsOk() { return opfsOk; } };
+window.__phoneTorrent = { client, views, saver, addTorrent, askTrackersNow, seedFiles, torrentReach, unreachableReason, cloudCtx, CLOUD_PROVIDERS, cloudSend, refreshCloudLibrary, effectiveTrackers, refreshTrackerList, fetchMetadataFallback, verifyTorrentBytes, findInfoSpan, runNetworkCheck, cleanOrphanStores, isComplete, get opfsOk() { return opfsOk; } };
