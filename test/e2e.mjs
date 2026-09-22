@@ -12,6 +12,8 @@ import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import http from 'node:http';
+import dgram from 'node:dgram';
+import os from 'node:os';
 import { chromium, webkit, devices } from 'playwright';
 import { Server as TrackerServer } from 'bittorrent-tracker';
 import { startServer } from './serve.mjs';
@@ -388,6 +390,38 @@ function startDebridApis(payloadUrl) {
   });
 }
 
+/* A STUN server on this machine, and the only one the pages are given. WebKit on Linux names its
+ * host candidates with mDNS, and nothing on a CI runner resolves those names, so the one address
+ * it could offer another page was what a public STUN server saw: the runner's public IP, looped
+ * back through the cloud's NAT — measured at 25 seconds a connection when it worked at all, and
+ * the reason the WebKit job failed about half the time. Asked here instead, STUN answers with the
+ * machine's own address, which is never hidden behind mDNS, and the pages connect directly. */
+function startStunServer() {
+  const host = Object.values(os.networkInterfaces()).flat().find((i) => i && i.family === 'IPv4' && !i.internal)?.address || '127.0.0.1';
+  const socket = dgram.createSocket('udp4');
+  const state = { answered: 0 };
+  socket.on('message', (msg, from) => {
+    // A Binding Request: type 0x0001, then the length, the magic cookie and a transaction id.
+    if (msg.length < 20 || msg.readUInt16BE(0) !== 0x0001 || msg.readUInt32BE(4) !== 0x2112a442) return;
+    const res = Buffer.alloc(32);
+    res.writeUInt16BE(0x0101, 0); // Binding Success Response
+    res.writeUInt16BE(12, 2); // one attribute: XOR-MAPPED-ADDRESS, 4 + 8 bytes
+    msg.copy(res, 4, 4, 20); // same cookie, same transaction id
+    res.writeUInt16BE(0x0020, 20);
+    res.writeUInt16BE(8, 22);
+    res.writeUInt16BE(0x0001, 24); // IPv4
+    res.writeUInt16BE(from.port ^ 0x2112, 26);
+    const ip = from.address.split('.').reduce((n, b) => n * 256 + Number(b), 0);
+    res.writeUInt32BE((ip ^ 0x2112a442) >>> 0, 28);
+    socket.send(res, from.port, from.address);
+    state.answered += 1;
+  });
+  return new Promise((resolve) => socket.bind(0, host, () => resolve({ socket, state, url: `stun:${host}:${socket.address().port}` })));
+}
+const stun = await startStunServer();
+const rtcConfig = { iceServers: [{ urls: stun.url }] };
+log('STUN at', stun.url);
+
 const tracker = new TrackerServer({ udp: false, http: false, ws: true, stats: false, interval: 30000 });
 await new Promise((resolve) => tracker.listen(0, '127.0.0.1', resolve));
 const trackerUrl = `ws://127.0.0.1:${tracker.ws.address().port}`;
@@ -501,7 +535,7 @@ try {
   // trackerList off, as for every page here: the suite's content is fixed, so is its info hash, and
   // on a public tracker it would meet every other run of this suite — the engine running beside it
   // included — and the crawlers that answer every offer, until WebRTC in WebKit gives out.
-  await seeder.addInitScript((t) => localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], trackerList: false })), trackerUrl);
+  await seeder.addInitScript(({ t, rtc }) => localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], trackerList: false, rtcConfig: rtc })), { t: trackerUrl, rtc: rtcConfig });
   await seeder.goto(site.url);
   await seeder.waitForFunction(() => window.__phoneTorrent?.client);
 
@@ -646,7 +680,7 @@ try {
   const listUrl = `${site.url}test/.tmp/trackers.txt`;
   // Merge rather than replace: this context also saves settings through the app's own
   // dialog later on, and a rewrite on every navigation would quietly undo that.
-  await phone.addInitScript(({ listUrl, metaUrl }) => {
+  await phone.addInitScript(({ listUrl, metaUrl, rtc }) => {
     let current = {};
     try { current = JSON.parse(localStorage.getItem('phone-torrent:settings') || '{}'); } catch { /* first load */ }
     localStorage.setItem('phone-torrent:settings', JSON.stringify({
@@ -654,8 +688,9 @@ try {
       trackers: ['ws://127.0.0.1:2/dead'], trackerList: true, trackerListUrl: listUrl,
       metadataSources: ['https://127.0.0.1:1/never/{INFOHASH}.torrent', metaUrl], fallbackDelay: 5,
       dohResolver: `${new URL(listUrl).origin}/__doh`,
+      rtcConfig: rtc,
     }));
-  }, { listUrl, metaUrl: `${site.url}test/.tmp/{infohash}.torrent` });
+  }, { listUrl, metaUrl: `${site.url}test/.tmp/{infohash}.torrent`, rtc: rtcConfig });
   await phone.goto(site.url);
   await phone.waitForFunction(() => window.__phoneTorrent?.client);
   await waitFor(() => phone.evaluate((t) => window.__phoneTorrent.effectiveTrackers().includes(t), trackerUrl), { label: 'tracker list to be fetched and merged', timeout: 15000 });
@@ -741,6 +776,7 @@ try {
     throw err;
   }
   log('download complete');
+  assert.ok(stun.state.answered > 0, 'the pages asked the STUN server on this machine');
   assert.ok((await phone.$$('.torrent .save-btn:not([disabled])')).length === 2, 'both Save buttons enabled');
   assert.ok(await phone.$('.torrent .zip-btn:not([disabled])'), 'zip button enabled');
 
@@ -1011,7 +1047,7 @@ try {
   const orphanCtx = await browser.newContext();
   const orphanPage = await orphanCtx.newPage();
   orphanPage.on('pageerror', (e) => console.error('orphan page error:', e));
-  await orphanPage.addInitScript((t) => localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], trackerList: false })), trackerUrl);
+  await orphanPage.addInitScript(({ t, rtc }) => localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], trackerList: false, rtcConfig: rtc })), { t: trackerUrl, rtc: rtcConfig });
   await orphanPage.goto(site.url);
   await orphanPage.waitForFunction(() => window.__phoneTorrent?.client);
   const orphan = await orphanPage.evaluate(async (bytes) => {
@@ -1127,11 +1163,11 @@ try {
   ios.on('dialog', (d) => d.accept());
   // This context saves settings from the app's own dialog later on, so the init script merges its
   // tracker choice into whatever is stored instead of replacing it on every navigation.
-  await ios.addInitScript((t) => {
+  await ios.addInitScript(({ t, rtc }) => {
     let current = {};
     try { current = JSON.parse(localStorage.getItem('phone-torrent:settings') || '{}'); } catch { /* first load */ }
-    localStorage.setItem('phone-torrent:settings', JSON.stringify({ ...current, trackers: [t], trackerList: false }));
-  }, trackerUrl);
+    localStorage.setItem('phone-torrent:settings', JSON.stringify({ ...current, trackers: [t], trackerList: false, rtcConfig: rtc }));
+  }, { t: trackerUrl, rtc: rtcConfig });
   await ios.goto(site.url);
   await ios.waitForFunction(() => window.__phoneTorrent?.client);
   const iosSaver = await waitSaver(ios);
@@ -1413,7 +1449,7 @@ try {
   const legacyCtx = await browser.newContext({ acceptDownloads: true, serviceWorkers: 'block' });
   const legacy = await legacyCtx.newPage();
   legacy.on('pageerror', (e) => console.error('legacy page error:', e));
-  await legacy.addInitScript((t) => localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], trackerList: false })), trackerUrl);
+  await legacy.addInitScript(({ t, rtc }) => localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], trackerList: false, rtcConfig: rtc })), { t: trackerUrl, rtc: rtcConfig });
   await legacy.goto(site.url);
   await legacy.waitForFunction(() => window.__phoneTorrent?.client);
   const legacyMode = (await waitSaver(legacy)).mode;
@@ -1439,6 +1475,7 @@ try {
 } finally {
   await browser.close();
   site.server.close();
+  stun.socket.close();
   cloudApi.server.close();
   putioApi.server.close();
   debridApi.server.close();

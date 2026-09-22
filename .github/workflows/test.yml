@@ -10,14 +10,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # DIAG: temporary, to measure the WebKit flake
-        browser: [webkit]
-        stun: [default, none]
-        attempt: [1, 2, 3]
-        include:
-          - { browser: chromium, stun: default, attempt: 1 }
-          - { browser: chromium, stun: none, attempt: 1 }
-    name: e2e (${{ matrix.browser }} ${{ matrix.stun }} #${{ matrix.attempt }})
+        browser: [chromium, webkit]
+        attempt: [1, 2, 3, 4] # DIAG: temporary, to measure the WebKit flake
+    name: e2e (${{ matrix.browser }} #${{ matrix.attempt }})
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -33,10 +28,9 @@ jobs:
       - run: npm test
         env:
           BROWSER: ${{ matrix.browser }}
-          NO_STUN: ${{ matrix.stun == 'none' && '1' || '' }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: screenshots-${{ matrix.browser }}-${{ matrix.stun }}-${{ matrix.attempt }}
+          name: screenshots-${{ matrix.browser }}-${{ matrix.attempt }}
           path: test/.tmp/*.png
           if-no-files-found: ignore
