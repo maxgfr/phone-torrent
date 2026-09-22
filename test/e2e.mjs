@@ -420,6 +420,55 @@ const browser = BROWSER === 'webkit'
   ? await webkit.launch()
   : await chromium.launch({ executablePath: findChromium(), args: ['--allow-insecure-localhost'] });
 log('browser:', BROWSER);
+// DIAG: count every RTCPeerConnection a page makes, how they end, and what fails.
+function pcProbe() {
+  const s = window.__pc = { created: 0, closed: 0, connected: 0, failed: 0, candidates: {}, errors: [], rejections: [] };
+  window.addEventListener('unhandledrejection', (e) => {
+    if (s.rejections.length < 6) s.rejections.push(String((e.reason && (e.reason.stack || `${e.reason.name}: ${e.reason.message}`)) || e.reason));
+  });
+  const Orig = window.RTCPeerConnection;
+  if (!Orig) return;
+  function Probe(...args) {
+    let pc;
+    try { pc = new Orig(...args); } catch (e) { if (s.errors.length < 8) s.errors.push(`new: ${e}`); throw e; }
+    s.created++;
+    let closed = false;
+    const close = pc.close.bind(pc);
+    pc.close = () => { if (!closed) { closed = true; s.closed++; } return close(); };
+    pc.addEventListener('connectionstatechange', () => {
+      if (pc.connectionState === 'connected') s.connected++;
+      else if (pc.connectionState === 'failed') s.failed++;
+    });
+    pc.addEventListener('icecandidate', (e) => {
+      const c = e.candidate && e.candidate.candidate;
+      if (!c) return;
+      const parts = c.split(' ');
+      const key = `${parts[7] || '?'}:${/\.local$/.test(parts[4] || '') ? 'mdns' : parts[4]}`;
+      s.candidates[key] = (s.candidates[key] || 0) + 1;
+    });
+    for (const m of ['createOffer', 'createAnswer', 'setLocalDescription', 'setRemoteDescription', 'addIceCandidate']) {
+      const f = pc[m].bind(pc);
+      pc[m] = (...a) => {
+        const r = f(...a);
+        return r && typeof r.catch === 'function' ? r.catch((e) => { if (s.errors.length < 8) s.errors.push(`${m}: ${e}`); throw e; }) : r;
+      };
+    }
+    return pc;
+  }
+  Probe.prototype = Orig.prototype;
+  Object.setPrototypeOf(Probe, Orig);
+  window.RTCPeerConnection = Probe;
+}
+const newContext = browser.newContext.bind(browser);
+browser.newContext = async (opts) => {
+  const ctx = await newContext(opts);
+  await ctx.addInitScript(pcProbe);
+  return ctx;
+};
+const pcStats = (page) => page.evaluate(() => {
+  const s = window.__pc;
+  return s && { created: s.created, open: s.created - s.closed, connected: s.connected, failed: s.failed, candidates: s.candidates, errors: s.errors, rejections: s.rejections };
+}).catch((e) => ({ error: String(e) }));
 
 let failed = false;
 try {
@@ -491,9 +540,11 @@ try {
         return fn();
       }, opts);
       console.error(`DIAG ${opts.label}: ${Math.round((Date.now() - started) / 1000)}s`);
+      console.error(`DIAG ${opts.label} pcs: seeder`, JSON.stringify(await pcStats(seeder)), 'waiting page', opts.page ? JSON.stringify(await pcStats(opts.page)) : '-');
       return v;
     } catch (err) {
       console.error(`DIAG ${opts.label} timed out. seeder:`, JSON.stringify(await swarmState(seeder)));
+      console.error(`DIAG ${opts.label} timed out. pcs: seeder`, JSON.stringify(await pcStats(seeder)), 'waiting page', opts.page ? JSON.stringify(await pcStats(opts.page)) : '-');
       if (opts.page) console.error(`DIAG ${opts.label} timed out. waiting page:`, JSON.stringify(await swarmState(opts.page)));
       const swarm = Object.entries(tracker.torrents).map(([h, sw]) => ({ h: h.slice(0, 8), peers: sw.peers?.keys?.length ?? sw.peers?.length, complete: sw.complete, incomplete: sw.incomplete }));
       console.error(`DIAG ${opts.label} timed out. tracker swarms:`, JSON.stringify(swarm));
