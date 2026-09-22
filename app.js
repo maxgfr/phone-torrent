@@ -363,6 +363,22 @@ async function cleanOrphanStores(records) {
   } catch { /* ignore */ }
 }
 
+const TAB_LOCK = 'phone-torrent:open-tab';
+
+/**
+ * A seed is never remembered, so to the housekeeping above the files another open tab is sharing
+ * look orphaned. Every tab holds a shared lock for as long as it is open, and the cleanup only runs
+ * when that lock can be had exclusively — when this is the only tab. Without Web Locks there is no
+ * way to know, and the cleanup runs as it always did.
+ */
+async function cleanOrphanStoresIfAlone(records) {
+  if (!navigator.locks?.request) return cleanOrphanStores(records);
+  try {
+    await navigator.locks.request(TAB_LOCK, { mode: 'exclusive', ifAvailable: true }, (lock) => (lock ? cleanOrphanStores(records) : null));
+  } catch { /* no cleanup this time; it is only housekeeping */ }
+  navigator.locks.request(TAB_LOCK, { mode: 'shared' }, () => new Promise(() => {})).catch(() => {});
+}
+
 /** Resolves once persisted records are loaded and orphan stores are cleaned; adding waits for it. */
 let storageReady = Promise.resolve([]);
 
@@ -384,12 +400,27 @@ async function probeOpfs() {
   }
 }
 
+/**
+ * Memory stores by name ("<torrent name> - <first 8 hex of info hash>", as WebTorrent names them).
+ * A retry, or coming back to a frozen tab, removes a torrent and adds it again; with OPFS the new
+ * torrent finds its pieces on disk, and this is what lets it find them in memory too.
+ */
+const memoryStores = new Map();
+
 /** Minimal in-memory chunk store with the interface WebTorrent expects. */
 class MemoryChunkStore {
-  constructor(chunkLength) {
+  constructor(chunkLength, opts = {}) {
+    // The same torrent added again gets the store it had, pieces and all: close() kept them.
+    const kept = opts.name ? memoryStores.get(opts.name) : null;
+    if (kept && kept.chunkLength === Number(chunkLength)) {
+      kept.closed = false;
+      return kept;
+    }
+    this.name = opts.name || '';
     this.chunkLength = Number(chunkLength);
     this.chunks = new Map();
     this.closed = false;
+    if (this.name) memoryStores.set(this.name, this);
   }
 
   put(index, buf, cb = () => {}) {
@@ -415,6 +446,7 @@ class MemoryChunkStore {
 
   destroy(cb = () => {}) {
     this.chunks.clear();
+    if (memoryStores.get(this.name) === this) memoryStores.delete(this.name);
     this.close(cb);
   }
 }
@@ -1704,6 +1736,12 @@ function createTorrentView(torrent, record, seeding) {
     }
     renderFiles(view);
   });
+  // Before a torrent is ready WebTorrent checks which pieces it already has, and selects every one
+  // it does not — which undoes a file unticked in the meantime, right after adding, while its box
+  // stays unticked. Nothing has been requested yet at this point, so the ticks go back on here.
+  torrent.on('ready', () => {
+    if (view.fileEls.length && !view.seeding) applySelection(view);
+  });
   torrent.on('done', () => {
     el.classList.add('done');
     refreshView(view); // completion (all files, or all selected files) is handled there
@@ -1743,9 +1781,9 @@ function renderFiles(view) {
     }
 
     checkbox.addEventListener('change', () => {
-      if (checkbox.checked) file.select();
-      else file.deselect();
+      applySelection(view);
       li.classList.toggle('deselected', !checkbox.checked);
+      resumeAutoStopped(view);
       persistTorrent(view);
       refreshView(view);
       updateWakeLock();
@@ -1767,17 +1805,27 @@ function selectedFiles(view) {
   });
 }
 
+/**
+ * Hand the ticks to WebTorrent. A file is a range of pieces, and two neighbours share the piece
+ * where one ends and the next begins: deselecting a file drops that piece from the selection too,
+ * and the neighbour still wanted could then never finish — it sat at 99% for ever. So the unwanted
+ * files are deselected first and the wanted ones selected after, which puts their edges back.
+ */
+function applySelection(view) {
+  const wanted = view.torrent.files.map((file, i) => !view.fileEls[i] || $('input[type="checkbox"]', view.fileEls[i]).checked);
+  view.torrent.files.forEach((file, i) => { if (!wanted[i]) file.deselect(); });
+  view.torrent.files.forEach((file, i) => { if (wanted[i]) file.select(); });
+}
+
 function setAllSelected(torrent, selected) {
   const view = views.get(torrent);
   if (!view) return;
-  view.fileEls.forEach((li, i) => {
-    const checkbox = $('input[type="checkbox"]', li);
-    if (checkbox.checked === selected) return;
-    checkbox.checked = selected;
+  view.fileEls.forEach((li) => {
+    $('input[type="checkbox"]', li).checked = selected;
     li.classList.toggle('deselected', !selected);
-    if (selected) torrent.files[i].select();
-    else torrent.files[i].deselect();
   });
+  applySelection(view);
+  resumeAutoStopped(view);
   persistTorrent(view);
   refreshView(view);
   updateWakeLock();
@@ -1810,7 +1858,9 @@ function refreshView(view) {
 
   const selected = selectedFiles(view);
   const selectedBytes = selected.reduce((n, f) => n + f.length, 0);
-  const selectedDownloaded = selected.reduce((n, f) => n + f.downloaded, 0);
+  // WebTorrent's File.downloaded counts one piece short for a file that ends exactly on a piece
+  // boundary, so a finished download would sit at 99% for ever; a file that is done is all there.
+  const selectedDownloaded = selected.reduce((n, f) => n + (f.done ? f.length : Math.max(0, f.downloaded)), 0);
   const progress = torrent.files.length
     ? (selectedBytes ? selectedDownloaded / selectedBytes : 0)
     : torrent.progress;
@@ -1888,7 +1938,7 @@ function refreshView(view) {
   torrent.files.forEach((file, i) => {
     const li = view.fileEls[i];
     if (!li) return;
-    const fp = Math.min(100, Math.floor(file.progress * 100));
+    const fp = file.done ? 100 : Math.max(0, Math.min(100, Math.floor(file.progress * 100)));
     $('.file-progress .bar', li).style.width = `${fp}%`;
     const done = file.done || file.progress >= 1;
     li.classList.toggle('done', done);
@@ -1946,6 +1996,22 @@ function stopTransfer(torrent) {
   torrent.pause();
   // pause() only stops new connections; drop the current ones so transfer really stops.
   for (const wire of [...torrent.wires]) wire.destroy();
+}
+
+/**
+ * With "keep seeding" off, a finished torrent is stopped — finished meaning every selected file.
+ * Selecting one more makes it unfinished again, and that stop no longer applies: without this it
+ * would sit paused for ever while its card said it was looking for peers. Selecting nothing at all
+ * leaves nothing to fetch, so that keeps it stopped.
+ */
+function resumeAutoStopped(view) {
+  const { torrent } = view;
+  if (!view.autoStopped || !torrent.paused || !selectedFiles(view).length || isComplete(torrent)) return;
+  view.autoStopped = false;
+  view.completed = false;
+  torrent.resume();
+  askTrackersNow(torrent);
+  logEvent(view, 'resumed for the newly selected files');
 }
 
 function togglePause(torrent) {
@@ -2834,7 +2900,7 @@ window.addEventListener('hashchange', async () => {
     if (!opfsOk) console.warn('OPFS unavailable: pieces are kept in memory for this session');
     const records = await dbAll();
     records.sort((a, b) => a.addedAt - b.addedAt);
-    await cleanOrphanStores(records);
+    await cleanOrphanStoresIfAlone(records);
     return records;
   })();
   const [records] = await Promise.all([storageReady, saver.init()]);
