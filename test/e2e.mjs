@@ -476,7 +476,10 @@ try {
   const seederCtx = await browser.newContext();
   const seeder = await seederCtx.newPage();
   seeder.on('pageerror', (e) => console.error('seeder page error:', e));
-  await seeder.addInitScript((t) => localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t] })), trackerUrl);
+  // trackerList off, as for every page here: the suite's content is fixed, so is its info hash, and
+  // on a public tracker it would meet every other run of this suite — the engine running beside it
+  // included — and the crawlers that answer every offer, until WebRTC in WebKit gives out.
+  await seeder.addInitScript((t) => localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], trackerList: false })), trackerUrl);
   await seeder.goto(site.url);
   await seeder.waitForFunction(() => window.__phoneTorrent?.client);
 
@@ -574,14 +577,9 @@ try {
   // The announce itself waits for the WebRTC offers it carries, which is a few seconds at most.
   await waitFor(() => Boolean(seederSocket()), { label: 'seeder announced on the reopened socket', timeout: 20000 });
   log(`a dropped tracker socket reopens ${reopenedIn} ms after asking, and announces ${Date.now() - askedAt} ms after`);
-  // Nobody asks a seed, though: one whose socket drops finds its own way back, without the delay.
-  seederSocket().terminate();
-  await waitFor(() => seederTracker().then((t) => t.reconnecting), { label: 'seeder to notice its tracker socket closed again', timeout: 10000 });
-  const droppedAt = Date.now();
-  await waitFor(() => Boolean(seederSocket()), { label: 'seeder back on the tracker by itself', timeout: 30000 });
-  log(`and a seed whose socket drops is back on the tracker by itself ${Math.round((Date.now() - droppedAt) / 1000)}s later`);
 
   const torrentFile = await seeder.evaluate(() => Array.from(window.__phoneTorrent.client.torrents[0].torrentFile));
+  assert.deepEqual(await seeder.evaluate(() => window.__phoneTorrent.client.torrents[0].announce), [trackerUrl], 'the seeded torrent names only the local tracker: the suite stays on this machine');
   assert.equal(await seeder.$eval('.torrent .name', (e) => e.textContent), 'Phone Torrent Test');
   assert.ok(!(await seeder.$eval('.torrent .details', (e) => e.hidden)), 'details open automatically after seeding starts');
   assert.match(await seeder.$eval('.torrent .d-infohash', (e) => e.textContent), /^[a-f0-9]{40}$/);
@@ -1393,7 +1391,7 @@ try {
   const legacyCtx = await browser.newContext({ acceptDownloads: true, serviceWorkers: 'block' });
   const legacy = await legacyCtx.newPage();
   legacy.on('pageerror', (e) => console.error('legacy page error:', e));
-  await legacy.addInitScript((t) => localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t] })), trackerUrl);
+  await legacy.addInitScript((t) => localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], trackerList: false })), trackerUrl);
   await legacy.goto(site.url);
   await legacy.waitForFunction(() => window.__phoneTorrent?.client);
   const legacyMode = (await waitSaver(legacy)).mode;

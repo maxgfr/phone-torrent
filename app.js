@@ -1933,20 +1933,13 @@ function askTrackersNow(torrent) {
   const trackers = torrent.discovery?.tracker;
   if (!trackers || trackers.destroyed || torrent.destroyed) return;
   for (const tracker of trackers._trackers || []) {
-    if (waitingToReconnect(tracker)) reconnectTracker(tracker);
+    // Waiting out that delay, a tracker has destroyed itself and only its timer brings it back.
+    if (!tracker.reconnecting || !tracker.destroyed || typeof tracker._openSocket !== 'function') continue;
+    clearTimeout(tracker.reconnectTimer);
+    tracker.retries += 1; // as the timer would: a tracker that is really gone still backs off
+    tracker._openSocket();
   }
   try { trackers.update(); } catch { /* ignore */ }
-}
-
-/** Waiting out that delay, a tracker has destroyed itself and only its timer brings it back. */
-function waitingToReconnect(tracker) {
-  return Boolean(tracker.reconnecting && tracker.destroyed && typeof tracker._openSocket === 'function');
-}
-
-function reconnectTracker(tracker) {
-  clearTimeout(tracker.reconnectTimer);
-  tracker.retries += 1; // as the timer would: a tracker that is really gone still backs off
-  tracker._openSocket();
 }
 
 function stopTransfer(torrent) {
@@ -2764,20 +2757,6 @@ setInterval(() => {
     ? `↓ ${formatSpeed(down)} ↑ ${formatSpeed(up)}`
     : client.torrents.length ? `${peers} peer${peers === 1 ? '' : 's'}` : 'idle';
 }, 750);
-
-/* A tracker socket that was working and dropped is not left to that reconnect delay either: for
- * as long as it lasts the torrent is on no tracker, and a seed nobody can find serves nobody. One
- * that fails again has its retry counted, and from then on backs off as the library intends. */
-const TRACKER_HEAL_MS = 15000;
-setInterval(() => {
-  for (const torrent of client.torrents) {
-    const trackers = torrent.discovery?.tracker;
-    if (torrent.paused || torrent.destroyed || !trackers || trackers.destroyed) continue;
-    for (const tracker of trackers._trackers || []) {
-      if (waitingToReconnect(tracker) && tracker.retries === 0) reconnectTracker(tracker);
-    }
-  }
-}, TRACKER_HEAL_MS);
 
 /* ---------- share target inbox (Android "Share to Phone Torrent") ---------- */
 
