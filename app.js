@@ -90,6 +90,8 @@ const els = {
   wakelockToggle: $('#wakelock-toggle'),
   debugToggle: $('#debug-toggle'),
   resetTrackersBtn: $('#reset-trackers-btn'),
+  settingsForm: $('#settings-dialog form'),
+  settingsError: $('#settings-error'),
   clearStorageBtn: $('#clear-storage-btn'),
   copyDiagBtn: $('#copy-diag-btn'),
   storageInfo: $('#storage-info'),
@@ -2508,12 +2510,14 @@ els.seedUrlForm.addEventListener('submit', async (event) => {
   }
 });
 
-$$('.tab').forEach((tab) => tab.addEventListener('click', () => {
+// Only the add card's tabs: the Simple / Expert switch in Settings looks like one (class "tab") but
+// has no panel, and matching it too hid every panel the moment the mode was changed.
+$$('.tabs .tab').forEach((tab) => tab.addEventListener('click', () => {
   if (tab.dataset.tab === 'cloud') {
     cloudAccountLine();
     refreshCloudLibrary({ quiet: true });
   }
-  $$('.tab').forEach((t) => {
+  $$('.tabs .tab').forEach((t) => {
     const active = t === tab;
     t.classList.toggle('active', active);
     t.setAttribute('aria-selected', String(active));
@@ -2705,16 +2709,28 @@ els.resetTrackersBtn.addEventListener('click', () => {
   els.trackersInput.value = DEFAULT_TRACKERS.join('\n');
 });
 
-els.settingsDialog.addEventListener('close', () => {
-  if (els.settingsDialog.returnValue !== 'save') return;
+/** The dialog's checked values, set on submit and saved on close. */
+let checkedSettings = null;
+
+/**
+ * Checked on submit, while the dialog is still open: a field that cannot be saved says so next to
+ * the Save button and keeps everything else that was typed. Checked on close instead, one typo
+ * used to shut the dialog and throw every other change away with it.
+ */
+els.settingsForm.addEventListener('submit', (event) => {
+  checkedSettings = null;
+  els.settingsError.hidden = true;
+  if (event.submitter && event.submitter.value !== 'save') return;
+  const refuse = (message, field) => {
+    event.preventDefault();
+    els.settingsError.textContent = message;
+    els.settingsError.hidden = false;
+    if (!field.closest('[hidden]')) field.focus();
+  };
 
   const typed = els.trackersInput.value.split('\n').map((s) => s.trim()).filter((s) => /^wss?:\/\//i.test(s));
   const trackers = typed.filter(usableTracker);
-  if (typed.length !== trackers.length) toast(`Ignored ${typed.length - trackers.length} tracker(s) on a port browsers refuse to open.`, { error: true });
-  if (trackers.length === 0) {
-    toast('Keeping the previous trackers: at least one wss:// tracker is needed.', { error: true });
-    return;
-  }
+  if (trackers.length === 0) return refuse('At least one wss:// tracker is needed.', els.trackersInput);
 
   let rtcConfig = null;
   const rtcText = els.rtcInput.value.trim();
@@ -2723,16 +2739,23 @@ els.settingsDialog.addEventListener('close', () => {
       rtcConfig = JSON.parse(rtcText);
       if (!rtcConfig || typeof rtcConfig !== 'object') throw new Error('not an object');
     } catch (err) {
-      toast(`WebRTC configuration is not valid JSON: ${err.message}`, { error: true });
-      return;
+      return refuse(`WebRTC configuration is not valid JSON: ${err.message}`, els.rtcInput);
     }
   }
 
   const trackerListUrl = els.trackerListUrl.value.trim();
   if (els.trackerListToggle.checked && !/^https?:\/\//i.test(trackerListUrl)) {
-    toast('The tracker list URL must start with http(s)://', { error: true });
-    return;
+    return refuse('The tracker list URL must start with http(s)://', els.trackerListUrl);
   }
+  checkedSettings = { typed, trackers, rtcConfig, trackerListUrl };
+});
+
+els.settingsDialog.addEventListener('close', () => {
+  els.settingsError.hidden = true;
+  if (els.settingsDialog.returnValue !== 'save' || !checkedSettings) return;
+  const { typed, trackers, rtcConfig, trackerListUrl } = checkedSettings;
+  checkedSettings = null;
+  if (typed.length !== trackers.length) toast(`Ignored ${typed.length - trackers.length} tracker(s) on a port browsers refuse to open.`, { error: true });
 
   const rtcChanged = JSON.stringify(rtcConfig) !== JSON.stringify(settings.rtcConfig || null);
   const listChanged = els.trackerListToggle.checked !== Boolean(settings.trackerList) || trackerListUrl !== settings.trackerListUrl;

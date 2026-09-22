@@ -820,6 +820,9 @@ try {
   assert.equal(await phone.$$eval('#settings-dialog [data-expert]', (els) => els.filter((e) => e.hidden).length), 0);
   await phone.screenshot({ path: path.join(TMP, 'settings-expert.png') });
   await phone.keyboard.press('Escape');
+  // Simple and Expert look like tabs but have no panel: switching them leaves the add card alone.
+  assert.equal(await phone.$eval('#tab-download', (e) => e.hidden), false, 'the add card keeps its panel after a mode switch');
+  assert.equal(await phone.$eval('.tabs .tab[data-tab="download"]', (e) => e.getAttribute('aria-selected')), 'true');
 
   // The choice is a setting: it survives a reload like the others.
   await phone.reload();
@@ -827,6 +830,21 @@ try {
   await phone.click('#settings-btn');
   await phone.waitForSelector('#settings-dialog[open]');
   assert.equal(await phone.isVisible('#trackers-input'), true, 'Expert is remembered');
+
+  // A field that cannot be saved keeps the dialog open, says why, and keeps everything else typed.
+  const rtcTyped = await phone.inputValue('#rtc-input');
+  await phone.uncheck('#wakelock-toggle');
+  await phone.fill('#rtc-input', '{"iceServers": [ { urls: "stun:typo" } ]}');
+  await phone.click('#settings-dialog button[type="submit"]');
+  assert.equal(await phone.$eval('#settings-dialog', (e) => e.open), true, 'an invalid field keeps the dialog open');
+  assert.match(await phone.$eval('#settings-error', (e) => (e.hidden ? '' : e.textContent)), /not valid JSON/, 'and says why');
+  assert.equal(await phone.isChecked('#wakelock-toggle'), false, 'what else was changed is still there');
+  await phone.fill('#rtc-input', rtcTyped);
+  await phone.click('#settings-dialog button[type="submit"]');
+  await waitFor(() => phone.$eval('#settings-dialog', (e) => !e.open), { label: 'settings saved once the field is fixed', timeout: 5000 });
+  assert.equal(await phone.evaluate(() => JSON.parse(localStorage.getItem('phone-torrent:settings')).wakeLock), false, 'and it is saved with the fix');
+  await phone.click('#settings-btn');
+  await phone.waitForSelector('#settings-dialog[open]');
   await phone.click('#mode-simple');
   await phone.keyboard.press('Escape');
   log('settings: Simple by default, Expert when asked, remembered');
