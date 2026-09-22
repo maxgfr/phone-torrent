@@ -11,8 +11,7 @@ jobs:
       fail-fast: false
       matrix:
         browser: [chromium, webkit]
-        attempt: [1, 2, 3, 4] # DIAG: temporary, to measure the WebKit flake
-    name: e2e (${{ matrix.browser }} #${{ matrix.attempt }})
+    name: e2e (${{ matrix.browser }})
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -31,6 +30,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: screenshots-${{ matrix.browser }}-${{ matrix.attempt }}
+          name: screenshots-${{ matrix.browser }}
           path: test/.tmp/*.png
           if-no-files-found: ignore
