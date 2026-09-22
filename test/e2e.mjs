@@ -421,8 +421,8 @@ const browser = BROWSER === 'webkit'
   : await chromium.launch({ executablePath: findChromium(), args: ['--allow-insecure-localhost'] });
 log('browser:', BROWSER);
 // DIAG: count every RTCPeerConnection a page makes, how they end, and what fails.
-function pcProbe() {
-  const s = window.__pc = { created: 0, closed: 0, connected: 0, failed: 0, candidates: {}, errors: [], rejections: [] };
+function pcProbe(opts) {
+  const s = window.__pc = { created: 0, closed: 0, connected: 0, failed: 0, candidates: {}, remote: {}, pairs: {}, errors: [], rejections: [] };
   window.addEventListener('unhandledrejection', (e) => {
     if (s.rejections.length < 6) s.rejections.push(String((e.reason && (e.reason.stack || `${e.reason.name}: ${e.reason.message}`)) || e.reason));
   });
@@ -430,13 +430,27 @@ function pcProbe() {
   if (!Orig) return;
   function Probe(...args) {
     let pc;
+    if (opts && opts.noStun) args[0] = Object.assign({}, args[0] || {}, { iceServers: [] });
     try { pc = new Orig(...args); } catch (e) { if (s.errors.length < 8) s.errors.push(`new: ${e}`); throw e; }
     s.created++;
     let closed = false;
     const close = pc.close.bind(pc);
     pc.close = () => { if (!closed) { closed = true; s.closed++; } return close(); };
     pc.addEventListener('connectionstatechange', () => {
-      if (pc.connectionState === 'connected') s.connected++;
+      if (pc.connectionState === 'connected') {
+        s.connected++;
+        pc.getStats().then((stats) => {
+          const byId = new Map();
+          let pair = null;
+          stats.forEach((r) => byId.set(r.id, r));
+          stats.forEach((r) => { if (r.type === 'transport' && r.selectedCandidatePairId) pair = byId.get(r.selectedCandidatePairId); });
+          if (!pair) stats.forEach((r) => { if (r.type === 'candidate-pair' && r.state === 'succeeded' && (r.nominated || !pair)) pair = r; });
+          const l = pair && byId.get(pair.localCandidateId);
+          const rm = pair && byId.get(pair.remoteCandidateId);
+          const key = pair ? `${l && l.candidateType}->${rm && rm.candidateType}` : 'none';
+          s.pairs[key] = (s.pairs[key] || 0) + 1;
+        }).catch((e) => { s.pairs[`err ${e}`] = 1; });
+      }
       else if (pc.connectionState === 'failed') s.failed++;
     });
     pc.addEventListener('icecandidate', (e) => {
@@ -449,6 +463,14 @@ function pcProbe() {
     for (const m of ['createOffer', 'createAnswer', 'setLocalDescription', 'setRemoteDescription', 'addIceCandidate']) {
       const f = pc[m].bind(pc);
       pc[m] = (...a) => {
+        if (m === 'setRemoteDescription' && a[0] && a[0].sdp) {
+          for (const line of a[0].sdp.split(/\r?\n/)) {
+            if (!line.startsWith('a=candidate')) continue;
+            const parts = line.split(' ');
+            const key = `${parts[7] || '?'}:${/\.local$/.test(parts[4] || '') ? 'mdns' : 'ip'}`;
+            s.remote[key] = (s.remote[key] || 0) + 1;
+          }
+        }
         const r = f(...a);
         return r && typeof r.catch === 'function' ? r.catch((e) => { if (s.errors.length < 8) s.errors.push(`${m}: ${e}`); throw e; }) : r;
       };
@@ -462,12 +484,12 @@ function pcProbe() {
 const newContext = browser.newContext.bind(browser);
 browser.newContext = async (opts) => {
   const ctx = await newContext(opts);
-  await ctx.addInitScript(pcProbe);
+  await ctx.addInitScript(pcProbe, { noStun: process.env.NO_STUN === '1' });
   return ctx;
 };
 const pcStats = (page) => page.evaluate(() => {
   const s = window.__pc;
-  return s && { created: s.created, open: s.created - s.closed, connected: s.connected, failed: s.failed, candidates: s.candidates, errors: s.errors, rejections: s.rejections };
+  return s && { created: s.created, open: s.created - s.closed, connected: s.connected, failed: s.failed, pairs: s.pairs, candidates: s.candidates, remote: s.remote, errors: s.errors, rejections: s.rejections };
 }).catch((e) => ({ error: String(e) }));
 
 let failed = false;
