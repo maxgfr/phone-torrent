@@ -392,11 +392,17 @@ const tracker = new TrackerServer({ udp: false, http: false, ws: true, stats: fa
 await new Promise((resolve) => tracker.listen(0, '127.0.0.1', resolve));
 const trackerUrl = `ws://127.0.0.1:${tracker.ws.address().port}`;
 log('tracker at', trackerUrl);
+// The tracker keeps no list of its sockets; this does, so a test can find one peer's.
+const trackerSockets = new Set();
+tracker.ws.on('connection', (socket) => {
+  trackerSockets.add(socket);
+  socket.on('close', () => trackerSockets.delete(socket));
+});
 // DIAG: every tracker socket that closes, and whose it was.
 const t0 = Date.now();
 tracker.ws.on('connection', (socket) => {
   let who = '?';
-  socket.on('message', () => { if (socket.peerId) who = Buffer.from(socket.peerId, 'binary').toString('hex').slice(0, 12); });
+  socket.on('message', () => { if (socket.peerId) who = socket.peerId.slice(-8); });
   socket.on('close', (code) => console.error(`DIAG tracker: socket of ${who} closed (code ${code}) at ${Math.round((Date.now() - t0) / 1000)}s`));
 });
 
@@ -445,7 +451,7 @@ try {
   await seeder.setInputFiles('#seed-file-input', files.map((f, i) => ({ name: f.name, mimeType: 'application/octet-stream', buffer: seedBuffers[i] })));
   await seeder.waitForSelector('.torrent.seeding .file', { timeout: 30000 });
   await waitFor(() => seeder.evaluate(() => window.__phoneTorrent.client.torrents[0]?.ready), { label: 'seeder ready' });
-  console.error('DIAG seeder peerId:', (await seeder.evaluate(() => window.__phoneTorrent.client.peerId)).slice(0, 12));
+  console.error('DIAG seeder peerId:', (await seeder.evaluate(() => window.__phoneTorrent.client.peerId)).slice(-8));
 
   /**
    * Wait for something that first needs a fresh connection to the seeder, nudging the seeder to
@@ -456,7 +462,7 @@ try {
   // DIAG: what each side's trackers and peers look like, to see why a wait is long.
   const swarmState = (page) => page.evaluate(() => {
     const pt = window.__phoneTorrent;
-    const hex = (s) => (typeof s === 'string' ? s.slice(0, 12) : String(s));
+    const hex = (s) => (typeof s === 'string' ? s.slice(-8) : String(s));
     return {
       peerId: hex(pt.client.peerId),
       torrents: pt.client.torrents.map((t) => ({
@@ -477,7 +483,7 @@ try {
           const down = await seeder.evaluate(() => {
             const t = window.__phoneTorrent.client.torrents[0];
             const d = (t?.discovery?.tracker?._trackers || []).filter((tr) => tr.reconnecting).map((tr) => `${tr.announceUrl} retries=${tr.retries}`);
-            try { t?.discovery?.tracker?.update?.(); } catch { /* page may be gone */ }
+            try { if (t) window.__phoneTorrent.askTrackersNow(t); } catch { /* page may be gone */ }
             return d;
           }).catch(() => []);
           if (down.length && !sawDown) { sawDown = true; console.error(`DIAG ${opts.label}: seeder tracker socket down, update() is a no-op:`, down.join(', ')); }
@@ -494,6 +500,36 @@ try {
       throw err;
     }
   };
+
+  /* ---------- a tracker socket that drops comes back when asked, not minutes later ----------
+   * bittorrent-tracker waits ten seconds plus up to five random minutes before reconnecting a
+   * WebSocket that closed, and drops every announce in between — so update() alone does nothing,
+   * and a peer nobody can find stays unfindable for longer than any wait below. */
+  const seederPeerId = await seeder.evaluate(() => window.__phoneTorrent.client.peerId);
+  const seederSocket = () => [...trackerSockets].find((ws) => ws.peerId === seederPeerId);
+  const seederTracker = () => seeder.evaluate((url) => {
+    const tr = window.__phoneTorrent.client.torrents[0].discovery.tracker._trackers.find((t) => t.announceUrl === url);
+    return { reconnecting: tr.reconnecting, open: !tr.destroyed && Boolean(tr.socket?.connected) };
+  }, trackerUrl);
+  await waitFor(() => Boolean(seederSocket()), { label: 'seeder on the tracker' });
+  seederSocket().terminate();
+  await waitFor(() => seederTracker().then((t) => t.reconnecting), { label: 'seeder to notice its tracker socket closed', timeout: 10000 });
+  await seeder.evaluate(() => window.__phoneTorrent.client.torrents[0].discovery.tracker.update());
+  assert.deepEqual(await seederTracker(), { reconnecting: true, open: false }, 'update() does not reopen a closed tracker socket, which is why asking has to');
+  const askedAt = Date.now();
+  await seeder.evaluate(() => window.__phoneTorrent.askTrackersNow(window.__phoneTorrent.client.torrents[0]));
+  await waitFor(() => seederTracker().then((t) => t.open && !t.reconnecting), { label: 'seeder tracker socket reopened once asked', timeout: 5000 });
+  const reopenedIn = Date.now() - askedAt;
+  // The announce itself waits for the WebRTC offers it carries, which is a few seconds at most.
+  await waitFor(() => Boolean(seederSocket()), { label: 'seeder announced on the reopened socket', timeout: 20000 });
+  log(`a dropped tracker socket reopens ${reopenedIn} ms after asking, and announces ${Date.now() - askedAt} ms after`);
+  // Nobody asks a seed, though: one whose socket drops finds its own way back, without the delay.
+  seederSocket().terminate();
+  await waitFor(() => seederTracker().then((t) => t.reconnecting), { label: 'seeder to notice its tracker socket closed again', timeout: 10000 });
+  const droppedAt = Date.now();
+  await waitFor(() => Boolean(seederSocket()), { label: 'seeder back on the tracker by itself', timeout: 30000 });
+  log(`and a seed whose socket drops is back on the tracker by itself ${Math.round((Date.now() - droppedAt) / 1000)}s later`);
+
   const torrentFile = await seeder.evaluate(() => Array.from(window.__phoneTorrent.client.torrents[0].torrentFile));
   assert.equal(await seeder.$eval('.torrent .name', (e) => e.textContent), 'Phone Torrent Test');
   assert.ok(!(await seeder.$eval('.torrent .details', (e) => e.hidden)), 'details open automatically after seeding starts');
