@@ -149,6 +149,12 @@ body {
 .btn.small { padding: 6px 12px; min-height: 36px; font-size: 0.85rem; }
 .file-btn { width: 100%; position: relative; overflow: hidden; }
 .file-btn input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+/* The input is invisible, and so is the ring a keyboard's focus draws around it: its label shows it
+   instead. Only for the keyboard (focus-visible), and on an engine without :has, for any focus. */
+.file-btn:has(input:focus-visible) { outline: 2px solid var(--primary); outline-offset: 2px; }
+@supports not selector(:has(*)) {
+  .file-btn:focus-within { outline: 2px solid var(--primary); outline-offset: 2px; }
+}
 .file-btn:has(input:disabled) { opacity: 0.45; }
 .file-btn input:disabled { cursor: not-allowed; }
 
@@ -353,6 +359,7 @@ body {
 /* ---- sharing: the link itself, not a message about it ---- */
 .share-panel { margin-top: 10px; padding: 10px 12px; border-radius: 10px; background: var(--bg); border: 1px solid var(--border); display: grid; gap: 10px; }
 .share-row { display: grid; gap: 4px; font-size: 0.85rem; color: var(--muted); }
+.share-panel .hint { margin: 0; }
 .share-field { display: flex; gap: 6px; align-items: center; }
 /* width: 0, and flex: 1 fills the row: at its own width, twenty characters (more at the 16px an
    iPhone gets), the field set how narrow its card could be, and at 320px that was wider than the screen. */

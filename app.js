@@ -46,6 +46,17 @@ const IN_BROWSER_BLOCKED = window.isSecureContext && globalThis.crypto?.subtle
   : 'In-browser torrents need a secure page, HTTPS or localhost, and this one was opened over plain http. '
     + 'Here only the Cloud tab works: open the app over https (a tunnel or a deploy) for the rest.';
 
+/**
+ * Peers in a browser are WebRTC peers, found through ws:// and wss:// trackers, and some browsers turn
+ * WebRTC off (Tor Browser, Mullvad Browser, Firefox with media.peerconnection.enabled false). WebTorrent
+ * then skips every such tracker with a warning, and the card said it was waiting on four trackers it
+ * talked to none of. Web seeds and the metadata caches are plain HTTP, and still work.
+ */
+const NO_WEBRTC = (WebTorrent.WEBRTC_SUPPORT ?? typeof RTCPeerConnection === 'function')
+  ? ''
+  : 'WebRTC is turned off in this browser, so it cannot reach any peer: only web seeds can send a torrent here. '
+    + 'The Cloud tab still works.';
+
 const els = {
   torrents: $('#torrents'),
   empty: $('#empty-state'),
@@ -413,6 +424,19 @@ async function probeOpfs() {
   } catch {
     return false;
   }
+}
+
+/**
+ * Unless the page asks, what it stores is best-effort: a browser short of space clears it as a whole,
+ * gigabytes of a half-finished torrent and the list of torrents with it, and Safari caps it. Asked
+ * once, when a torrent is first added or seeded rather than on opening the page: a browser that asks
+ * the user (Firefox) does it after something they did, and one that decides by itself (Chrome) has a
+ * reason to say yes. Settings → Storage says which it is.
+ */
+let storageKept = null;
+function keepStorage() {
+  if (storageKept || !navigator.storage?.persist) return;
+  storageKept = navigator.storage.persist().catch(() => false);
 }
 
 /**
@@ -909,14 +933,44 @@ function cloudCtx(over = {}) {
   const base = (over.base || account.apiBase || providerBase(api)).replace(/\/+$/, '');
   const key = over.key !== undefined ? over.key : account.apiKey;
   const viaProxy = over.viaProxy !== undefined ? Boolean(over.viaProxy) : Boolean(settings.cloud.viaProxy);
-  return { provider, base, key, api, json: (url, opts = {}) => cloudJson(url, { ...opts, key, viaProxy }) };
+  return { provider, base, key, api, json: (url, opts = {}) => cloudJson(url, { ...opts, key, viaProxy, provider }) };
+}
+
+/**
+ * An https page may not call an http:// address (mixed content): the browser refuses before anything
+ * is sent, and tells a script nothing it could tell from CORS. The installed app, on https, pointed at
+ * your own server's LAN address is the case: neither ALLOWED_ORIGINS nor a proxy can help there — a
+ * proxy on the internet cannot reach a machine at home. Loopback is allowed by the browsers that allow
+ * it, and asked as usual.
+ */
+function mixedContent(url) {
+  let target;
+  try { target = new URL(url, location.href); } catch { return ''; }
+  if (location.protocol !== 'https:' || target.protocol !== 'http:' || /^(localhost|127\.0\.0\.1|\[::1\])$/.test(target.hostname)) return '';
+  return `this page is https, and a browser will not let it call an http:// address. Open the app at ${target.origin} itself, or reach the server over https (the tunnel, or a deploy)`;
+}
+
+/**
+ * What a call the browser could not make at all means, in words that lead to the fix. A script cannot
+ * tell a refusal of CORS from a server that is not there. A hosted service is there, and refuses
+ * browser requests: that is what the CORS proxy is for. Your own server is never that: from the page it
+ * serves there is no CORS at all, so it is not answering; from another page it may be that too, or a
+ * server that does not name this page in ALLOWED_ORIGINS. A proxy would not reach a machine at home.
+ */
+function unreachableApi(url, provider) {
+  if (provider !== 'server') return 'the browser could not reach the API (CORS or network)';
+  if (new URL(url, location.href).origin === location.origin) return 'your server is not answering (is it running?)';
+  return `the server did not answer, or does not allow this page: add ${location.origin} to its ALLOWED_ORIGINS`;
 }
 
 /**
  * One call to a cloud API. The key travels in an Authorization header, which makes this a request
- * the API must allow with CORS; when it does not, the user's own proxy relays it instead.
+ * the API must allow with CORS; when it does not, the user's own proxy relays it instead. Resolves
+ * with the answer, and whether it came through that proxy.
  */
-async function cloudFetch(url, { method = 'GET', body, json = false, contentType, key = '', viaProxy: onlyProxy = false } = {}) {
+async function cloudFetch(url, { method = 'GET', body, json = false, contentType, key = '', viaProxy: onlyProxy = false, provider = '' } = {}) {
+  const mixed = mixedContent(url);
+  if (mixed) throw Object.assign(new Error(mixed), { transient: false });
   const viaProxy = proxied(url);
   const hasProxy = viaProxy !== url;
   const targets = onlyProxy && hasProxy ? [viaProxy] : hasProxy ? [url, viaProxy] : [url];
@@ -926,14 +980,14 @@ async function cloudFetch(url, { method = 'GET', body, json = false, contentType
   let last = null;
   for (const target of targets) {
     try {
-      return await fetch(target, { method, body, headers, cache: 'no-store' });
+      return { res: await fetch(target, { method, body, headers, cache: 'no-store' }), relayed: target !== url };
     } catch {
-      // A network-level rejection is indistinguishable from CORS in script; in practice it is CORS.
-      last = target === url ? 'the browser could not reach the API (CORS or network)' : 'the proxy did not answer';
+      // A network-level rejection is indistinguishable from CORS in script.
+      last = target === url ? unreachableApi(url, provider) : 'the proxy did not answer';
     }
   }
   const err = !navigator.onLine ? new Error('you are offline')
-    : new Error(hasProxy ? `${last}, and the proxy did not help` : `${last}. Set a CORS proxy in Settings to relay it.`);
+    : new Error(hasProxy ? `${last}, and the proxy did not help` : provider === 'server' ? last : `${last}. Set a CORS proxy in Settings to relay it.`);
   // Worth asking again all the same: a phone changes networks, and a poll of a transfer that was
   // sent through this very API was not refused by CORS.
   err.transient = true;
@@ -958,7 +1012,7 @@ async function cloudJson(url, opts) {
   // Every provider has a base URL now (your own server's is this page's origin), so a
   // relative one means a bug or a half-written setting — never a request worth sending.
   if (/^\/+api\//.test(url) || url.startsWith('/')) throw new Error('Set the server address in Settings → Cloud fetch.');
-  const res = await cloudFetch(url, opts);
+  const { res, relayed } = await cloudFetch(url, opts);
   const text = await res.text();
   let json = null;
   try { json = JSON.parse(text); } catch { /* an error page, not JSON */ }
@@ -969,6 +1023,9 @@ async function cloudJson(url, opts) {
   const failed = !res.ok || (json && json.success === false) || (status === 'error' && Boolean(json.error || json.error_message));
   if (failed) {
     const busy = !res.ok && transientStatus(res.status);
+    // Through the CORS proxy, a refusal in one line of plain text is the proxy's own — a write to a
+    // host its API_HOSTS does not name, most often — and that line is the reason, not the address.
+    const proxyRefused = relayed && text.trim() && !/[<{]/.test(text);
     const detail = (json && (json.detail || json.error_message
       || (json.error && (json.error.message || (typeof json.error === 'string' ? json.error : '')))))
       // Not JSON at all: from a service that is busy or down, that is the error page of whatever
@@ -976,7 +1033,9 @@ async function cloudJson(url, opts) {
       // that was never set, so the page's own host answered with its 404 page.
       || (json ? '' : busy
         ? `${hostOf(url)} is busy or down (HTTP ${res.status})`
-        : `${hostOf(url)} answered ${res.status}, and not with this API — check the address in Settings → Cloud fetch.`)
+        : proxyRefused
+          ? `your CORS proxy refused it (${res.status}: ${text.trim().slice(0, 120)})${/API_HOSTS/.test(text) ? `: add ${hostOf(url)} to its API_HOSTS` : ''}`
+          : `${hostOf(url)} answered ${res.status}, and not with this API — check the address in Settings → Cloud fetch.`)
       || text.slice(0, 120) || `HTTP ${res.status}`;
     throw Object.assign(new Error(String(detail)), { status: res.status, transient: busy });
   }
@@ -1243,8 +1302,9 @@ const CLOUD_PROVIDERS = {
       // which would only have the same torrent sent twice.
       try {
         await this.selectAll(ctx, added.id);
-        this.chosen.add(added.id);
-      } catch { /* chosen later */ }
+      } catch {
+        this.owed(added.id, true);
+      }
       return added.id;
     },
 
@@ -1259,18 +1319,33 @@ const CLOUD_PROVIDERS = {
     /**
      * RD holds a torrent until its files are chosen, and never chooses them itself. When that did
      * not happen on adding — RD allows so many calls a minute, and a magnet may still be being
-     * converted — whoever next sees the torrent waiting chooses them: once a session, and again
-     * only after a failure that may go away.
+     * converted — the choice is owed: whoever next sees the torrent waiting makes it, and again
+     * only after a failure that may go away. Only for a torrent this app added: one added on RD's
+     * site, or by another tool, and left waiting is its owner's choice still to make, and RD cannot
+     * undo one. Kept on the device, so that a reload in between still finishes the job.
      */
-    chosen: new Set(),
+    owedIds: null,
+    owed(id, on) {
+      const key = 'phone-torrent:rd-owed';
+      if (!this.owedIds) {
+        let saved = [];
+        try { saved = JSON.parse(localStorage.getItem(key) || '[]'); } catch { /* none */ }
+        this.owedIds = new Set(Array.isArray(saved) ? saved.map(String) : []);
+      }
+      if (on === undefined) return this.owedIds.has(String(id));
+      if (on) this.owedIds.add(String(id));
+      else this.owedIds.delete(String(id));
+      try { localStorage.setItem(key, JSON.stringify([...this.owedIds])); } catch { /* for this session only, then */ }
+      return on;
+    },
     async startIfWaiting(ctx, raw) {
-      if (!raw || raw.status !== 'waiting_files_selection' || this.chosen.has(raw.id)) return raw;
+      if (!raw || raw.status !== 'waiting_files_selection' || !this.owed(raw.id)) return raw;
       try {
         await this.selectAll(ctx, raw.id);
-        this.chosen.add(raw.id);
+        this.owed(raw.id, false);
         return { ...raw, status: 'starting' };
       } catch (err) {
-        if (!err.transient) this.chosen.add(raw.id);
+        if (!err.transient) this.owed(raw.id, false);
         return raw;
       }
     },
@@ -1569,6 +1644,10 @@ let cloudItems = [];
 // The service, address and key the items were listed from.
 let cloudItemsFrom = '';
 let cloudPollTimer = null;
+// Why the last listing failed, and how many have failed in a row; null once one works. With nothing
+// listed, an empty library is not an empty account: it says why, and asks again.
+let cloudListError = null;
+let cloudListFailures = 0;
 
 /** Send a magnet, an info hash or a .torrent straight to the account, with no local torrent at all. */
 async function cloudSend({ bytes, name, magnet }) {
@@ -1592,6 +1671,8 @@ async function refreshCloudLibrary({ quiet = false } = {}) {
   if (from !== cloudItemsFrom) {
     cloudItems = [];
     cloudItemsFrom = from;
+    cloudListError = null;
+    cloudListFailures = 0;
   }
   try {
     const items = await ctx.api.list(ctx);
@@ -1599,10 +1680,14 @@ async function refreshCloudLibrary({ quiet = false } = {}) {
     if (from !== cloudItemsFrom) return;
     // Each item carries where it lives, which is where its files and its delete go.
     cloudItems = items.map((item) => ({ ...item, provider: ctx.provider, base: ctx.base }));
+    cloudListError = null;
+    cloudListFailures = 0;
     els.cloudError.hidden = true;
     noteServerToken(ctx, null);
   } catch (err) {
     if (from !== cloudItemsFrom) return;
+    cloudListError = err;
+    cloudListFailures += 1;
     noteServerToken(ctx, err);
     els.cloudError.hidden = false;
     els.cloudError.textContent = `${ctx.api.label}: ${err.message}`;
@@ -1618,7 +1703,15 @@ async function refreshCloudLibrary({ quiet = false } = {}) {
  */
 function scheduleCloudPoll() {
   clearTimeout(cloudPollTimer);
-  if (!cloudReady() || !cloudItems.some((i) => !i.ready && !i.failed)) return;
+  if (!cloudReady()) return;
+  // A listing that failed but may work next time — a dropped network, a server restarting — is asked
+  // for again, less often the more it fails, as a card's poll is: after 5, 10, 20, 40, then every 60
+  // seconds. Nothing else would ask, and the library would go on saying what it said.
+  if (cloudListError?.transient) {
+    cloudPollTimer = setTimeout(() => refreshCloudLibrary({ quiet: true }), CLOUD_POLL_MS * Math.min(12, 2 ** (cloudListFailures - 1)));
+    return;
+  }
+  if (!cloudItems.some((i) => !i.ready && !i.failed)) return;
   // An account of hundreds of transfers is asked less often: Real-Debrid lists a hundred a call,
   // and every call counts against the 250 a minute it allows.
   cloudPollTimer = setTimeout(() => refreshCloudLibrary({ quiet: true }), CLOUD_POLL_MS * Math.max(1, Math.ceil(cloudItems.length / 100)));
@@ -1724,8 +1817,16 @@ function addCloudFiles(item, filesEl) {
         holder.textContent = '';
         const media = document.createElement(/\.(mp3|m4a|aac|ogg|opus|flac|wav)$/i.test(file.name) ? 'audio' : 'video');
         media.controls = true;
-        media.src = href;
         media.playsInline = true;
+        // Offered by the name alone: whether this browser can play the file is known only by trying —
+        // an .mkv, the most common, plays in Chrome and not in Safari, whatever canPlayType says. One
+        // that cannot says so, with what to do instead, rather than leaving a black box.
+        media.addEventListener('error', () => {
+          holder.hidden = true;
+          play.hidden = false;
+          toast(`This browser cannot play "${file.name}": use Save, or copy the Link into a player app such as VLC.`, { error: true, timeout: 9000 });
+        }, { once: true });
+        media.src = href;
         holder.appendChild(media);
         play.hidden = true;
       });
@@ -1767,6 +1868,13 @@ async function cloudRemoveItem(item) {
   }
 }
 
+/** Why the library shows nothing, when its last listing failed, and what comes next. */
+function cloudListProblem() {
+  const reason = String(cloudListError.message || cloudListError).replace(/[.\s]+$/, '');
+  const next = cloudListError.transient ? ' Trying again…' : keyRefused(cloudListError) ? ' Check the key in Settings → Cloud fetch.' : '';
+  return `Could not read the library from ${cloudCtx().api.label}: ${reason}.${next}`;
+}
+
 /**
  * The rows on screen, by service and transfer id. A poll updates them in place rather than
  * rebuilding the list, so an open file list, a link being copied or a video playing in the
@@ -1783,7 +1891,9 @@ function renderCloudLibrary() {
     cloudRows.clear();
     return;
   }
-  els.cloudEmpty.textContent = 'Nothing in your cloud account yet. Send a magnet or a .torrent above.';
+  // The library is on every tab, and the Cloud tab's own error line is not: a listing that failed says
+  // so here, rather than that the account is empty.
+  els.cloudEmpty.textContent = cloudListError ? cloudListProblem() : 'Nothing in your cloud account yet. Send a magnet or a .torrent above.';
   const seen = new Set();
   cloudItems.forEach((item, index) => {
     const key = `${item.provider}:${item.id}`;
@@ -2013,7 +2123,7 @@ function renderCloud(view, note) {
   const list = $('.cloud-files', box);
   list.textContent = '';
   if (!cloud.ready) return;
-  const entries = cloud.files.map((f) => ({ href: ctx.api.fileLink(ctx, cloud.id, f), text: `${f.name} · ${formatBytes(f.size)}`, error: f.error }));
+  const entries = cloud.files.map((f) => ({ href: ctx.api.fileLink(ctx, cloud.id, f), name: f.name, text: `${f.name} · ${formatBytes(f.size)}`, error: f.error }));
   if (ctx.api.zipLink && cloud.files.length > 1) {
     entries.push({ href: ctx.api.fileLink(ctx, cloud.id, null), text: 'Everything as one .zip' });
   }
@@ -2032,7 +2142,9 @@ function renderCloud(view, note) {
     a.href = entry.href;
     a.rel = 'noopener';
     a.target = '_blank';
-    a.setAttribute('download', '');
+    // The file's own name, for a browser that takes it from here (a link on the page's own origin);
+    // one on another origin goes by what the service says.
+    a.setAttribute('download', entry.name || '');
     a.textContent = entry.text;
     li.appendChild(a);
     list.appendChild(li);
@@ -2098,17 +2210,26 @@ async function fetchTorrentUrl(url) {
       last = err instanceof TypeError ? unreachable() : err;
     }
   }
+  // An address that names no .torrent is most often a torrent site's page about one, pasted from the
+  // browser: a proxy would only fetch that page. What is wanted is the magnet or the link on it.
+  if (!torrentLink(url)) {
+    throw new Error(`Could not fetch a .torrent from that address: ${last.message}. If it is a web page, open it and copy its magnet or its .torrent link.`);
+  }
   throw new Error(`Could not fetch that .torrent: ${last.message}${proxied(url) === url && navigator.onLine ? '. A CORS proxy can be set in Settings.' : ''}`);
 }
 
-async function addTorrent(id, { record } = {}) {
+/**
+ * `seeding` is for a seed rebuilt by a retry: it stays a seed, which is never remembered, and its
+ * copy of the files goes when it is removed — not a download that comes back at every launch.
+ */
+async function addTorrent(id, { record, seeding = false } = {}) {
   if (IN_BROWSER_BLOCKED) throw new Error(IN_BROWSER_BLOCKED);
   await storageReady;
   // A .torrent URL is fetched here rather than inside WebTorrent: the proxy can help, the error is
   // a real message, and the rules below get to see the bytes before anything is announced.
   if (typeof id === 'string' && /^https?:\/\//i.test(id)) {
     toast('Fetching that .torrent…');
-    return addTorrent(await fetchTorrentUrl(id), { record });
+    return addTorrent(await fetchTorrentUrl(id), { record, seeding });
   }
   const problem = typeof id === 'string' && /^magnet:/i.test(id) ? magnetProblem(id) : '';
   if (problem) throw new Error(problem);
@@ -2134,7 +2255,7 @@ async function addTorrent(id, { record } = {}) {
     ...storeOpts(),
     announce: reach && reach.private ? reach.trackers : effectiveTrackers(),
     strategy: settings.strategy === 'rarest' ? 'rarest' : 'sequential',
-    destroyStoreOnDestroy: false,
+    destroyStoreOnDestroy: seeding,
     deselect: Boolean(record && record.deselected && record.deselected.length),
   });
 
@@ -2142,8 +2263,10 @@ async function addTorrent(id, { record } = {}) {
   const source = record?.source || (typeof id === 'string'
     ? { type: 'magnet', uri: id }
     : { type: 'torrent', bytes: new Uint8Array(id) });
-  const view = attachTorrent(torrent, { record, seeding: false, reach });
+  const view = attachTorrent(torrent, { record, seeding, reach });
   view.source = source;
+  // Added now, not restored: the pieces it will have are worth keeping.
+  if (!record) keepStorage();
   const reason = unreachableReason(reach);
   if (reason) {
     refreshView(view); // surface the warning straight away instead of after the no-peers delay
@@ -2171,8 +2294,15 @@ async function seedFiles(files, { name } = {}) {
   // Seeds copy the files into OPFS; drop that copy when the seed is removed.
   const opts = { ...storeOpts(), announce: effectiveTrackers(), destroyStoreOnDestroy: true };
   if (name) opts.name = name;
-  const torrent = client.seed(files, opts);
+  // Files already being shared make the same torrent: WebTorrent closes the new one without a word
+  // and hands over the one there is. Picked again to get the link back, that is where it is.
+  const torrent = client.seed(files, opts, (seeded) => {
+    if (seeded === torrent || !views.has(seeded)) return;
+    toast(`"${seeded.name}" is already being shared.`);
+    shareTorrent(seeded);
+  });
   attachTorrent(torrent, { seeding: true });
+  keepStorage();
   // Sharing is what a seed is for: the link, shown and selected, rather than the details panel.
   torrent.once('ready', () => {
     toast(`Seeding "${torrent.name}". Share the link so others can download it.`);
@@ -2217,8 +2347,9 @@ function attachTorrent(torrent, { record, seeding, reach = null }) {
   });
   torrent.on('warning', (err) => {
     const msg = String(err && err.message || err);
-    // udp:// and http:// trackers in .torrent files are expected to be unusable from a browser.
-    if (/Unsupported tracker protocol/i.test(msg)) return;
+    // udp:// and http:// trackers in .torrent files are expected to be unusable from a browser. A
+    // ws:// or wss:// one is not: refused, it means this browser has no WebRTC (see NO_WEBRTC).
+    if (/Unsupported tracker protocol: (?!wss?:)/i.test(msg)) return;
     console.warn('torrent warning:', msg);
     logEvent(view, `warning: ${msg}`);
   });
@@ -2230,6 +2361,10 @@ function attachTorrent(torrent, { record, seeding, reach = null }) {
       return;
     }
     logEvent(view, `peer connected ${addr || wire.type || ''}`.trim());
+    // Whether the screen stays on can turn on a connection: a private torrent this page cannot
+    // announce still downloads from a web seed (see wantsWakeLock). Asked again as each one comes and goes.
+    wire.once('close', updateWakeLock);
+    updateWakeLock();
   });
   updateEmptyState();
   updateWakeLock();
@@ -2477,6 +2612,7 @@ function refreshView(view) {
   else if (!navigator.onLine && torrent.numPeers === 0) state = 'offline, waiting for the network';
   else if (!torrent.metadata) state = 'fetching metadata';
   else if (torrent.numPeers === 0 && cannotDownloadHere(view.reach)) state = 'cannot download here';
+  else if (torrent.numPeers === 0 && NO_WEBRTC) state = 'no WebRTC in this browser';
   else if (torrent.numPeers === 0 && view.reconnectingUntil > Date.now()) state = 'reconnecting';
   else if (torrent.numPeers === 0) state = 'looking for peers';
   else state = 'downloading';
@@ -2485,6 +2621,8 @@ function refreshView(view) {
   const pauseBtn = $('.pause-btn', el);
   pauseBtn.title = torrent.paused ? 'Resume' : 'Pause';
   pauseBtn.setAttribute('aria-label', pauseBtn.title);
+  // A private torrent's links carry the passkey (see shareTorrent): nothing offers to copy them.
+  for (const button of $$('.copy-magnet-btn, .copy-link-btn', el)) button.hidden = Boolean(view.reach?.private);
 
   $('.speed', el).textContent = torrent.downloadSpeed > 512 || torrent.uploadSpeed > 512
     ? `↓ ${formatSpeed(torrent.downloadSpeed)}  ↑ ${formatSpeed(torrent.uploadSpeed)}`
@@ -2494,9 +2632,9 @@ function refreshView(view) {
     ? formatEta(((selectedBytes - selectedDownloaded) / torrent.downloadSpeed) * 1000)
     : '';
 
-  // When the .torrent itself says no browser can reach its swarm, say so at once instead of
-  // making the user wait out the no-peers delay.
-  const reason = unreachableReason(view.reach);
+  // When the .torrent itself says no browser can reach its swarm, or this browser has no WebRTC to
+  // reach any, say so at once instead of making the user wait out the no-peers delay.
+  const reason = unreachableReason(view.reach) || NO_WEBRTC;
   const stuck = !complete && !torrent.paused && torrent.numPeers === 0
     && !(view.cloud && view.cloud.ready) // the cloud already has it; the peer hunt is moot
     // A long check of the pieces already here is not a hunt for peers that failed, and offline,
@@ -2507,9 +2645,10 @@ function refreshView(view) {
     noPeersEl.hidden = !stuck;
     if (stuck) {
       const n = (torrent.announce || effectiveTrackers()).length;
-      // A private torrent is stuck on its own tracker; a fresh public tracker list cannot help it.
-      $('.nopeers-retry-btn', el).hidden = Boolean(view.reach?.private);
-      $('.retry-btn', el).hidden = Boolean(view.reach?.private);
+      // A private torrent is stuck on its own tracker, and a browser without WebRTC on none: a fresh
+      // public tracker list cannot help either.
+      $('.nopeers-retry-btn', el).hidden = Boolean(view.reach?.private || NO_WEBRTC);
+      $('.retry-btn', el).hidden = Boolean(view.reach?.private || NO_WEBRTC);
       $('.nopeers-text', el).textContent = reason || (torrent.metadata
         ? `No peers found on ${n} trackers yet. Browsers only reach WebRTC peers; this torrent may only have classic seeders. You can retry with a fresh tracker list or add an HTTP web seed.`
         : `Still waiting for metadata from ${n} trackers. If the fallback sources could not provide the .torrent either, try again later or add the .torrent file directly.`);
@@ -2695,7 +2834,8 @@ async function replaceTorrent(torrent, id, why, { source: newSource } = {}) {
     const done = () => { if (!settled) { settled = true; resolve(); } };
     client.remove(torrent, { destroyStore: false }, done).catch(done);
   });
-  const next = await addTorrent(id, { record });
+  // A seed rebuilt stays a seed: rebuilt as a download, it was remembered, and shared again at every launch.
+  const next = await addTorrent(id, { record, seeding: view.seeding });
   const nextView = views.get(next);
   if (nextView) {
     if (wasPaused || autoStopped) {
@@ -2793,9 +2933,23 @@ document.addEventListener('visibilitychange', () => {
   awaySince = 0;
   // A glance at another app is not a freeze; a few seconds away is.
   if (away > 4000) pickUpWhereWeLeftOff(`back after ${formatDuration(away)}`);
+  // The public tracker list is due every six hours, and a phone's timers stop while it is away.
+  refreshTrackerList();
+  retryCloudLibrary();
 });
 
-window.addEventListener('online', () => pickUpWhereWeLeftOff('the network came back'));
+/** A cloud library whose last listing failed is asked again at once when there is reason to think it would work now. */
+function retryCloudLibrary() {
+  if (cloudListError && cloudReady()) {
+    cloudAccountLine();
+    refreshCloudLibrary({ quiet: true });
+  }
+}
+
+window.addEventListener('online', () => {
+  pickUpWhereWeLeftOff('the network came back');
+  retryCloudLibrary();
+});
 // Safari restores a page from its cache with every socket already dead.
 window.addEventListener('pageshow', (event) => {
   if (event.persisted) pickUpWhereWeLeftOff('the browser restored this page');
@@ -2856,10 +3010,19 @@ function shareTorrent(torrent) {
   const panel = $('.share-panel', view.el);
   const appLink = $('.share-app-link', view.el);
   const magnet = $('.share-magnet', view.el);
-  appLink.value = appLinkFor(torrent);
-  magnet.value = torrent.magnetURI;
+  // A private torrent's links are not for sharing. Its magnet names its own tracker, whose address
+  // carries the user's passkey; and a magnet has no private flag, so the copy of this app that opens
+  // one adds the public trackers and asks the torrent caches for its info hash — what gets accounts
+  // banned — for a torrent no browser can download anyway. The .torrent keeps the flag: it is what
+  // the panel offers instead.
+  const secret = Boolean(view.reach?.private);
+  $('.share-private', view.el).hidden = !secret;
+  for (const row of $$('.share-row', view.el)) row.hidden = secret;
+  appLink.value = secret ? '' : appLinkFor(torrent);
+  magnet.value = secret ? '' : torrent.magnetURI;
   panel.hidden = false;
-  $('.share-native-btn', view.el).hidden = !navigator.share;
+  $('.share-native-btn', view.el).hidden = secret || !navigator.share;
+  if (secret) return;
   // Selected, so one tap on the phone's own "Copy" does the job too.
   appLink.focus();
   appLink.setSelectionRange(0, appLink.value.length);
@@ -3026,30 +3189,41 @@ async function tryAddTorrent(id) {
 /** Far above any real .torrent, which is kilobytes to a few megabytes of piece hashes. */
 const TORRENT_FILE_MAX = 64 * 1024 * 1024;
 
+/**
+ * A picked file's bytes when it is a .torrent, or null. No picker can filter by file type on iOS, so a
+ * video from the photo library is one tap away in each of them. Reading gigabytes just to refuse them
+ * would take the tab down: a .torrent is a small bencoded dictionary, so its size and first byte say
+ * enough before anything else is read. The bytes have the last word.
+ */
+async function readTorrentFile(f) {
+  if (f.size > TORRENT_FILE_MAX || new Uint8Array(await f.slice(0, 1).arrayBuffer())[0] !== 0x64) return null;
+  const bytes = new Uint8Array(await f.arrayBuffer());
+  return torrentReach(bytes) ? bytes : null;
+}
+
+/**
+ * Bring the card of a torrent just added into view. The cloud library sits above the list, on every
+ * tab: with a few transfers in it, a new card landed screens below, and nothing on screen said it came.
+ */
+function showCard(torrent) {
+  views.get(torrent)?.el.scrollIntoView({ block: 'nearest' });
+}
+
 async function addTorrentFiles(fileList) {
   for (const f of fileList) {
-    const notATorrent = () => toast(`"${f.name}" is not a .torrent file. To share a file of your own, use the "Seed & share" tab.`, { error: true });
     let buf;
     try {
-      // The picker cannot filter by file type on iOS, so a video from the photo library is one tap
-      // away. Reading gigabytes just to refuse them would take the tab down: a .torrent is a small
-      // bencoded dictionary, so its size and first byte say enough before anything else is read.
-      if (f.size > TORRENT_FILE_MAX || new Uint8Array(await f.slice(0, 1).arrayBuffer())[0] !== 0x64) {
-        notATorrent();
-        continue;
-      }
-      buf = new Uint8Array(await f.arrayBuffer());
+      buf = await readTorrentFile(f);
     } catch (err) {
       toast(`Could not read ${f.name}: ${err.message}`, { error: true });
       continue;
     }
-    // The bytes have the last word.
-    if (!torrentReach(buf)) {
-      notATorrent();
+    if (!buf) {
+      toast(`"${f.name}" is not a .torrent file. To share a file of your own, use the "Seed & share" tab.`, { error: true });
       continue;
     }
     try {
-      await addTorrent(buf);
+      showCard(await addTorrent(buf));
     } catch (err) {
       toast(`Could not add ${f.name}: ${err.message}`, { error: true });
     }
@@ -3073,7 +3247,7 @@ els.magnetForm.addEventListener('submit', async (event) => {
   // What could not be added comes back, to be fixed rather than pasted again from wherever it was.
   els.magnetInput.value = '';
   try {
-    await addTorrent(id);
+    showCard(await addTorrent(id));
   } catch (err) {
     if (!els.magnetInput.value) els.magnetInput.value = value;
     toast(err.message, { error: true, timeout: 9000 });
@@ -3119,8 +3293,8 @@ els.cloudFileInput.addEventListener('change', async () => {
   }
   for (const f of files) {
     try {
-      const bytes = new Uint8Array(await f.arrayBuffer());
-      if (!torrentReach(bytes)) {
+      const bytes = await readTorrentFile(f);
+      if (!bytes) {
         toast(`"${f.name}" is not a .torrent file.`, { error: true });
         continue;
       }
@@ -3212,6 +3386,12 @@ if (IN_BROWSER_BLOCKED) {
   for (const control of $$('#tab-download input, #tab-download button, #tab-seed input, #tab-seed button')) control.disabled = true;
   // Not "pick a .torrent or paste a magnet above", under a picker and a field that are switched off.
   els.empty.textContent = 'No torrents here: they cannot run on this page. The Cloud tab can fetch them for you.';
+} else if (NO_WEBRTC) {
+  // Said where torrents are added, and nothing switched off: a web seed can still send one here.
+  for (const note of $$('.insecure-note')) {
+    note.textContent = NO_WEBRTC;
+    note.hidden = false;
+  }
 }
 
 /* ---------- screen wake lock: phones suspend the page when the screen locks ---------- */
@@ -3228,8 +3408,9 @@ function wantsWakeLock() {
     // not kept on by its peers alone: with every file unticked there is nothing it wants from them.
     if (isComplete(t)) return t.numPeers > 0;
     // Nothing will arrive for a private torrent this page cannot announce, and nothing is needed for
-    // one the cloud already holds: the screen staying on would only drain the battery.
-    if (cannotDownloadHere(view?.reach) || view?.cloud?.ready) return false;
+    // one the cloud already holds: the screen staying on would only drain the battery. Unless the
+    // private one has a connection all the same: a web seed, its own url-list or one added by hand.
+    if ((cannotDownloadHere(view?.reach) && t.numPeers === 0) || view?.cloud?.ready) return false;
     return wantsData(t);
   });
 }
@@ -3310,7 +3491,9 @@ els.settingsBtn.addEventListener('click', async () => {
   } else {
     try {
       const est = await navigator.storage.estimate();
-      els.storageInfo.textContent = `Downloaded pieces are kept in the browser's private storage so you can reload the page without losing progress. Currently using ${formatBytes(est.usage)} of ${formatBytes(est.quota)} available.`;
+      const kept = navigator.storage.persisted ? await navigator.storage.persisted().catch(() => null) : null;
+      els.storageInfo.textContent = `Downloaded pieces are kept in the browser's private storage so you can reload the page without losing progress. Currently using ${formatBytes(est.usage)} of ${formatBytes(est.quota)} available.`
+        + (kept === true ? ' The browser keeps it until you delete it.' : kept === false ? ' The browser may clear it when the device runs low on space.' : '');
     } catch { /* keep default text */ }
   }
   els.settingsDialog.returnValue = '';
@@ -3388,6 +3571,12 @@ els.cloudTestBtn.addEventListener('click', async () => {
   // starts using it: Cancel leaves the settings exactly as they were.
   const provider = els.cloudProviderSelect.value;
   const api = CLOUD_PROVIDERS[provider] || CLOUD_PROVIDERS[DEFAULT_CLOUD_PROVIDER];
+  // An address without its scheme was taken for none at all, and this page's own was tested instead.
+  const problem = cloudBaseProblem();
+  if (problem) {
+    els.cloudInfo.textContent = `${problem} Test it again.`;
+    return;
+  }
   els.cloudTestBtn.disabled = true;
   els.cloudInfo.textContent = 'Checking…';
   try {
@@ -3400,7 +3589,9 @@ els.cloudTestBtn.addEventListener('click', async () => {
     const who = await ctx.api.check(ctx);
     els.cloudInfo.textContent = `Key accepted${who ? ` (${who})` : ''}. Save to keep it.`;
   } catch (err) {
-    els.cloudInfo.textContent = `Key not usable: ${err.message}`;
+    // Only an answer says anything of the key: a call that got none (the address, the network, a
+    // browser refusing it) did not ask.
+    els.cloudInfo.textContent = `${err.status ? 'Key not usable' : 'Could not check the key'}: ${err.message}`;
   } finally {
     els.cloudTestBtn.disabled = false;
   }
@@ -3448,8 +3639,45 @@ els.settingsForm.addEventListener('submit', (event) => {
   if (els.trackerListToggle.checked && !/^https?:\/\//i.test(trackerListUrl)) {
     return refuse('The tracker list URL must start with http(s)://', els.trackerListUrl);
   }
+
+  // Three fields whose mistakes used to be dropped on Save, which then said "Settings saved": the
+  // field was empty the next time, and the proxy, the cache or the server was simply not used. The
+  // usual mistake is mended in the field instead, to be saved as it reads then, or changed.
+  const sources = els.metaSourcesInput.value.split('\n').map((s) => s.trim()).filter(Boolean);
+  const badSource = sources.find((s) => !/^https?:\/\/.*\{infohash\}/i.test(s));
+  if (badSource) return refuse(`A metadata source must be an http(s):// address with {infohash} where the info hash goes: ${badSource}`, els.metaSourcesInput);
+
+  const corsProxy = els.corsProxyInput.value.trim();
+  if (corsProxy && !/^https?:\/\/.*\{url\}/i.test(corsProxy)) {
+    // The address a worker's deploy prints has no {url}: the app's is the ?url= of the worker in proxy/.
+    let mended = '';
+    try {
+      const u = new URL(corsProxy);
+      if (/^https?:$/.test(u.protocol)) mended = `${u.origin}${u.pathname}${u.search ? `${u.search}&` : '?'}url={url}`;
+    } catch { /* not an address at all */ }
+    if (!mended) return refuse('The CORS proxy must be an http(s):// address with {url} where the address to fetch goes.', els.corsProxyInput);
+    els.corsProxyInput.value = mended;
+    return refuse(`The CORS proxy needs {url} where the address to fetch goes. It now reads ${mended}: Save again to keep it.`, els.corsProxyInput);
+  }
+
+  const base = cloudBaseProblem();
+  if (base) return refuse(`${base} Save again to keep it.`, els.cloudBaseInput);
   checkedSettings = { typed, trackers, rtcConfig, trackerListUrl };
 });
+
+/**
+ * What is wrong with the service address typed, or ''. "nas.local:8080" passes the field's own check,
+ * since to a browser "nas.local:" is a scheme, and was then taken as no address at all: this page's.
+ * A name and a port are mended with the scheme a server at home has, a bare name with a deploy's.
+ */
+function cloudBaseProblem() {
+  const typed = els.cloudBaseInput.value.trim();
+  if (!typed || /^https?:\/\//i.test(typed)) return '';
+  if (!/^[\w.-]+(:\d+)?(\/\S*)?$/.test(typed)) return 'The service address must start with http:// or https://.';
+  const home = /:\d+/.test(typed) || /^[\d.]+(:|\/|$)/.test(typed) || /\.(local|lan|home|internal)(:|\/|$)/i.test(typed);
+  els.cloudBaseInput.value = `${home ? 'http' : 'https'}://${typed}`;
+  return `The service address needs http:// or https://. It now reads ${els.cloudBaseInput.value}.`;
+}
 
 // Leaves without checking or saving anything, a field that cannot be saved included.
 $('button[value="cancel"]', els.settingsDialog).addEventListener('click', () => els.settingsDialog.close('cancel'));
@@ -3534,7 +3762,42 @@ els.clearStorageBtn.addEventListener('click', async () => {
   toast('All stored torrent data deleted.');
 });
 
+/**
+ * The settings as Copy diagnostics hands them over, which is into a bug report, in public: without what
+ * would hand over the accounts. Every cloud key and TURN credential is only said to be set, and so is
+ * the CORS proxy, whose address is as good as a key to it.
+ */
+function redactedSettings(s) {
+  const set = (value) => (value ? '<set>' : '');
+  const accounts = Object.fromEntries(Object.entries(s.cloud?.accounts || {}).map(([provider, account]) => [provider, { ...account, apiKey: set(account?.apiKey) }]));
+  const iceServers = Array.isArray(s.rtcConfig?.iceServers)
+    ? s.rtcConfig.iceServers.map((server) => ({ ...server, ...(server?.username ? { username: '<set>' } : {}), ...(server?.credential ? { credential: '<set>' } : {}) }))
+    : s.rtcConfig?.iceServers;
+  return {
+    ...s,
+    corsProxy: set(s.corsProxy),
+    cloud: { ...s.cloud, apiKey: set(s.cloud?.apiKey), accounts },
+    rtcConfig: s.rtcConfig && typeof s.rtcConfig === 'object' ? { ...s.rtcConfig, iceServers } : s.rtcConfig,
+  };
+}
+
+/** A tracker as diagnostics show it: an http(s) one without its path, where a private tracker puts the passkey. */
+function redactedTracker(url) {
+  try {
+    const u = new URL(url);
+    return /^https?:$/.test(u.protocol) && (u.pathname.length > 1 || u.search) ? `${u.protocol}//${u.host}/…` : url;
+  } catch {
+    return url;
+  }
+}
+
 els.copyDiagBtn.addEventListener('click', async () => {
+  // What the log may say of them too — a web seed added by hand, a warning naming a tracker — goes.
+  const secrets = [
+    settings.cloud?.apiKey, ...Object.values(settings.cloud?.accounts || {}).map((a) => a?.apiKey), settings.corsProxy,
+    ...client.torrents.flatMap((t) => (t.announce || []).filter((u) => redactedTracker(u) !== u)),
+  ].filter((secret) => typeof secret === 'string' && secret.length >= 4);
+  const scrub = (line) => secrets.reduce((text, secret) => text.split(secret).join('<hidden>'), line);
   const diag = {
     app: 'phone-torrent',
     time: new Date().toISOString(),
@@ -3543,7 +3806,7 @@ els.copyDiagBtn.addEventListener('click', async () => {
     saver: { mode: saver.mode, reason: saver.reason },
     opfs: opfsOk,
     webrtc: typeof RTCPeerConnection === 'function',
-    settings,
+    settings: redactedSettings(settings),
     effectiveTrackers: effectiveTrackers(),
     client: {
       version: WebTorrent.VERSION,
@@ -3561,9 +3824,9 @@ els.copyDiagBtn.addEventListener('click', async () => {
       numPeers: t.numPeers,
       paused: t.paused,
       done: t.done,
-      announce: t.announce,
+      announce: (t.announce || []).map(redactedTracker),
       files: t.files.map((f) => ({ path: f.path, length: f.length, progress: f.progress })),
-      log: views.get(t)?.log || [],
+      log: (views.get(t)?.log || []).map(scrub),
     })),
   };
   toast((await copyText(JSON.stringify(diag, null, 2))) ? 'Diagnostics copied to the clipboard.' : 'Could not copy.');
@@ -3705,6 +3968,10 @@ const started = (async function start() {
   // Give the public tracker list a moment so restored torrents announce to it too; the cached list is
   // already applied, so on a slow network we simply continue and it merges in when it arrives.
   await Promise.race([refreshTrackerList(), new Promise((r) => setTimeout(r, 2500))]);
+  // And every six hours after that, for an app left open — a seed on a desktop, a phone on its
+  // charger. Looked at more often than that, so that one fetched a little after this started is not
+  // left for twice as long: the look is free, and nothing is fetched before the list is six hours old.
+  setInterval(() => refreshTrackerList(), TRACKER_LIST_TTL / 24);
   maybeShowIosInstallHint();
 
   // Nothing restores where nothing can run; the notice on the Download tab says why.

@@ -140,6 +140,33 @@ async function stopServer() {
 }
 
 /**
+ * A server started beside the main one, only to see how it starts: what it says until `until`
+ * matches, or until it stops, and its exit code if it did. One still running after that is stopped.
+ */
+async function startAside(extraEnv, { until = null, timeout = 20000 } = {}) {
+  const child = spawn(process.execPath, [path.join(HERE, '..', 'server', 'app.mjs')], {
+    env: { ...process.env, PORT: '0', AUTH_TOKEN: TOKEN, DOWNLOAD_DIR: downloads, WEB_DIR: path.join(HERE, '..'), ALLOWED_ORIGINS: '', ...extraEnv },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let output = '';
+  const exited = new Promise((resolve) => child.once('exit', (code) => resolve(code)));
+  const said = new Promise((resolve) => {
+    const read = (d) => {
+      output += d;
+      if (until && until.test(output)) resolve();
+    };
+    child.stdout.on('data', read);
+    child.stderr.on('data', read);
+  });
+  const code = await Promise.race([exited, said.then(() => null), new Promise((r) => setTimeout(() => r(null), timeout))]);
+  if (code === null) {
+    child.kill('SIGKILL');
+    await exited;
+  }
+  return { output, code };
+}
+
+/**
  * A request exactly as written: fetch() would tidy up a path like `//` before sending it, and
  * sends no Host but the one in the URL.
  */
@@ -173,6 +200,42 @@ try {
   assert.ok(refusal.includes(`DOWNLOAD_DIR ${unwritable}`), `and says which setting to fix: ${refusal.trim().split('\n')[0]}`);
   log('an unwritable download directory is named at start');
 
+  // A BitTorrent port that is taken — another client on the machine, a second copy of this server —
+  // makes WebTorrent tear itself down. The server used to go on answering its health check, the
+  // Docker HEALTHCHECK included, and refuse every transfer with "client is destroyed". It stops
+  // instead, so that a restart policy notices, and says which setting to change.
+  const heldTcp = net.createServer();
+  const heldTcpPort = await new Promise((resolve) => heldTcp.listen(0, () => resolve(heldTcp.address().port)));
+  const heldUdp = dgram.createSocket('udp4');
+  const heldUdpPort = await new Promise((resolve) => heldUdp.bind(0, () => resolve(heldUdp.address().port)));
+  try {
+    for (const [setting, port, other] of [['TORRENT_PORT', heldTcpPort, { DHT_PORT: String(await freePort(true)) }], ['DHT_PORT', heldUdpPort, { TORRENT_PORT: String(await freePort()) }]]) {
+      const taken = await startAside({ [setting]: String(port), ...other });
+      assert.equal(taken.code, 1, `a server whose ${setting} is taken stops (it said: ${taken.output.trim().split('\n').slice(-2).join(' | ')})`);
+      assert.match(taken.output, new RegExp(`${setting} ${port}\\b.*is taken`), 'and says which setting to change');
+    }
+  } finally {
+    heldTcp.close();
+    heldUdp.close();
+  }
+  log('a BitTorrent or DHT port already taken stops the server, naming the setting');
+
+  // uTP comes from a native module that npm leaves out where it has no prebuilt binary and cannot be
+  // built — the arm64 image, before it had a compiler to build it with. The log said "TCP and uTP" all
+  // the same, and the UDP port users are told to forward for it was listened on by nobody.
+  const noUtpHook = path.join(tmp, 'no-utp.cjs');
+  writeFileSync(noUtpHook, [
+    "const Module = require('node:module');",
+    'const load = Module._load;',
+    'Module._load = function (request, ...rest) {',
+    "  if (request === 'utp-native') throw Object.assign(new Error(\"Cannot find module 'utp-native'\"), { code: 'MODULE_NOT_FOUND' });",
+    '  return load.call(this, request, ...rest);',
+    '};',
+  ].join('\n'));
+  const withoutUtp = await startAside({ NODE_OPTIONS: `--require ${noUtpHook}`, TORRENT_PORT: String(await freePort()), DHT_PORT: String(await freePort(true)) }, { until: /BitTorrent on port .*\n/ });
+  assert.match(withoutUtp.output, /BitTorrent on port \d+ \(TCP only/, `a server without uTP does not claim it (it said: ${withoutUtp.output.match(/BitTorrent.*/)?.[0]})`);
+  log('a build without uTP says it runs TCP only');
+
   await startServer();
   const api = (path, init = {}) => fetch(`${serverUrl}${path}`, {
     ...init,
@@ -187,7 +250,16 @@ try {
     const socket = net.connect(torrentPort, '127.0.0.1', () => { socket.destroy(); resolve(); });
     socket.on('error', reject);
   });
-  log('BitTorrent listens on the configured port', torrentPort);
+  // And uTP, over UDP on the same port, when the log says so: that port is taken.
+  assert.match(serverLog, new RegExp(`BitTorrent on port ${torrentPort} \\(TCP and uTP\\)`), 'with uTP here, the log says so');
+  const utpProbe = dgram.createSocket('udp4');
+  const utpBind = await new Promise((resolve) => {
+    utpProbe.once('error', (err) => resolve(err.code));
+    utpProbe.bind(torrentPort, () => resolve('bound'));
+  });
+  try { utpProbe.close(); } catch { /* never bound */ }
+  assert.equal(utpBind, 'EADDRINUSE', 'and uTP listens on that port');
+  log('BitTorrent listens on the configured port', torrentPort, 'over TCP and uTP');
 
   // A request the server cannot parse is refused, and the server is still there after it.
   assert.equal(await raw('/%'), 400, 'a malformed escape is a bad request');
@@ -331,7 +403,10 @@ try {
   assert.equal(sha(Buffer.from(await viaLink.arrayBuffer())), sha(payload), 'and serves the file');
   const signedUrl = new URL(link, serverUrl);
   const tampered = new URL(signedUrl);
-  tampered.searchParams.set('sig', `${signedUrl.searchParams.get('sig').slice(0, -2)}AA`);
+  // One character changed, to one it certainly was not: writing "AA" over the end left the link
+  // as it was whenever the signature already ended that way, about one run in a thousand.
+  const sig = signedUrl.searchParams.get('sig');
+  tampered.searchParams.set('sig', `${sig[0] === 'A' ? 'B' : 'A'}${sig.slice(1)}`);
   assert.equal((await fetch(tampered)).status, 401, 'a tampered signature is refused');
   const otherFile = new URL(signedUrl);
   otherFile.pathname = otherFile.pathname.replace(/\/0$/, '/1');
@@ -342,6 +417,30 @@ try {
   expired.searchParams.set('sig', createHmac('sha256', TOKEN).update(`${seeded.infoHash}/0/${past24h}`).digest('base64url'));
   assert.equal((await fetch(expired)).status, 401, 'an expired link is refused');
   log('file links are signed per file and expire; they never carry the token');
+
+  // A name with an apostrophe, as release names often have. encodeURIComponent leaves ' ( ) * as
+  // they are, a browser refuses such a filename*, and with nothing else to go on it saved the file
+  // as the last part of the link: "0", with no name and no extension. The file is on the server's
+  // disk already, so the transfer checks it and has it, with no peer.
+  const quotedName = "Don't Look Up (2021).bin";
+  const quotedDir = mkdtempSync(path.join(tmpdir(), 'phone-torrent-quoted-'));
+  const quotedBytes = randomBytes(20 * 1024);
+  writeFileSync(path.join(quotedDir, quotedName), quotedBytes);
+  const quoted = await new Promise((resolve) => {
+    seeder.seed(path.join(quotedDir, quotedName), { announce: [trackerUrl] }, resolve);
+  });
+  await new Promise((resolve) => seeder.remove(quoted.infoHash, { destroyStore: false }, resolve));
+  writeFileSync(path.join(downloads, quotedName), quotedBytes);
+  assert.equal((await api('/api/transfers', { method: 'POST', headers: { 'Content-Type': 'application/x-bittorrent' }, body: quoted.torrentFile })).status, 201);
+  await waitFor(async () => (await (await api(`/api/transfers/${quoted.infoHash}`)).json()).transfer?.ready, { label: 'the file with an apostrophe to be checked', timeout: 15000 });
+  const disposition = (await api(`/api/transfers/${quoted.infoHash}/files/0`, { method: 'HEAD' })).headers.get('content-disposition') || '';
+  const encodedName = disposition.match(/filename\*=UTF-8''([^;]*)/)?.[1] || '';
+  assert.match(encodedName, /^[A-Za-z0-9!#$&+\-.^_`|~%]+$/, `the UTF-8 name is only characters a browser takes there (${disposition})`);
+  assert.equal(decodeURIComponent(encodedName), quotedName, 'and reads as the file\'s name');
+  assert.ok(disposition.includes(`filename="${quotedName}"`), `with the name as it is beside it (${disposition})`);
+  assert.equal((await api(`/api/transfers/${quoted.infoHash}`, { method: 'DELETE' })).status, 200);
+  rmSync(quotedDir, { recursive: true, force: true });
+  log('a file whose name has an apostrophe is saved under that name');
 
   // A torrent whose file is called transfers.json would write over the server's list of
   // transfers, and every transfer would be forgotten at the next start. It is refused.
@@ -421,8 +520,48 @@ try {
   assert.equal((await api('/api/transfers', { method: 'POST', headers: { 'Content-Type': 'application/x-bittorrent' }, body: namesake.torrentFile })).status, 201);
   assert.equal((await api(`/api/transfers/${namesake.infoHash}`, { method: 'DELETE' })).status, 200);
   assert.deepEqual(inPlace(), { photos: true, release: true }, 'nor does a .torrent called "Photos" that brings files of its own');
+  // Nor one whose single file is called "Photos": the folder of that name stands where its file
+  // would go. The torrent's own store deletes every path it names, recursively, and took the folder
+  // with it before anything could say it was not the transfer's.
+  const photoFile = path.join(tmp, 'single', 'Photos');
+  mkdirSync(path.dirname(photoFile), { recursive: true });
+  writeFileSync(photoFile, randomBytes(1024));
+  const singlePhotos = await new Promise((resolve) => {
+    seeder.seed(photoFile, { announce: [trackerUrl] }, resolve);
+  });
+  await new Promise((resolve) => seeder.remove(singlePhotos.infoHash, { destroyStore: false }, resolve));
+  assert.equal((await api('/api/transfers', { method: 'POST', headers: { 'Content-Type': 'application/x-bittorrent' }, body: singlePhotos.torrentFile })).status, 201);
+  assert.equal((await api(`/api/transfers/${singlePhotos.infoHash}`, { method: 'DELETE' })).status, 200);
+  assert.deepEqual(inPlace(), { photos: true, release: true }, 'nor does a single-file .torrent called "Photos"');
   rmSync(path.join(downloads, 'Photos'), { recursive: true, force: true });
-  log('delete takes what the transfer wrote, not a folder that has its name');
+
+  // Two transfers of one file — the same bytes cut into pieces of another size are another torrent —
+  // both have it, and both seed it. Deleting one leaves it to the other; deleting that one takes it.
+  const sharedFile = path.join(tmp, 'shared', 'shared.bin');
+  mkdirSync(path.dirname(sharedFile), { recursive: true });
+  const sharedBytes = randomBytes(64 * 1024);
+  writeFileSync(sharedFile, sharedBytes);
+  const sharing = [];
+  for (const pieceLength of [16 * 1024, 32 * 1024]) {
+    const one = await new Promise((resolve) => {
+      seeder.seed(sharedFile, { announce: [trackerUrl], pieceLength }, resolve);
+    });
+    await new Promise((resolve) => seeder.remove(one.infoHash, { destroyStore: false }, resolve));
+    sharing.push(one);
+  }
+  writeFileSync(path.join(downloads, 'shared.bin'), sharedBytes);
+  for (const one of sharing) {
+    assert.equal((await api('/api/transfers', { method: 'POST', headers: { 'Content-Type': 'application/x-bittorrent' }, body: one.torrentFile })).status, 201);
+  }
+  for (const one of sharing) {
+    await waitFor(async () => (await (await api(`/api/transfers/${one.infoHash}`)).json()).transfer?.ready, { label: 'both transfers of one file to have it', timeout: 15000 });
+  }
+  assert.equal((await api(`/api/transfers/${sharing[1].infoHash}`, { method: 'DELETE' })).status, 200);
+  assert.ok(existsSync(path.join(downloads, 'shared.bin')), 'a file another transfer still has stays');
+  assert.equal((await (await api(`/api/transfers/${sharing[0].infoHash}`)).json()).transfer?.ready, true, 'and that transfer still has it');
+  assert.equal((await api(`/api/transfers/${sharing[0].infoHash}`, { method: 'DELETE' })).status, 200);
+  await waitFor(() => !existsSync(path.join(downloads, 'shared.bin')), { label: 'the file to go with the last transfer that had it', timeout: 5000 });
+  log('delete takes what the transfer wrote, not a folder that has its name, nor a file another transfer has');
 
   // A transfer that fails — a full disk, a write the disk refuses — stays listed with the
   // reason until it is deleted, rather than vanishing: the phone says why. A folder where its
@@ -494,6 +633,30 @@ try {
   await waitFor(() => !existsSync(path.join(downloads, 'release.bin')), { label: 'the deleted file to go', timeout: 5000 });
   log('delete OK');
 
+  // The same DELETE twice at once — a phone retrying one whose answer it lost, two phones — used to
+  // take the whole server down: the second found the transfer already gone from WebTorrent, whose
+  // refusal nothing handled. Sent on two connections already open, in the same moment, so that
+  // neither waits for the other.
+  const twice = randomBytes(20).toString('hex');
+  assert.equal((await api('/api/transfers', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ magnet: twice }) })).status, 201);
+  const sockets = await Promise.all([0, 1].map(() => new Promise((resolve, reject) => {
+    const socket = net.connect(new URL(serverUrl).port, '127.0.0.1', () => resolve(socket));
+    socket.on('error', reject);
+  })));
+  const answered = sockets.map((socket) => new Promise((resolve) => {
+    let reply = '';
+    socket.on('data', (d) => { reply += d; });
+    socket.on('error', () => {});
+    socket.on('close', () => resolve(Number(reply.match(/^HTTP\/1\.1 (\d+)/)?.[1]) || 'no answer'));
+  }));
+  for (const socket of sockets) {
+    socket.write(`DELETE /api/transfers/${twice} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer ${TOKEN}\r\nConnection: close\r\n\r\n`);
+  }
+  const statuses = await Promise.all(answered);
+  assert.ok(statuses.every((s) => s === 200 || s === 404) && statuses.includes(200), `both are answered, one of them deleting it (${statuses.join(', ')})`);
+  assert.equal((await fetch(`${serverUrl}/api/health`)).status, 200, 'and the server is still there');
+  log('two DELETEs of one transfer at once are both answered, and the server stays up');
+
   // Saves that overlap — a delete and an add at the same moment — each leave a whole list,
   // and the last one the current list: never two lists spliced into a file the next start
   // cannot read.
@@ -533,8 +696,10 @@ try {
   // A list of transfers that does not read — a crash mid-write, a full disk — is not a first
   // run: it is kept aside, and said so, rather than written over with an empty list.
   writeFileSync(path.join(webDownloads, 'transfers.json'), '[{"id":');
-  // The hosted app's origin written as the address of its page, the way it gets pasted.
-  const tokenless = { AUTH_TOKEN: '', WEB_DIR: web, DOWNLOAD_DIR: webDownloads, ALLOWED_HOSTS: 'nas.local', ALLOWED_ORIGINS: 'https://hosted.example/phone-torrent/' };
+  // The hosted app's origin written as the address of its page, the way it gets pasted; and the
+  // names this server answers at written as the address bar shows them, as an address, and with the
+  // final dot a full name may have. A Host header is compared without its port or that dot.
+  const tokenless = { AUTH_TOKEN: '', WEB_DIR: web, DOWNLOAD_DIR: webDownloads, ALLOWED_HOSTS: 'nas.local:8080, http://media.lan:8080/,files.lan.', ALLOWED_ORIGINS: 'https://hosted.example/phone-torrent/' };
   await startServer(tokenless);
   const aside = readdirSync(webDownloads).find((name) => name.startsWith('transfers.json.corrupt-'));
   assert.ok(aside, 'an unreadable transfers.json is kept aside');
@@ -554,9 +719,10 @@ try {
   assert.equal(await raw('/api/transfers', { headers: rebound }), 403, 'lists nothing');
   assert.equal(await raw('/api/transfers', { method: 'POST', headers: { Host: `localhost:${port}`, 'Content-Type': 'application/json' }, body: plant }), 201, 'while localhost is answered');
   assert.equal(await raw(`/api/transfers/${planted}`, { method: 'DELETE', headers: rebound }), 403, 'and a rebound page deletes nothing');
-  for (const host of [`127.0.0.1:${port}`, `[::1]:${port}`, `app.localhost:${port}`, `nas.local:${port}`]) {
+  for (const host of [`127.0.0.1:${port}`, `[::1]:${port}`, `app.localhost:${port}`, `nas.local:${port}`, 'nas.local', `media.lan:${port}`, `files.lan:${port}`, `files.lan.:${port}`]) {
     assert.equal(await raw('/api/transfers', { headers: { Host: host } }), 200, `${host} is answered`);
   }
+  assert.match(serverLog, /or nas\.local, media\.lan, files\.lan$/m, 'and the log lists the names it took, as it compares them');
   // A site named in ALLOWED_ORIGINS is another website that may write. It was named by the
   // address of its page, path and all; a browser sends only the origin, and that matches.
   const hostedPreflight = await fetch(`${serverUrl}/api/transfers`, { method: 'OPTIONS', headers: { Origin: 'https://hosted.example', 'Access-Control-Request-Method': 'POST' } });
@@ -662,6 +828,21 @@ try {
     assert.ok(allowedHeaders.includes(header), `the CORS proxy allows ${header}, which a web seed request carries`);
   }
   log('the CORS proxy passes the preflight of a web seed request');
+
+  // ALLOWED_ORIGINS set to the app's address as the user sees it, path or final slash and all: a
+  // browser sends only the origin, and that is what the entry means, as it does for the server. The
+  // proxy's refusal carries no CORS header, so all the app could ever say about it was "CORS or network".
+  const proxyPreflight = (origin, allowed) => proxyWorker.fetch(new Request('https://proxy.example/?url=https%3A%2F%2Fmirror.example%2Ffile.bin', {
+    method: 'OPTIONS',
+    headers: { Origin: origin, 'Access-Control-Request-Method': 'GET' },
+  }), { ALLOWED_ORIGINS: allowed });
+  for (const allowed of ['https://me.example/', 'https://me.example/phone-torrent/', 'https://elsewhere.example, https://me.example/phone-torrent/']) {
+    const answer = await proxyPreflight('https://me.example', allowed);
+    assert.equal(answer.status, 204, `the CORS proxy takes "${allowed}" as the origin it names`);
+    assert.equal(answer.headers.get('access-control-allow-origin'), 'https://me.example');
+  }
+  assert.equal((await proxyPreflight('https://other.example', 'https://me.example/phone-torrent/')).status, 403, 'and still refuses any other');
+  log('the CORS proxy takes an allowed origin written as the address of the app');
 
   console.log('\nServer checks passed.');
 } catch (err) {
