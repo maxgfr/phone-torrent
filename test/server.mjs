@@ -403,7 +403,10 @@ try {
   assert.equal(sha(Buffer.from(await viaLink.arrayBuffer())), sha(payload), 'and serves the file');
   const signedUrl = new URL(link, serverUrl);
   const tampered = new URL(signedUrl);
-  tampered.searchParams.set('sig', `${signedUrl.searchParams.get('sig').slice(0, -2)}AA`);
+  // One character changed, to one it certainly was not: writing "AA" over the end left the link
+  // as it was whenever the signature already ended that way, about one run in a thousand.
+  const sig = signedUrl.searchParams.get('sig');
+  tampered.searchParams.set('sig', `${sig[0] === 'A' ? 'B' : 'A'}${sig.slice(1)}`);
   assert.equal((await fetch(tampered)).status, 401, 'a tampered signature is refused');
   const otherFile = new URL(signedUrl);
   otherFile.pathname = otherFile.pathname.replace(/\/0$/, '/1');
