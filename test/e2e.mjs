@@ -2650,7 +2650,9 @@ try {
   /* ---------- served by your own server, the page knows it ---------- */
   // server/app.mjs is stood in for by its answers: /api/health, then the account and the list. A
   // fresh page asks its own origin and makes it the service, where it used to say "No API key yet".
-  const ownCtx = await browser.newContext();
+  // No service worker: once one controls the page, WebKit sends its requests past context.route(),
+  // so the account and the list would reach the static test server instead of these answers.
+  const ownCtx = await browser.newContext({ serviceWorkers: 'block' });
   const ownCalls = [];
   await ownCtx.route(`${site.url}api/**`, (route) => {
     const req = route.request();
