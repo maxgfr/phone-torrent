@@ -885,6 +885,11 @@ try {
   await seeder.goto(site.url);
   await seeder.waitForFunction(() => window.__phoneTorrent?.client);
 
+  // What a restore must not fetch again. `received` counts every byte a peer sends, the BitTorrent
+  // and extension handshakes included (WebTorrent counts at the throttle pipe, before the wire), so a
+  // peer that connects after the check adds a few hundred bytes. A piece fetched again is at least one
+  // whole 16 KiB block: the fixture ends on a piece boundary, so no block is shorter.
+  const BLOCK = 16384;
   const FILE_A = 3 * 1024 * 1024 + 123; // > one piece, uneven size
   // …and the torrent ends exactly on a piece boundary (16 KiB pieces), which WebTorrent's
   // File.downloaded counts one piece short: every wait for "100%" below also proves the card
@@ -1297,7 +1302,7 @@ try {
   await phone.waitForSelector('.torrent .file', { timeout: 15000 });
   await waitFor(() => phone.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 'restored torrent to verify', timeout: 180000 });
   if (opfs) {
-    assert.equal(await phone.evaluate(() => window.__phoneTorrent.client.torrents[0].received), 0, 'nothing re-downloaded: restored from OPFS');
+    assert.ok(await phone.evaluate(() => window.__phoneTorrent.client.torrents[0].received) < BLOCK, 'nothing re-downloaded: restored from OPFS');
     await seederPause(); // resume
   }
   log(opfs ? 'restored after reload with all pieces intact (seeder was paused)' : 'restored after reload and re-downloaded (memory store)');
@@ -1514,7 +1519,7 @@ try {
     { hasMetadata: true, name: 'Phone Torrent Test', sourceType: 'magnet' }, 'magnet torrent restored from its stored metadata without peers');
   if (opfs) {
     await waitFor(() => phone.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 'magnet torrent verified from disk', timeout: 30000 });
-    assert.equal(await phone.evaluate(() => window.__phoneTorrent.client.torrents[0].received), 0, 'magnet torrent data came from OPFS');
+    assert.ok(await phone.evaluate(() => window.__phoneTorrent.client.torrents[0].received) < BLOCK, 'magnet torrent data came from OPFS');
   }
   await phone.click('.torrent .details-btn');
   await phone.click('.torrent .retry-btn');
@@ -2494,7 +2499,7 @@ try {
   // Without OPFS the pieces were in memory, and come from the seeder again.
   await waitForFromSeeder(() => lifeCard('Phone Torrent Test').locator('.pct').textContent().then((t) => t === '100%'), { label: 'the restored download checked', timeout: 180000 });
   if (opfs) {
-    assert.equal(await life.evaluate(() => window.__phoneTorrent.client.torrents.find((t) => t.name === 'Phone Torrent Test').received), 0, 'restored from disk');
+    assert.ok(await life.evaluate(() => window.__phoneTorrent.client.torrents.find((t) => t.name === 'Phone Torrent Test').received) < BLOCK, 'restored from disk');
     // Finished before this launch: a check that finds it complete is no news.
     assert.deepEqual(await life.evaluate(() => window.__toasts.filter((t) => /finished downloading/.test(t))), [], 'no "finished downloading" for what finished before');
   }
