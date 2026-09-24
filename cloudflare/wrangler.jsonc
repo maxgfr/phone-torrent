@@ -1,12 +1,12 @@
 {
-  // Run the server on Cloudflare's network, with no machine of your own.
+  // Run the server on Cloudflare's network, not on a machine of yours (Docker
+  // must run where you deploy from: the image is built there):
   //
-  //   cd cloudflare && npm install && npx wrangler deploy
+  //   cd cloudflare && npm install && npx wrangler secret put AUTH_TOKEN && npx wrangler deploy
   //
   // Read cloudflare/README.md first: Containers need a Workers paid plan, the
   // disk is ephemeral, and a container with no inbound port reaches fewer peers
-  // than a machine at home or on Fly. It is the quickest remote start, not the
-  // best seedbox.
+  // than a machine at home. It is the quickest remote start, not a seedbox.
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "phone-torrent",
   "main": "worker.js",
@@ -33,7 +33,9 @@
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TorrentContainer"] }],
 
   "vars": {
-    // Set a real one before deploying: wrangler secret put AUTH_TOKEN
+    // Any website may call it, because the token is required: AUTH_TOKEN is a
+    // secret, not a var (wrangler secret put AUTH_TOKEN), and until it is set
+    // the Worker refuses to start the server.
     "ALLOWED_ORIGINS": "*"
   }
 }

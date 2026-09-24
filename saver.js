@@ -25,12 +25,14 @@ export const saver = {
   reason: '',
 
   async init() {
-    if (!('serviceWorker' in navigator)) {
-      this.reason = 'Service workers are not available in this browser.';
+    // First: a page that is not secure has no navigator.serviceWorker at all, and the browser is
+    // not to blame for that.
+    if (!window.isSecureContext) {
+      this.reason = 'Streaming saves need HTTPS or localhost.';
       return this;
     }
-    if (!window.isSecureContext) {
-      this.reason = 'Streaming saves need HTTPS.';
+    if (!('serviceWorker' in navigator)) {
+      this.reason = 'Service workers are not available in this browser.';
       return this;
     }
     try {

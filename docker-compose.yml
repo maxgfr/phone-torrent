@@ -27,7 +27,10 @@ services:
       # origin here only if you use the hosted page against this server.
       # ALLOWED_ORIGINS: "https://<user>.github.io"
       # Set this the moment the server is reachable from outside your network.
+      # Until then the API answers only at localhost or an IP address; to reach
+      # it by a name without a token, list the name in ALLOWED_HOSTS.
       # AUTH_TOKEN: "change-me"
+      # ALLOWED_HOSTS: "nas.local"
       # Keep seeding once a download finishes: it is how the swarm survives.
       SEED_AFTER_DONE: "1"
     volumes:

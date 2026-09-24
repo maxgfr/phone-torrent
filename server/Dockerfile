@@ -9,7 +9,7 @@ WORKDIR /app
 COPY server/package.json server/package-lock.json* ./server/
 RUN cd server && npm install --omit=dev --no-audit --no-fund
 
-COPY server/app.mjs ./server/app.mjs
+COPY server/app.mjs server/entrypoint.sh ./server/
 # The app itself, served from here: index.html and everything it loads.
 COPY index.html app.js saver.js sw.js styles.css manifest.webmanifest icon.svg ./web/
 COPY icons ./web/icons
@@ -37,8 +37,10 @@ EXPOSE 6882/udp
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
   CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||8080)+'/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
-# Non-root: this process runs a torrent client against whatever is submitted.
-RUN useradd --create-home --uid 10001 app && mkdir -p /data/downloads && chown -R app /data
-USER app
+# Non-root: this process runs a torrent client against whatever is submitted. The entrypoint
+# starts as root only to hand the download directory to `app` (a disk Fly or Render mounts
+# over /data arrives owned by root), then runs the server as `app`.
+RUN useradd --create-home --uid 10001 app && mkdir -p /data/downloads && chown -R app:app /data
 
+ENTRYPOINT ["/bin/sh", "/app/server/entrypoint.sh"]
 CMD ["node", "server/app.mjs"]

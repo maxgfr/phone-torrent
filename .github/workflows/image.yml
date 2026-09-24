@@ -23,15 +23,64 @@ on:
       - "icons/**"
       - "vendor/**"
       - ".github/workflows/image.yml"
+  # The smoke test below, on a change to the image; only a push to main publishes.
+  pull_request:
+    paths:
+      - "server/**"
+      - "index.html"
+      - "app.js"
+      - "saver.js"
+      - "sw.js"
+      - "styles.css"
+      - "manifest.webmanifest"
+      - "icon.svg"
+      - "icons/**"
+      - "vendor/**"
+      - ".github/workflows/image.yml"
   workflow_dispatch:
 
 permissions:
   contents: read
-  packages: write
 
 jobs:
-  publish:
+  # The image has to start where it is deployed, not only under `docker compose`. Fly and
+  # Render mount their disk over /data owned by root, hiding the directory the image made
+  # for its user; a tmpfs mounted there is the same thing. The server must come up on it,
+  # write its list of transfers there, and run as that user rather than as root.
+  smoke:
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: server/Dockerfile
+          load: true
+          tags: phone-torrent:smoke
+          cache-from: type=gha
+      - name: Start it on a root-owned /data, as Fly and Render do
+        run: |
+          docker run -d --name smoke --tmpfs /data:mode=0755 -p 8080:8080 phone-torrent:smoke
+          up=
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/api/health; then up=1; break; fi
+            [ "$(docker inspect -f '{{.State.Running}}' smoke)" = true ] || break
+            sleep 1
+          done
+          docker logs smoke
+          [ -n "$up" ] || { echo "::error::the server did not start on a root-owned /data"; exit 1; }
+          curl -fsS -H 'Content-Type: application/json' -d '{"magnet":"0123456789abcdef0123456789abcdef01234567"}' http://127.0.0.1:8080/api/transfers
+          docker exec smoke test -s /data/downloads/transfers.json
+          [ "$(docker exec smoke stat -c %u /proc/1)" = 10001 ] || { echo "::error::the server runs as root"; exit 1; }
+
+  publish:
+    needs: smoke
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-qemu-action@v3

@@ -2,10 +2,18 @@
 # on your router.
 #
 #   docker compose -f docker-compose.yml -f docker-compose.tunnel.yml up -d
-#   docker compose logs cloudflared | grep trycloudflare.com
+#   docker compose -f docker-compose.yml -f docker-compose.tunnel.yml logs cloudflared | grep trycloudflare.com
 #
-# The second command prints the https address the tunnel got. Put that address
-# in the app: Settings → Cloud fetch → service "My own server".
+# Every command about the tunnel needs both files, `down` included: without them
+# Compose reads docker-compose.yml alone, which has no cloudflared service.
+#
+# The second command prints the https address the tunnel got. Open it on the
+# phone: the app served there needs only Settings → Cloud fetch → service "My
+# own server" and the key, and its address field can stay empty. The app
+# installed from GitHub Pages needs the tunnel's address typed into that field,
+# and the page's origin named in docker-compose.yml, with no path after it:
+# ALLOWED_ORIGINS: "https://<user>.github.io". Without it the browser refuses
+# every answer, and the app can only say it could not reach the server.
 #
 # Read this before using it: a quick tunnel is a PUBLIC address. Anyone who has
 # it can drive your torrent client, on your connection. AUTH_TOKEN is therefore

@@ -2,12 +2,17 @@
   --bg: #f4f6fb;
   --card: #ffffff;
   --text: #0f172a;
-  --muted: #64748b;
+  --muted: #5b6b82; /* 5:1 on --bg, the darker of the two it is drawn on; text needs 4.5:1 */
   --border: #e2e8f0;
   --primary: #2563eb;
   --primary-text: #ffffff;
   --accent: #16a34a;
   --danger: #dc2626;
+  /* What white text sits on: a primary button, an error toast. The dark scheme's --primary and
+     --danger are lighter, to stand out on a dark page, and white on them is 3.7:1 and 2.8:1, under
+     the 4.5:1 text needs; so these are set apart, and the button's blue is the same in both. */
+  --primary-fill: #2563eb;
+  --danger-fill: #dc2626;
   --track: #e2e8f0;
   --shadow: 0 1px 2px rgba(15, 23, 42, 0.06), 0 4px 16px rgba(15, 23, 42, 0.04);
   --radius: 14px;
@@ -24,6 +29,7 @@
     --primary: #3b82f6;
     --accent: #22c55e;
     --danger: #f87171;
+    --danger-fill: #b91c1c;
     --track: #243049;
     --shadow: none;
   }
@@ -58,9 +64,15 @@ body {
   border-bottom: 1px solid var(--border);
 }
 
-.brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
-.brand h1 { font-size: 1.1rem; margin: 0; font-weight: 700; white-space: nowrap; }
-.topbar-right { display: flex; align-items: center; gap: 8px; }
+/* During a transfer the pill's speeds, and Install where the browser offers it, leave a phone's top bar
+   short of room. The title gives way first, down to the icon, then the pill, to an ellipsis; Install
+   and Settings never do, and nothing is drawn over anything else. */
+.brand { display: flex; align-items: center; gap: 10px; flex: 1 1 0; min-width: 28px; }
+.brand img { flex: none; }
+.brand h1 { font-size: 1.1rem; margin: 0; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.topbar-right { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.topbar-right > * { flex: none; }
+.topbar-right > .pill { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 
 .pill {
   font-size: 0.75rem;
@@ -126,12 +138,14 @@ body {
   min-height: 44px;
 }
 .btn:disabled { opacity: 0.45; cursor: not-allowed; }
-.btn.primary { background: var(--primary); border-color: var(--primary); color: var(--primary-text); }
+.btn.primary { background: var(--primary-fill); border-color: var(--primary-fill); color: var(--primary-text); }
 .btn.ghost { background: transparent; }
 .btn.danger { border-color: var(--danger); color: var(--danger); background: transparent; }
 .btn.small { padding: 6px 12px; min-height: 36px; font-size: 0.85rem; }
 .file-btn { width: 100%; position: relative; overflow: hidden; }
 .file-btn input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+.file-btn:has(input:disabled) { opacity: 0.45; }
+.file-btn input:disabled { cursor: not-allowed; }
 
 .icon-btn {
   display: inline-flex;
@@ -230,7 +244,7 @@ body {
   color: var(--text);
   resize: vertical;
 }
-.dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.dialog-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 
 .toasts {
   position: fixed;
@@ -252,10 +266,11 @@ body {
   box-shadow: 0 8px 30px rgba(0, 0, 0, 0.25);
   animation: toast-in 0.2s ease;
 }
-.toast.error { background: var(--danger); color: #fff; }
+.toast.error { background: var(--danger-fill); color: #fff; }
 @keyframes toast-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 
 .notice.error { color: var(--danger); }
+.tab-panel > .notice { margin: 0 0 12px; font-size: 0.9rem; }
 
 @media (max-width: 480px) {
   .actions .zip-btn { flex-basis: 100%; }
@@ -334,8 +349,10 @@ body {
 .share-panel { margin-top: 10px; padding: 10px 12px; border-radius: 10px; background: var(--bg); border: 1px solid var(--border); display: grid; gap: 10px; }
 .share-row { display: grid; gap: 4px; font-size: 0.85rem; color: var(--muted); }
 .share-field { display: flex; gap: 6px; align-items: center; }
+/* width: 0, and flex: 1 fills the row: at its own width, twenty characters (more at the 16px an
+   iPhone gets), the field set how narrow its card could be, and at 320px that was wider than the screen. */
 .share-field input {
-  flex: 1; min-width: 0; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px;
+  flex: 1; min-width: 0; width: 0; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px;
   background: var(--card); color: var(--text); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.8rem;
 }
 
@@ -375,7 +392,10 @@ body {
   display: flex; gap: 8px; align-items: center; width: min(92vw, 480px); padding: 10px;
   background: var(--card); border: 1px solid var(--border); border-radius: 14px; box-shadow: 0 8px 30px rgba(0,0,0,0.25); z-index: 11;
 }
-.save-ready .primary { flex: 1; }
+/* The button names the file, and a release name (The.Show.S01E01.1080p.WEB.h264-GROUP.mkv) has
+   nowhere to break: it wraps anywhere rather than push Cancel off the screen. */
+.save-ready .primary { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.save-ready .ghost { flex: none; }
 
 /* ---- settings: a field that cannot be saved says so next to Save ---- */
 #settings-error { margin: 0; color: var(--danger); }
@@ -384,4 +404,14 @@ body {
    iOS alone and always, not on :focus, so nothing jumps in size under the finger. ---- */
 @supports (-webkit-touch-callout: none) {
   .field input, .field textarea, .field select, .share-field input { font-size: 16px; }
+}
+
+/* ---- The installed app on an iPhone gets its status bar drawn over the top of the page
+   (black-translucent in index.html, which lets the top bar reach under it), and that status bar is
+   always white. In light mode the strip under the clock and battery is dark, or they vanish into the
+   top bar. Everywhere else the inset is 0, and so is the strip. ---- */
+@supports (-webkit-touch-callout: none) {
+  @media (prefers-color-scheme: light) {
+    .topbar { padding-top: 10px; border-top: env(safe-area-inset-top) solid #0f172a; }
+  }
 }
