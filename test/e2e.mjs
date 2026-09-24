@@ -3176,7 +3176,9 @@ try {
   /* ---------- the public tracker list, while the app stays open ---------- */
   // Fetched when the app started, and then never again, however long it stayed open — a seed on a
   // desktop, a phone on its charger — where the README says every six hours. On a clock of its own here.
-  const clockCtx = await browser.newContext();
+  // No service worker, as for the other contexts that answer with route(): in WebKit a page it
+  // controls sends its requests past route(), and the list would never be counted.
+  const clockCtx = await browser.newContext({ serviceWorkers: 'block' });
   let listFetches = 0;
   await clockCtx.route('https://lists.invalid/trackers.txt', (route) => {
     listFetches += 1;
