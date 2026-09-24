@@ -6,12 +6,16 @@
  *   https://<your-worker>.workers.dev/?url={url}
  * in Settings → "CORS proxy" in the app.
  *
- * Deploy: npm i -g wrangler && wrangler deploy proxy/cloudflare-worker.js --name phone-torrent-proxy
- * Restrict it to your own site by setting ALLOWED_ORIGINS (comma separated) as a Worker variable,
- * e.g. https://<user>.github.io
+ * Deploy: npm i -g wrangler && cd proxy && wrangler deploy (wrangler.jsonc beside this file names it)
+ * Then set ALLOWED_ORIGINS (comma separated), e.g. https://<user>.github.io, with
+ * `wrangler secret put ALLOWED_ORIGINS` from the same folder: it refuses every request until then.
  */
 
 const PASS_REQUEST_HEADERS = ['range', 'accept', 'if-none-match', 'if-modified-since'];
+// What the page may send the worker, which is more than the worker sends on. WebTorrent asks a web
+// seed for every piece with Cache-Control: no-store, and sets a User-Agent that Firefox then sends;
+// a browser whose preflight is not allowed them never sends the request at all.
+const ALLOW_REQUEST_HEADERS = 'Range, Accept, Authorization, Content-Type, If-None-Match, If-Modified-Since, Cache-Control, User-Agent';
 // Cloud-fetch API calls need POST (and PUT and DELETE: Real-Debrid adds a .torrent with PUT and
 // deletes with DELETE, and so does your own server) and an Authorization header. That header
 // carries the user's API key, so it and every method that writes are only ever forwarded to
@@ -31,7 +35,7 @@ export default {
     const cors = {
       'Access-Control-Allow-Origin': origin,
       'Access-Control-Allow-Methods': 'GET, HEAD, POST, PUT, DELETE, OPTIONS',
-      'Access-Control-Allow-Headers': 'Range, Accept, Authorization, Content-Type, If-None-Match, If-Modified-Since',
+      'Access-Control-Allow-Headers': ALLOW_REQUEST_HEADERS,
       'Access-Control-Expose-Headers': PASS_RESPONSE_HEADERS.join(', '),
       'Access-Control-Max-Age': '86400',
     };

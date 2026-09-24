@@ -23,15 +23,79 @@ on:
       - "icons/**"
       - "vendor/**"
       - ".github/workflows/image.yml"
+  # The smoke test below, on a change to the image; only main publishes (a push to it, or a run
+  # started by hand on it): a run started on another branch must not put that branch on :latest.
+  pull_request:
+    paths:
+      - "server/**"
+      - "index.html"
+      - "app.js"
+      - "saver.js"
+      - "sw.js"
+      - "styles.css"
+      - "manifest.webmanifest"
+      - "icon.svg"
+      - "icons/**"
+      - "vendor/**"
+      - ".github/workflows/image.yml"
   workflow_dispatch:
 
 permissions:
   contents: read
-  packages: write
 
 jobs:
-  publish:
+  # The image has to start where it is deployed, not only under `docker compose`. Fly and
+  # Render mount their disk over /data owned by root, hiding the directory the image made
+  # for its user; a tmpfs mounted there is the same thing. The server must come up on it,
+  # write its list of transfers there, and run as that user rather than as root.
+  smoke:
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: server/Dockerfile
+          load: true
+          tags: phone-torrent:smoke
+          cache-from: type=gha
+      - name: Start it on a root-owned /data, as Fly and Render do
+        run: |
+          docker run -d --name smoke --tmpfs /data:mode=0755 -p 8080:8080 phone-torrent:smoke
+          up=
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/api/health; then up=1; break; fi
+            [ "$(docker inspect -f '{{.State.Running}}' smoke)" = true ] || break
+            sleep 1
+          done
+          docker logs smoke
+          [ -n "$up" ] || { echo "::error::the server did not start on a root-owned /data"; exit 1; }
+          curl -fsS -H 'Content-Type: application/json' -d '{"magnet":"0123456789abcdef0123456789abcdef01234567"}' http://127.0.0.1:8080/api/transfers
+          docker exec smoke test -s /data/downloads/transfers.json
+          [ "$(docker exec smoke stat -c %u /proc/1)" = 10001 ] || { echo "::error::the server runs as root"; exit 1; }
+      # A folder of the host mounted as the downloads is someone's data. The image must not give
+      # it to its own user: the server says it cannot write there, and the owners stay as they were.
+      - name: Leave a folder of the host mounted there as it is
+        run: |
+          mkdir -p host-media && echo keep > host-media/film.mkv
+          before=$(stat -c %u:%g host-media host-media/film.mkv)
+          docker run -d --name bound -v "$PWD/host-media:/data/downloads" phone-torrent:smoke
+          timeout 30 docker wait bound || true
+          docker logs bound > bound.log 2>&1 || true
+          cat bound.log
+          docker rm -f bound
+          [ "$(stat -c %u:%g host-media host-media/film.mkv)" = "$before" ] || { echo "::error::the image changed the owner of a folder of the host"; exit 1; }
+          grep -q 'cannot write downloads' bound.log || { echo "::error::and did not say why it cannot write there"; exit 1; }
+
+  publish:
+    needs: smoke
+    # A pull request's ref is refs/pull/<n>/merge, so this rules it out as well.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-qemu-action@v3

@@ -1,6 +1,7 @@
 // Tiny static file server for local development and tests.
-// Usage: node test/serve.mjs [port]
+// Usage: node test/serve.mjs [port]; HOST=0.0.0.0 to reach it from a phone on the same network.
 import http from 'node:http';
+import os from 'node:os';
 import { createReadStream, statSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -22,7 +23,17 @@ const TYPES = {
   '.woff2': 'font/woff2',
 };
 
-export function startServer(port = 0) {
+/**
+ * On loopback only this machine asks, and the tests fetch their scratch files from test/.tmp. Bound
+ * to any other address it serves the app to the network, and nothing else of the checkout: the files
+ * the page loads (the ones server/Dockerfile copies), by name. Anything else can be private, and a
+ * list of what to keep out misses what it did not think of — downloads/, where the server keeps
+ * every file it fetched and its list of transfers when it runs from the checkout, was one.
+ */
+const THE_APP = /^(index\.html|app\.js|saver\.js|sw\.js|styles\.css|manifest\.webmanifest|icon\.svg|(icons|vendor)\/[^/.][^/]*)$/;
+
+export function startServer(port = 0, host = '127.0.0.1') {
+  const loopback = host === '127.0.0.1' || host === 'localhost' || host === '::1';
   const server = http.createServer((req, res) => {
     const reqUrl = new URL(req.url, 'http://localhost');
     if (reqUrl.pathname === '/__doh') {
@@ -34,11 +45,16 @@ export function startServer(port = 0) {
       res.writeHead(200, { 'Content-Type': 'application/dns-json', 'Cache-Control': 'no-store' }).end(JSON.stringify(body));
       return;
     }
-    let pathname = decodeURIComponent(reqUrl.pathname);
+    let pathname;
+    try { pathname = decodeURIComponent(reqUrl.pathname); } catch { res.writeHead(400).end(); return; }
     if (pathname.endsWith('/')) pathname += 'index.html';
     const file = path.join(ROOT, path.normalize(pathname));
     if (!file.startsWith(ROOT)) {
       res.writeHead(403).end();
+      return;
+    }
+    if (!loopback && !THE_APP.test(path.relative(ROOT, file).split(path.sep).join('/'))) {
+      res.writeHead(404, { 'Content-Type': 'text/plain' }).end('Not found');
       return;
     }
     let stat;
@@ -55,14 +71,21 @@ export function startServer(port = 0) {
     createReadStream(file).pipe(res);
   });
   return new Promise((resolve) => {
-    server.listen(port, '127.0.0.1', () => {
+    server.listen(port, host, () => {
       const { port: actual } = server.address();
-      resolve({ server, port: actual, url: `http://127.0.0.1:${actual}/` });
+      const at = ['0.0.0.0', '::', 'localhost'].includes(host) ? '127.0.0.1' : host.includes(':') ? `[${host}]` : host;
+      resolve({ server, port: actual, url: `http://${at}:${actual}/` });
     });
   });
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const { url } = await startServer(Number(process.argv[2]) || 8080);
+  const host = process.env.HOST || '127.0.0.1';
+  const { url, port } = await startServer(Number(process.argv[2]) || 8080, host);
   console.log(`Phone Torrent served at ${url}`);
+  if (host === '127.0.0.1') console.log('Only this machine can open it; HOST=0.0.0.0 npm start lets a phone on the same network in.');
+  else {
+    const lan = Object.values(os.networkInterfaces()).flat().filter((a) => a && a.family === 'IPv4' && !a.internal && ['0.0.0.0', '::', a.address].includes(host));
+    for (const a of lan) console.log(`On the network: http://${a.address}:${port}/ (not a secure page there: the Cloud tab works, in-browser torrents need HTTPS or localhost)`);
+  }
 }

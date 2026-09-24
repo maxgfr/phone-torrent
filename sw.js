@@ -144,8 +144,11 @@ async function receiveShare(request, scope) {
         new Response(file, { headers: { 'X-Name': encodeURIComponent(file.name), 'X-Kind': 'torrent' } }),
       );
     }
-    const text = [form.get('url'), form.get('text'), form.get('title')].filter((v) => typeof v === 'string').join('\n');
-    if (/magnet:\?|\b[a-f0-9]{40}\b/i.test(text)) {
+    // All the text is kept, and the page decides what it is — a magnet, an info hash, a link to a
+    // .torrent — or says it found nothing. Kept only when it looked like a magnet, a shared .torrent
+    // link was dropped here, and the app opened on nothing, with not a word.
+    const text = [form.get('url'), form.get('text'), form.get('title')].filter((v) => typeof v === 'string' && v.trim()).join('\n');
+    if (text) {
       await cache.put(`${scope}inbox/${stamp}-${i++}`, new Response(text, { headers: { 'X-Kind': 'text' } }));
     }
   } catch (err) {

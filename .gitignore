@@ -1,2 +1,4 @@
 node_modules/
 test/.tmp/
+# What the server writes when it runs from the checkout (its default DOWNLOAD_DIR).
+downloads/

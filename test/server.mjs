@@ -4,19 +4,24 @@
  * asked for it through its HTTP API, exactly as the app asks; and the file is
  * pulled back out of the API — with a Range request, because that is how a
  * <video> seeks and how a phone resumes — and compared byte for byte.
+ *
+ * Then the two Workers that deploy beside it, cloudflare/ and proxy/, called
+ * here as plain modules: no Cloudflare account involved.
  */
 import assert from 'node:assert/strict';
 import { createHash, createHmac, randomBytes } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { register } from 'node:module';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import http from 'node:http';
 import net from 'node:net';
 import dgram from 'node:dgram';
 import WebTorrent from 'webtorrent';
 import { Server as TrackerServer } from 'bittorrent-tracker';
+import proxyWorker from '../proxy/cloudflare-worker.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const TOKEN = 'test-server-token';
@@ -134,19 +139,40 @@ async function stopServer() {
   await Promise.race([exited, new Promise((r) => setTimeout(r, 5000))]);
 }
 
-/** A request exactly as written: fetch() would tidy up a path like `//` before sending it. */
-function rawGet(pathname) {
+/**
+ * A request exactly as written: fetch() would tidy up a path like `//` before sending it, and
+ * sends no Host but the one in the URL.
+ */
+function raw(pathname, { method = 'GET', headers = {}, body } = {}) {
   const { port } = new URL(serverUrl);
   return new Promise((resolve, reject) => {
-    http.get({ host: '127.0.0.1', port, path: pathname }, (res) => {
+    const req = http.request({ host: '127.0.0.1', port, path: pathname, method, headers }, (res) => {
       res.resume();
       res.on('end', () => resolve(res.statusCode));
-    }).on('error', reject);
+    });
+    req.on('error', reject);
+    req.end(body);
   });
 }
 
 let failed = false;
 try {
+  // A download directory the server cannot write to (a disk mounted over it that belongs to
+  // someone else) is reported at start, by the setting's name, not left for the first
+  // download to find out. One inside a file cannot be made by anyone, root included.
+  const unwritable = path.join(seedFile, 'downloads');
+  const refused = spawn(process.execPath, [path.join(HERE, '..', 'server', 'app.mjs')], {
+    env: { ...process.env, PORT: '0', DOWNLOAD_DIR: unwritable, TORRENT_PORT: String(torrentPort), DHT_PORT: String(dhtPort) },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let refusal = '';
+  refused.stdout.on('data', (d) => { refusal += d; });
+  refused.stderr.on('data', (d) => { refusal += d; });
+  const refusedCode = await new Promise((resolve) => refused.once('exit', resolve));
+  assert.equal(refusedCode, 1, 'a server that cannot write its downloads does not start');
+  assert.ok(refusal.includes(`DOWNLOAD_DIR ${unwritable}`), `and says which setting to fix: ${refusal.trim().split('\n')[0]}`);
+  log('an unwritable download directory is named at start');
+
   await startServer();
   const api = (path, init = {}) => fetch(`${serverUrl}${path}`, {
     ...init,
@@ -164,8 +190,8 @@ try {
   log('BitTorrent listens on the configured port', torrentPort);
 
   // A request the server cannot parse is refused, and the server is still there after it.
-  assert.equal(await rawGet('/%'), 400, 'a malformed escape is a bad request');
-  assert.equal(await rawGet('//'), 400, 'so is a path that is not a URL');
+  assert.equal(await raw('/%'), 400, 'a malformed escape is a bad request');
+  assert.equal(await raw('//'), 400, 'so is a path that is not a URL');
   assert.equal((await fetch(`${serverUrl}/api/health`)).status, 200, 'and the server survived both');
   log('malformed requests are refused without taking the server down');
 
@@ -182,6 +208,7 @@ try {
 
   // Submit exactly as the app does: a magnet, as JSON.
   const magnet = `magnet:?xt=urn:btih:${seeded.infoHash}&tr=${encodeURIComponent(trackerUrl)}`;
+  const submittedAt = Date.now();
   const created = await api('/api/transfers', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -235,7 +262,28 @@ try {
   assert.equal(crossSite.headers.get('access-control-allow-origin'), null, 'no CORS for an origin nobody named');
   const plain = await api('/api/transfers', { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: 'd8:announce0:e' });
   assert.equal(plain.status, 415, 'a text/plain body is not a torrent');
-  log('same-origin by default; a simple cross-site POST adds nothing');
+  // A browser decides whether to ask first from the type alone, before any ";": these go out
+  // unasked from any page, so a parameter that mentions JSON does not make them JSON.
+  for (const [type, body] of [
+    ['text/plain; charset=application/json', JSON.stringify({ magnet })],
+    ['application/x-www-form-urlencoded; a=application/json', JSON.stringify({ magnet })],
+    ['text/plain; x=application/x-bittorrent', seeded.torrentFile],
+  ]) {
+    const disguised = await api('/api/transfers', { method: 'POST', headers: { 'Content-Type': type }, body });
+    assert.equal(disguised.status, 415, `"${type}" is not a torrent`);
+  }
+  const withCharset = await api('/api/transfers', { method: 'POST', headers: { 'Content-Type': 'application/json; charset=utf-8' }, body: JSON.stringify({ magnet }) });
+  assert.equal(withCharset.status, 200, 'real JSON with a charset still is');
+  // And a write another website sends is refused outright, whatever it carries: the browser
+  // says where it comes from. The server's own page, and a script, are not other websites.
+  const fromElsewhere = { Origin: 'https://elsewhere.example', 'Sec-Fetch-Site': 'cross-site' };
+  const foreignPost = await api('/api/transfers', { method: 'POST', headers: { ...fromElsewhere, 'Content-Type': 'application/json' }, body: JSON.stringify({ magnet }) });
+  assert.equal(foreignPost.status, 403, 'a POST from another website is refused');
+  assert.equal((await api(`/api/transfers/${seeded.infoHash}`, { method: 'DELETE', headers: fromElsewhere })).status, 403, 'so is a DELETE');
+  assert.equal((await api(`/api/transfers/${seeded.infoHash}`)).status, 200, 'and the transfer is still there');
+  const ownPage = await api('/api/transfers', { method: 'POST', headers: { Origin: serverUrl, 'Sec-Fetch-Site': 'same-origin', 'Content-Type': 'application/json' }, body: JSON.stringify({ magnet }) });
+  assert.equal(ownPage.status, 200, 'the page this server serves is not another website');
+  log('same-origin by default; a simple cross-site POST adds nothing, disguised or not');
 
   const ready = await waitFor(async () => {
     const { transfer: t } = await (await api(`/api/transfers/${seeded.infoHash}`)).json();
@@ -244,6 +292,8 @@ try {
   assert.equal(ready.files.length, 1);
   assert.equal(ready.files[0].name, 'release.bin');
   assert.equal(ready.files[0].size, payload.length);
+  // When data last arrived: what keeps a Cloudflare container up with the phone asleep.
+  assert.ok(ready.receivedAt >= submittedAt && ready.receivedAt <= Date.now(), `the transfer says when data last arrived (${ready.receivedAt})`);
   log('downloaded from a real peer:', ready.name, ready.state);
 
   // The whole file, then a range out of the middle — a <video> seek, and a resumed download.
@@ -314,8 +364,112 @@ try {
   rmSync(clashDir, { recursive: true, force: true });
   log('a torrent that would overwrite the list of transfers is refused');
 
+  // A season pack whose first episode is complete and whose second is not: the first is
+  // listed, with its link, while the pack as a whole is still downloading. It is set up with
+  // no peer at all — the episode already on the server's disk, the rest nowhere — so nothing
+  // can finish it while it is looked at. Pieces never straddle the two files.
+  const packDir = path.join(tmp, 'Pack');
+  mkdirSync(path.join(packDir, 'extras'), { recursive: true });
+  const episode = randomBytes(64 * 1024);
+  writeFileSync(path.join(packDir, 'a-episode1.bin'), episode);
+  writeFileSync(path.join(packDir, 'extras', 'b-episode2.bin'), randomBytes(64 * 1024));
+  const pack = await new Promise((resolve) => {
+    seeder.seed(packDir, { announce: [trackerUrl], pieceLength: 16 * 1024 }, resolve);
+  });
+  const packTorrent = pack.torrentFile;
+  await new Promise((resolve) => seeder.remove(pack.infoHash, { destroyStore: false }, resolve));
+  mkdirSync(path.join(downloads, 'Pack'), { recursive: true });
+  writeFileSync(path.join(downloads, 'Pack', 'a-episode1.bin'), episode);
+  const packSubmit = await api('/api/transfers', { method: 'POST', headers: { 'Content-Type': 'application/x-bittorrent' }, body: packTorrent });
+  assert.equal(packSubmit.status, 201);
+  const partial = await waitFor(async () => {
+    const { transfer: t } = await (await api(`/api/transfers/${pack.infoHash}`)).json();
+    return t && t.files.length ? t : false;
+  }, { label: 'the finished episode to be listed', timeout: 15000 });
+  assert.equal(partial.ready, false, 'the pack is not finished');
+  assert.deepEqual(partial.files.map((f) => f.name), ['a-episode1.bin'], 'only the finished file is listed');
+  const episodeLink = partial.files[0].link;
+  assert.ok(episodeLink && !episodeLink.includes(TOKEN), 'with a signed link');
+  assert.equal(sha(Buffer.from(await (await fetch(`${serverUrl}${episodeLink}`)).arrayBuffer())), sha(episode), 'which serves it');
+  log('a finished file is listed, with its link, while the rest of its torrent downloads');
+
+  // Deleting a transfer takes its folders with it, not only the files inside them.
+  assert.equal((await api(`/api/transfers/${pack.infoHash}`, { method: 'DELETE' })).status, 200);
+  await waitFor(() => !existsSync(path.join(downloads, 'Pack')), { label: 'the pack\'s folder to go', timeout: 5000 });
+  log('delete leaves no empty folders behind');
+
+  // And only what the transfer wrote. A magnet is called by its dn= until the metadata comes, and a
+  // .torrent by whatever name it gives itself: a folder of that name that it never wrote to — the
+  // user's own, another transfer's — stays, all of it.
+  mkdirSync(path.join(downloads, 'Photos'), { recursive: true });
+  writeFileSync(path.join(downloads, 'Photos', 'holiday.jpg'), 'not a download');
+  const inPlace = () => ({ photos: existsSync(path.join(downloads, 'Photos', 'holiday.jpg')), release: existsSync(path.join(downloads, 'release.bin')) });
+  for (const dn of ['Photos', './Photos', 'x/../Photos', './release.bin']) {
+    const id = randomBytes(20).toString('hex');
+    const sent = await api('/api/transfers', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ magnet: `magnet:?xt=urn:btih:${id}&dn=${encodeURIComponent(dn)}` }) });
+    assert.equal(sent.status, 201);
+    assert.equal((await api(`/api/transfers/${id}`, { method: 'DELETE' })).status, 200);
+    assert.deepEqual(inPlace(), { photos: true, release: true }, `a magnet called "${dn}", deleted before its metadata came, deletes nothing`);
+  }
+  const photosDir = path.join(tmp, 'elsewhere', 'Photos');
+  mkdirSync(photosDir, { recursive: true });
+  writeFileSync(path.join(photosDir, 'a.txt'), randomBytes(1024));
+  const namesake = await new Promise((resolve) => {
+    seeder.seed(photosDir, { announce: [trackerUrl] }, resolve);
+  });
+  await new Promise((resolve) => seeder.remove(namesake.infoHash, { destroyStore: false }, resolve));
+  assert.equal((await api('/api/transfers', { method: 'POST', headers: { 'Content-Type': 'application/x-bittorrent' }, body: namesake.torrentFile })).status, 201);
+  assert.equal((await api(`/api/transfers/${namesake.infoHash}`, { method: 'DELETE' })).status, 200);
+  assert.deepEqual(inPlace(), { photos: true, release: true }, 'nor does a .torrent called "Photos" that brings files of its own');
+  rmSync(path.join(downloads, 'Photos'), { recursive: true, force: true });
+  log('delete takes what the transfer wrote, not a folder that has its name');
+
+  // A transfer that fails — a full disk, a write the disk refuses — stays listed with the
+  // reason until it is deleted, rather than vanishing: the phone says why. A folder where its
+  // second file must go makes every write to that file fail.
+  const blockedDir = path.join(mkdtempSync(path.join(tmpdir(), 'phone-torrent-blocked-')), 'Blocked');
+  mkdirSync(blockedDir);
+  const alreadyThere = randomBytes(64 * 1024);
+  writeFileSync(path.join(blockedDir, 'a-written.bin'), alreadyThere);
+  writeFileSync(path.join(blockedDir, 'b-blocked.bin'), randomBytes(64 * 1024));
+  const blocked = await new Promise((resolve) => {
+    seeder.seed(blockedDir, { announce: [trackerUrl], pieceLength: 16 * 1024 }, resolve);
+  });
+  const inTheWay = path.join(downloads, 'Blocked', 'b-blocked.bin');
+  mkdirSync(inTheWay, { recursive: true });
+  writeFileSync(path.join(inTheWay, 'keep.txt'), 'not the transfer\'s');
+  // Its first file is on the disk already, whole, as the pack's first episode was above: the
+  // transfer checks it and takes it as its own.
+  writeFileSync(path.join(downloads, 'Blocked', 'a-written.bin'), alreadyThere);
+  const blockedSubmit = await api('/api/transfers', { method: 'POST', headers: { 'Content-Type': 'application/x-bittorrent' }, body: blocked.torrentFile });
+  assert.equal(blockedSubmit.status, 201);
+  const failedTransfer = await waitFor(async () => {
+    const res = await api(`/api/transfers/${blocked.infoHash}`);
+    if (res.status === 404) return 'gone';
+    const { transfer: t } = await res.json();
+    return t.failed ? t : false;
+  }, { label: 'the blocked transfer to fail', timeout: 30000 });
+  assert.notEqual(failedTransfer, 'gone', 'a transfer that failed is still there to say why');
+  assert.equal(failedTransfer.ready, false);
+  assert.match(failedTransfer.state, /EISDIR/, 'and why is its state');
+  assert.ok(!failedTransfer.state.includes(downloads), 'without the server\'s own paths');
+  const listedFailure = (await (await api('/api/transfers')).json()).transfers.find((t) => t.id === blocked.infoHash);
+  assert.ok(listedFailure && listedFailure.failed, 'the library lists it as failed');
+  // What it wrote goes with it, and only that: the folder in its way is not its own.
+  await waitFor(() => !existsSync(path.join(downloads, 'Blocked', 'a-written.bin')), { label: 'the files of the failed transfer to go', timeout: 5000 });
+  assert.ok(existsSync(path.join(inTheWay, 'keep.txt')), 'a failed transfer leaves what it did not write');
+  assert.equal((await api(`/api/transfers/${blocked.infoHash}`, { method: 'DELETE' })).status, 200, 'deleting it clears it');
+  assert.equal((await api(`/api/transfers/${blocked.infoHash}`)).status, 404, 'for good');
+  await new Promise((resolve) => seeder.remove(blocked.infoHash, { destroyStore: false }, resolve));
+  rmSync(path.dirname(blockedDir), { recursive: true, force: true });
+  rmSync(path.join(downloads, 'Blocked'), { recursive: true, force: true });
+  log('a failed transfer stays listed with its reason until it is deleted, and takes only its own files');
+
   // A restart picks every transfer up again, handlers and all: with SEED_AFTER_DONE=0 a
-  // resumed download that is complete stops seeding, as a fresh one does.
+  // resumed download that is complete stops seeding, as a fresh one does. The only seeder
+  // leaves first: the transfer was sent as a magnet, and what is on the server's disk must be
+  // enough to bring it back, with no peer to hand over the metadata again.
+  await new Promise((resolve) => seeder.remove(seeded.infoHash, { destroyStore: false }, resolve));
   await stopServer();
   await startServer({ SEED_AFTER_DONE: '0' });
   const resumed = await waitFor(async () => {
@@ -337,7 +491,177 @@ try {
   assert.equal((await api(`/api/transfers/${seeded.infoHash}`, { method: 'DELETE' })).status, 200);
   const { transfers } = await (await api('/api/transfers')).json();
   assert.equal(transfers.length, 0, 'deleted from the server');
+  await waitFor(() => !existsSync(path.join(downloads, 'release.bin')), { label: 'the deleted file to go', timeout: 5000 });
   log('delete OK');
+
+  // Saves that overlap — a delete and an add at the same moment — each leave a whole list,
+  // and the last one the current list: never two lists spliced into a file the next start
+  // cannot read.
+  const statePath = path.join(downloads, 'transfers.json');
+  const savedIds = (when) => {
+    try {
+      return JSON.parse(readFileSync(statePath, 'utf8')).map((row) => row.id).sort();
+    } catch (err) {
+      return assert.fail(`${when}: transfers.json no longer reads: ${err.message}`);
+    }
+  };
+  let kept = [];
+  for (let round = 0; round < 20; round++) {
+    const adds = Array.from({ length: 10 }, (_, i) => api('/api/transfers', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      // Names of every length, so that one list is longer than the next.
+      body: JSON.stringify({ magnet: `magnet:?xt=urn:btih:${randomBytes(20).toString('hex')}&dn=${'x'.repeat((round * 37 + i * 61) % 400)}` }),
+    }).then((res) => res.json()).then((body) => body.transfer.id));
+    const deletes = kept.map((id) => api(`/api/transfers/${id}`, { method: 'DELETE' }));
+    [kept] = await Promise.all([Promise.all(adds), Promise.all(deletes)]);
+    const current = (await (await api('/api/transfers')).json()).transfers.map((t) => t.id).sort();
+    assert.deepEqual(savedIds(`round ${round}`), current, `round ${round}: transfers.json is the current list`);
+  }
+  await Promise.all(kept.map((id) => api(`/api/transfers/${id}`, { method: 'DELETE' })));
+  assert.deepEqual(savedIds('after the last deletes'), [], 'and ends as the empty list it is');
+  log('overlapping saves leave a whole, current list of transfers');
+
+  // Now with no token, which is how `docker compose up` starts. It runs from a web root of its
+  // own here, with the downloads inside it.
+  await stopServer();
+  const web = path.join(tmp, 'web');
+  const webDownloads = path.join(web, 'downloads');
+  mkdirSync(path.join(webDownloads, 'Some.Movie'), { recursive: true });
+  writeFileSync(path.join(web, 'index.html'), '<!doctype html><title>Phone Torrent</title>');
+  writeFileSync(path.join(webDownloads, 'Some.Movie', 'movie.mkv'), 'private bytes');
+  // A list of transfers that does not read — a crash mid-write, a full disk — is not a first
+  // run: it is kept aside, and said so, rather than written over with an empty list.
+  writeFileSync(path.join(webDownloads, 'transfers.json'), '[{"id":');
+  // The hosted app's origin written as the address of its page, the way it gets pasted.
+  const tokenless = { AUTH_TOKEN: '', WEB_DIR: web, DOWNLOAD_DIR: webDownloads, ALLOWED_HOSTS: 'nas.local', ALLOWED_ORIGINS: 'https://hosted.example/phone-torrent/' };
+  await startServer(tokenless);
+  const aside = readdirSync(webDownloads).find((name) => name.startsWith('transfers.json.corrupt-'));
+  assert.ok(aside, 'an unreadable transfers.json is kept aside');
+  assert.equal(readFileSync(path.join(webDownloads, aside), 'utf8'), '[{"id":', 'exactly as it was');
+  assert.match(serverLog, /transfers\.json could not be read/, 'and the log says so');
+  log('an unreadable list of transfers is kept aside, not written over');
+
+  // With no token, what keeps other websites out is the browser's same-origin rule, and a page
+  // can step around it by pointing its own domain name at this machine (DNS rebinding): its
+  // requests are then same-origin, and carry that name as their Host. Such a server answers
+  // only to localhost, an IP address, and the names in ALLOWED_HOSTS.
+  const port = new URL(serverUrl).port;
+  const planted = randomBytes(20).toString('hex');
+  const plant = JSON.stringify({ magnet: `magnet:?xt=urn:btih:${planted}` });
+  const rebound = { Host: `rebind.example:${port}`, Origin: `http://rebind.example:${port}` };
+  assert.equal(await raw('/api/transfers', { method: 'POST', headers: { ...rebound, 'Content-Type': 'application/json' }, body: plant }), 403, 'a rebound page adds nothing');
+  assert.equal(await raw('/api/transfers', { headers: rebound }), 403, 'lists nothing');
+  assert.equal(await raw('/api/transfers', { method: 'POST', headers: { Host: `localhost:${port}`, 'Content-Type': 'application/json' }, body: plant }), 201, 'while localhost is answered');
+  assert.equal(await raw(`/api/transfers/${planted}`, { method: 'DELETE', headers: rebound }), 403, 'and a rebound page deletes nothing');
+  for (const host of [`127.0.0.1:${port}`, `[::1]:${port}`, `app.localhost:${port}`, `nas.local:${port}`]) {
+    assert.equal(await raw('/api/transfers', { headers: { Host: host } }), 200, `${host} is answered`);
+  }
+  // A site named in ALLOWED_ORIGINS is another website that may write. It was named by the
+  // address of its page, path and all; a browser sends only the origin, and that matches.
+  const hostedPreflight = await fetch(`${serverUrl}/api/transfers`, { method: 'OPTIONS', headers: { Origin: 'https://hosted.example', 'Access-Control-Request-Method': 'POST' } });
+  assert.equal(hostedPreflight.headers.get('access-control-allow-origin'), 'https://hosted.example', 'an origin given as a page address is the origin');
+  assert.match(serverLog, /hosted\.example(?!\/)/, 'and the log says which origins it took');
+  const hosted = await fetch(`${serverUrl}/api/transfers/${planted}`, { method: 'DELETE', headers: { Origin: 'https://hosted.example', 'Sec-Fetch-Site': 'cross-site' } });
+  assert.equal(hosted.status, 200, 'the site named in ALLOWED_ORIGINS may delete');
+  log('with no token, only localhost, an IP address or ALLOWED_HOSTS is answered');
+
+  // A second name for the downloads folder does not make its files static ones: a link here,
+  // and on macOS or Windows, whose disks ignore case, "Downloads" is one already.
+  if (!existsSync(path.join(web, 'DOWNLOADS'))) symlinkSync('downloads', path.join(web, 'Downloads'));
+  assert.equal((await fetch(`${serverUrl}/index.html`)).status, 200, 'the web root is served');
+  assert.equal((await fetch(`${serverUrl}/downloads/Some.Movie/movie.mkv`)).status, 404, 'its downloads are not');
+  assert.equal((await fetch(`${serverUrl}/Downloads/Some.Movie/movie.mkv`)).status, 404, 'under another name either');
+  assert.equal((await fetch(`${serverUrl}/Downloads/transfers.json`)).status, 404, 'nor is the list of transfers');
+  log('the downloads are not static files under any other name');
+
+  // A transfer an older server saved as a bare magnet, whose metadata never came back: it
+  // keeps its name, and deleting it still takes its file. A folder of that name could hold
+  // anything, and without the metadata nothing says which of it is the transfer's: it stays.
+  await stopServer();
+  const orphan = randomBytes(20).toString('hex');
+  const orphanFolder = randomBytes(20).toString('hex');
+  writeFileSync(path.join(webDownloads, 'transfers.json'), JSON.stringify([
+    { id: orphan, source: `magnet:?xt=urn:btih:${orphan}`, addedAt: Date.now(), name: 'orphan.bin' },
+    { id: orphanFolder, source: `magnet:?xt=urn:btih:${orphanFolder}`, addedAt: Date.now(), name: 'Some.Movie' },
+  ]));
+  writeFileSync(path.join(webDownloads, 'orphan.bin'), randomBytes(1024));
+  await startServer(tokenless);
+  const { transfer: stuck } = await (await fetch(`${serverUrl}/api/transfers/${orphan}`)).json();
+  assert.equal(stuck.name, 'orphan.bin', 'a transfer with no metadata keeps its name');
+  assert.equal((await fetch(`${serverUrl}/api/transfers/${orphan}`, { method: 'DELETE' })).status, 200);
+  assert.ok(!existsSync(path.join(webDownloads, 'orphan.bin')), 'and deleting it takes its file');
+  assert.equal((await fetch(`${serverUrl}/api/transfers/${orphanFolder}`, { method: 'DELETE' })).status, 200);
+  assert.ok(existsSync(path.join(webDownloads, 'Some.Movie', 'movie.mkv')), 'but not a folder of its name');
+  log('a transfer with no metadata keeps its name, and its file goes with it; a folder does not');
+
+  // The Cloudflare Worker, as a plain module. What it imports, @cloudflare/containers, is not
+  // installed here, so a stand-in takes its place with the little the Worker touches: the
+  // Worker's own code is what runs.
+  const stubDir = path.join(tmp, 'containers-stub');
+  mkdirSync(stubDir);
+  writeFileSync(path.join(stubDir, 'containers.mjs'), [
+    'export class Container { constructor(ctx, env) { this.ctx = ctx; this.env = env; this.container = ctx.container; } }',
+    'export const getContainer = (binding) => binding.get(binding.idFromName("singleton"));',
+  ].join('\n'));
+  writeFileSync(path.join(stubDir, 'hooks.mjs'), `export async function resolve(specifier, context, next) {
+    return specifier === '@cloudflare/containers' ? { url: ${JSON.stringify(pathToFileURL(path.join(stubDir, 'containers.mjs')).href)}, shortCircuit: true } : next(specifier, context);
+  }`);
+  register(pathToFileURL(path.join(stubDir, 'hooks.mjs')));
+  const { default: cfWorker, TorrentContainer } = await import('../cloudflare/worker.js');
+
+  // Deployed with no AUTH_TOKEN, the container would be a torrent client anyone on the
+  // internet can drive, and every website too. The Worker does not start it.
+  let started = 0;
+  const TORRENT = { idFromName: (name) => name, get: () => ({ fetch: async () => { started++; return new Response('the container'); } }) };
+  for (const env of [{ TORRENT }, { TORRENT, AUTH_TOKEN: '  ' }]) {
+    const res = await cfWorker.fetch(new Request('https://phone-torrent.example.workers.dev/api/transfers'), env);
+    assert.equal(res.status, 503, `the Cloudflare Worker refuses with ${JSON.stringify(env.AUTH_TOKEN)} as the token`);
+    assert.match((await res.json()).error, /wrangler secret put AUTH_TOKEN/, 'and says how to set one');
+  }
+  assert.equal(started, 0, 'without ever starting the container');
+  const forwarded = await cfWorker.fetch(new Request('https://phone-torrent.example.workers.dev/'), { TORRENT, AUTH_TOKEN: 'k' });
+  assert.equal(await forwarded.text(), 'the container', 'with a token, every request goes to the container');
+  log('the Cloudflare Worker will not run the server without a token');
+
+  // Half an hour after the last request, the library stops the container, and its disk goes
+  // with it. A download's own traffic is not a request, so the server is asked first.
+  const minute = 60 * 1000;
+  async function expire(answer, { running = true } = {}) {
+    const box = new TorrentContainer({ container: { running } }, { AUTH_TOKEN: 'k' });
+    const seen = { stopped: false, asked: [] };
+    box.containerFetch = async (req) => {
+      seen.asked.push(`${new URL(req.url).pathname} ${req.headers.get('authorization')}`);
+      if (answer instanceof Error) throw answer;
+      return Response.json({ transfers: answer });
+    };
+    box.stop = async () => { seen.stopped = true; };
+    await box.onActivityExpired();
+    return seen;
+  }
+  const downloading = await expire([{ id: 'a', ready: false, progress: 0.4, receivedAt: Date.now() - 5 * minute }]);
+  assert.equal(downloading.stopped, false, 'a download that got data in the last half hour keeps the container up');
+  assert.deepEqual(downloading.asked, ['/api/transfers Bearer k'], 'the server is asked for its transfers, with the token');
+  assert.equal((await expire([{ id: 'a', ready: true, progress: 1, receivedAt: Date.now() - 10 * minute }])).stopped, false, 'so does one that finished less than half an hour ago');
+  assert.equal((await expire([{ id: 'a', ready: false, progress: 0.4, receivedAt: Date.now() - 31 * minute }, { id: 'b', ready: false, progress: 0 }])).stopped, true, 'torrents that got nothing for half an hour do not');
+  assert.equal((await expire([{ id: 'a', ready: true, progress: 1, receivedAt: Date.now() - 40 * minute }])).stopped, true, 'nor do files finished long ago');
+  assert.equal((await expire([])).stopped, true, 'nor does nothing at all');
+  assert.equal((await expire(new Error('no answer'))).stopped, true, 'a server that does not answer is stopped');
+  assert.deepEqual((await expire([], { running: false })).asked, [], 'and a stopped container is not started to be asked');
+  log('the Cloudflare container stays up while a download is getting data, and not for ever');
+
+  // The CORS proxy lets through what the app's requests carry. WebTorrent fetches every piece
+  // from a web seed with Cache-Control: no-store, and Firefox asks about the User-Agent it sets.
+  const preflight = await proxyWorker.fetch(new Request('https://proxy.example/?url=https%3A%2F%2Fmirror.example%2Ffile.bin', {
+    method: 'OPTIONS',
+    headers: { Origin: 'https://me.example', 'Access-Control-Request-Method': 'GET', 'Access-Control-Request-Headers': 'cache-control,range,user-agent' },
+  }), { ALLOWED_ORIGINS: 'https://me.example' });
+  assert.equal(preflight.status, 204);
+  const allowedHeaders = (preflight.headers.get('access-control-allow-headers') || '').toLowerCase().split(/\s*,\s*/);
+  for (const header of ['cache-control', 'range', 'user-agent']) {
+    assert.ok(allowedHeaders.includes(header), `the CORS proxy allows ${header}, which a web seed request carries`);
+  }
+  log('the CORS proxy passes the preflight of a web seed request');
 
   console.log('\nServer checks passed.');
 } catch (err) {

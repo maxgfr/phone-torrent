@@ -12,6 +12,7 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
+import net from 'node:net';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -25,7 +26,21 @@ const DOWNLOAD_DIR = path.resolve(process.env.DOWNLOAD_DIR || path.join(HERE, '.
 const WEB_DIR = path.resolve(process.env.WEB_DIR || path.join(HERE, '..'));
 // Unset means same-origin only: the page this server serves needs no CORS at all, and
 // any other site the browser has open gets nothing. Name the origins that may call it.
-const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '').split(',').map((s) => s.trim()).filter(Boolean);
+// A browser sends only the origin, so an entry pasted as the page's address
+// ("https://<user>.github.io/phone-torrent/") is taken as the origin it names. An entry with
+// no origin of its own (a file: address has "null") is kept as written, and matches nothing.
+function asOrigin(entry) {
+  if (entry === '*') return entry;
+  try {
+    const { origin } = new URL(entry);
+    return origin === 'null' ? entry : origin;
+  } catch {
+    return entry;
+  }
+}
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '').split(',').map((s) => s.trim()).filter(Boolean).map(asOrigin);
+// With no token, the names besides localhost and an IP address this server answers to: see trustedHost.
+const ALLOWED_HOSTS = (process.env.ALLOWED_HOSTS || '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
 const SEED_AFTER_DONE = process.env.SEED_AFTER_DONE !== '0';
 const STATE_FILE = path.join(DOWNLOAD_DIR, 'transfers.json');
 // Fixed, so that forwarding them means something: TCP and uTP on the first, the DHT on
@@ -36,7 +51,17 @@ const DHT_PORT = portFrom(process.env.DHT_PORT, 6882);
 // How long a file link the API hands out keeps working without the token.
 const LINK_TTL_MS = 24 * 3600 * 1000;
 
-await fsp.mkdir(DOWNLOAD_DIR, { recursive: true });
+// A disk mounted over the download directory arrives as its platform made it, and one that is
+// not this process's to write would otherwise be found out by a stack trace, or by the first
+// download. Said here instead, with the setting to change.
+try {
+  await fsp.mkdir(DOWNLOAD_DIR, { recursive: true });
+  await fsp.access(DOWNLOAD_DIR, fs.constants.W_OK | fs.constants.X_OK);
+} catch (err) {
+  const who = process.getuid ? ` as uid ${process.getuid()}` : '';
+  console.error(`cannot write downloads to DOWNLOAD_DIR ${DOWNLOAD_DIR}${who} (${err.code || err.message}): give it to that user, or set DOWNLOAD_DIR to a directory it can write`);
+  process.exit(1);
+}
 
 const client = new WebTorrent({ dht: true, torrentPort: TORRENT_PORT, dhtPort: DHT_PORT });
 client.on('error', (err) => console.error('client error:', err.message || err));
@@ -46,21 +71,62 @@ client.on('error', (err) => console.error('client error:', err.message || err));
 /** @type {Map<string, {id: string, source: string, addedAt: number}>} */
 const records = new Map();
 
-async function saveState() {
-  const rows = [...records.values()];
-  await fsp.writeFile(STATE_FILE, JSON.stringify(rows, null, 2)).catch(() => {});
+/**
+ * Transfers that failed, as the API shows them, until someone deletes them (or the server
+ * restarts). A transfer that simply vanished would read as "no such transfer" on the phone,
+ * and a full disk would never be found out from there.
+ */
+const failures = new Map();
+
+/**
+ * When data last arrived for each torrent. A download's traffic with its peers is invisible to
+ * anything that only sees this server's HTTP: this is how the Cloudflare Worker tells a download
+ * that is getting somewhere from one that is not, with nobody watching (cloudflare/worker.js).
+ */
+const receivedAt = new WeakMap();
+
+/**
+ * One save at a time, each written beside the list and renamed over it. Two requests saving at
+ * once would otherwise write into the same file together, and a crash would stop a write
+ * halfway: either leaves a list the next start cannot read. Each save writes the list as it is
+ * when its turn comes, so the last one written is the current one.
+ */
+let saving = Promise.resolve();
+function saveState() {
+  saving = saving.then(async () => {
+    const temp = `${STATE_FILE}.tmp`;
+    try {
+      await fsp.writeFile(temp, JSON.stringify([...records.values()], null, 2));
+      await fsp.rename(temp, STATE_FILE);
+    } catch (err) {
+      // The list as it was stays whole; only the half-written copy goes.
+      console.error(`could not save ${path.basename(STATE_FILE)}: ${err.message}`);
+      await fsp.rm(temp, { force: true }).catch(() => {});
+    }
+  });
+  return saving;
 }
 
 async function loadState() {
+  let rows;
   try {
-    const rows = JSON.parse(await fsp.readFile(STATE_FILE, 'utf8'));
-    for (const row of rows) {
-      records.set(row.id, row);
-      // The bytes are already on disk; WebTorrent verifies them instead of fetching again.
-      track(addToClient(row.source), row.id);
-    }
-    if (rows.length) console.log(`resumed ${rows.length} transfer(s)`);
-  } catch { /* first run */ }
+    rows = JSON.parse(await fsp.readFile(STATE_FILE, 'utf8'));
+    if (!Array.isArray(rows)) throw new Error('it is not a list');
+  } catch (err) {
+    if (err.code === 'ENOENT') return; // first run
+    // Unreadable is not empty: the next save would write an empty list over it, and every
+    // transfer in it would be forgotten for good. Kept aside, it can still be mended.
+    const aside = `${STATE_FILE}.corrupt-${Date.now()}`;
+    await fsp.rename(STATE_FILE, aside).catch(() => {});
+    console.error(`${path.basename(STATE_FILE)} could not be read (${err.message}): kept as ${path.basename(aside)}, starting with no transfers`);
+    return;
+  }
+  for (const row of rows) {
+    records.set(row.id, row);
+    // The bytes are already on disk; WebTorrent verifies them instead of fetching again.
+    track(addToClient(row.source), row.id);
+  }
+  if (rows.length) console.log(`resumed ${rows.length} transfer(s)`);
 }
 
 /** The id WebTorrent takes: a magnet string, or the .torrent bytes a record kept as base64. */
@@ -72,14 +138,20 @@ function addToClient(source) {
   return client.add(torrentId(source), { path: DOWNLOAD_DIR });
 }
 
+/** transfers.json, or one of the files saving it goes through (see saveState and loadState). */
+function isStateName(name) {
+  const own = path.basename(STATE_FILE).toLowerCase();
+  const given = String(name).toLowerCase();
+  return given === own || given.startsWith(`${own}.`);
+}
+
 /**
  * The list of transfers lives in the download directory, so a torrent whose top-level name
  * is that file's would write its bytes over it — and every transfer would be forgotten at
  * the next start. Such a torrent is refused rather than allowed to do that.
  */
 function claimsStateFile(torrent) {
-  const own = path.basename(STATE_FILE).toLowerCase();
-  return torrent.files.some((f) => String(f.path).split(/[\\/]/)[0].toLowerCase() === own);
+  return torrent.files.some((f) => isStateName(String(f.path).split(/[\\/]/)[0]));
 }
 
 async function refuse(torrent, id, why) {
@@ -95,39 +167,60 @@ async function refuse(torrent, id, why) {
  * up again after a restart. Answers false when the torrent was refused on the spot.
  */
 function track(torrent, id) {
-  const guard = () => {
-    if (!claimsStateFile(torrent)) return true;
-    refuse(torrent, id, `it would overwrite ${path.basename(STATE_FILE)}, the server's list of transfers`);
-    return false;
+  // Metadata is when a transfer's name — and so its files on disk — becomes known. A magnet
+  // is kept from then on as the .torrent it amounts to: a restart then checks the files on
+  // disk straight away, where a magnet would first wait for a peer to hand the metadata over
+  // again — and a finished download whose swarm has gone would never get one.
+  const onMetadata = () => {
+    if (claimsStateFile(torrent)) {
+      refuse(torrent, id, `it would overwrite ${path.basename(STATE_FILE)}, the server's list of transfers`);
+      return false;
+    }
+    const record = records.get(id);
+    if (!record) return true;
+    const source = record.source.startsWith('torrent:') ? record.source : `torrent:${Buffer.from(torrent.torrentFile).toString('base64')}`;
+    if (record.name !== torrent.name || record.source !== source) {
+      Object.assign(record, { name: torrent.name, source });
+      saveState();
+    }
+    return true;
   };
   if (torrent.metadata) {
-    if (!guard()) return false;
+    if (!onMetadata()) return false;
   } else {
-    torrent.once('metadata', guard);
+    torrent.once('metadata', onMetadata);
   }
+  torrent.on('download', () => receivedAt.set(torrent, Date.now()));
   torrent.on('done', () => {
     console.log(`done: ${torrent.name}`);
     if (!SEED_AFTER_DONE) torrent.pause();
   });
-  // Metadata is when a transfer's name — and so its files on disk — becomes known.
-  torrent.on('ready', async () => {
-    const record = records.get(id);
-    if (record && record.name !== torrent.name) {
-      record.name = torrent.name;
-      await saveState();
-    }
-  });
   torrent.on('error', async (err) => {
-    console.error(`transfer failed: ${torrent.name || id}: ${err.message || err}`);
     const record = records.get(id);
+    // Now, while the torrent still lists its files: WebTorrent empties the list as it tears it down.
+    const written = writtenBy(torrent, record);
+    console.error(`transfer failed: ${torrent.name || id}: ${err.message || err}`);
+    const reason = err.code === 'ENOSPC' ? 'the server\'s disk is full' : String(err.message || err).replaceAll(DOWNLOAD_DIR + path.sep, '');
+    failures.set(id, {
+      id,
+      name: torrent.name || (record && record.name) || id,
+      size: torrent.length || 0,
+      progress: 0,
+      state: reason,
+      ready: false,
+      failed: true,
+      files: [],
+      addedAt: record ? record.addedAt : undefined,
+    });
     records.delete(id);
-    await saveState();
     // Take the half-written files with it: nothing lists this transfer any more,
-    // so anything it left behind is unreachable rather than resumable.
+    // so anything it left behind is unreachable rather than resumable. Saved after, not
+    // before: on a disk this transfer filled, the list can only be written once they are gone.
     try {
       if (!torrent.destroyed) await new Promise((resolve) => client.remove(torrent, { destroyStore: true }, resolve));
     } catch { /* webtorrent had already torn it down */ }
-    await forgetFiles((record && record.name) || torrent.name);
+    await forgetFiles(written);
+    await saveState();
   });
   return true;
 }
@@ -161,12 +254,47 @@ function signedFor(url, infoHash, index) {
 
 /* ---------- the shape the app reads ---------- */
 
-/** Delete what a transfer wrote, and nothing else: only inside the download directory. */
-async function forgetFiles(name) {
-  if (!name) return;
-  const target = path.resolve(DOWNLOAD_DIR, name);
-  if (!target.startsWith(DOWNLOAD_DIR + path.sep) || target === STATE_FILE) return;
-  await fsp.rm(target, { recursive: true, force: true }).catch(() => {});
+/** Where a file of a torrent is on disk, as its store names it: without the characters no file name may have. */
+function onDisk(file) {
+  const name = [...path.basename(file.path)].filter((c) => c >= ' ' && !'<>:"/\\|?*'.includes(c)).join('');
+  return path.join(path.resolve(DOWNLOAD_DIR, path.dirname(file.path)), name);
+}
+
+/**
+ * What a transfer wrote: its files, and the folders they sit in, deepest first. Known from the
+ * files its metadata lists, which WebTorrent cleans up — never from the torrent's name: a magnet
+ * is called whatever its dn= says until the metadata comes, a .torrent whatever it calls itself,
+ * and a folder picked by that name can be the user's own, or another transfer's. Read before the
+ * torrent is removed, which empties its list of files.
+ *
+ * With no metadata a transfer wrote nothing, but for one an older server kept as a magnet, with the
+ * name it saw in the metadata: a file of that name is that transfer's; a folder of it could hold
+ * anything, and forgetFiles removes no folder that is not empty.
+ */
+function writtenBy(torrent, record) {
+  const files = torrent.files.map(onDisk);
+  if (!files.length && record && record.name && path.basename(record.name) === record.name) files.push(path.join(DOWNLOAD_DIR, record.name));
+  const folders = new Set();
+  for (const file of files) {
+    for (let dir = path.dirname(file); dir.startsWith(DOWNLOAD_DIR + path.sep); dir = path.dirname(dir)) folders.add(dir);
+  }
+  return { files, folders: [...folders].sort((a, b) => b.length - a.length) };
+}
+
+/**
+ * Delete what a transfer wrote, and nothing else: its own files, but not one another transfer
+ * still has, then the folders they were in, once empty. A torrent's own store deletes its files
+ * but leaves their folders, and a transfer that failed is torn down without its store's delete.
+ */
+async function forgetFiles({ files, folders }) {
+  const others = new Set(client.torrents.flatMap((t) => t.files.map(onDisk)));
+  for (const file of files) {
+    if (!file.startsWith(DOWNLOAD_DIR + path.sep) || others.has(file) || (path.dirname(file) === DOWNLOAD_DIR && isStateName(path.basename(file)))) continue;
+    // Not recursive: where a folder stands in a file's place, it is not this transfer's.
+    await fsp.rm(file, { force: true }).catch(() => {});
+  }
+  // A folder that still holds anything — the user's files, another transfer's — is refused by rmdir.
+  for (const folder of folders) await fsp.rmdir(folder).catch(() => {});
 }
 
 function describe(torrent) {
@@ -174,17 +302,18 @@ function describe(torrent) {
   const ready = Boolean(torrent.done);
   return {
     id: torrent.infoHash,
-    name: torrent.name || torrent.infoHash,
+    name: torrent.name || (record && record.name) || torrent.infoHash,
     size: torrent.length || 0,
     progress: Number(torrent.progress) || 0,
     state: torrent.done ? (torrent.paused ? 'completed' : 'seeding') : (torrent.numPeers ? 'downloading' : 'looking for peers'),
     ready,
     peers: torrent.numPeers,
     downloadSpeed: torrent.downloadSpeed,
+    receivedAt: receivedAt.get(torrent),
     addedAt: record ? record.addedAt : undefined,
-    files: ready
-      ? torrent.files.map((f, i) => ({ id: i, name: f.name, size: f.length, link: fileLink(torrent.infoHash, i) }))
-      : [],
+    // Each file as soon as it is complete, not once the whole torrent is: the first episode
+    // of a season can be watched while the rest is still on its way.
+    files: torrent.files.flatMap((f, i) => (f.done ? [{ id: i, name: f.name, size: f.length, link: fileLink(torrent.infoHash, i) }] : [])),
   };
 }
 
@@ -205,6 +334,20 @@ const TYPES = {
   '.png': 'image/png',
   '.txt': 'text/plain; charset=utf-8',
 };
+
+const originAllowed = (origin) => ALLOWED_ORIGINS.includes('*') || (Boolean(origin) && ALLOWED_ORIGINS.includes(origin));
+
+/**
+ * A browser says where a request comes from. A write sent by any page but this server's own,
+ * or one named in ALLOWED_ORIGINS, is refused whatever it carries, so that the checks on what
+ * it carries are not all that stands between another website and a server with no token. A
+ * GET is left alone: it changes nothing, and a file's link is opened from other pages on purpose.
+ */
+function foreignWrite(req) {
+  if (req.method === 'GET' || req.method === 'HEAD') return false;
+  const site = req.headers['sec-fetch-site'];
+  return Boolean(site) && site !== 'same-origin' && site !== 'none' && !originAllowed(req.headers.origin);
+}
 
 function corsHeaders(req) {
   const origin = req.headers.origin || '';
@@ -228,6 +371,24 @@ function send(req, res, status, body, headers = {}) {
     ...headers,
   });
   res.end(payload);
+}
+
+/**
+ * With no token, the only thing keeping other websites out is the browser's same-origin rule,
+ * and a page can step around it by pointing its own domain name at this machine (DNS
+ * rebinding): its requests are then same-origin, and arrive with that name as their Host. So a
+ * server with no token answers only to the names a person gives it: localhost, an IP address,
+ * or one listed in ALLOWED_HOSTS. With a token, the token is what keeps them out.
+ */
+function trustedHost(req) {
+  if (TOKEN) return true;
+  let name;
+  try {
+    name = new URL(`http://${req.headers.host}`).hostname.toLowerCase().replace(/\.$/, '');
+  } catch {
+    return false;
+  }
+  return name === 'localhost' || name.endsWith('.localhost') || net.isIP(name.replace(/^\[|\]$/g, '')) !== 0 || ALLOWED_HOSTS.includes(name);
 }
 
 /** The token may travel in a header, or in the query string — a <video> tag cannot set headers. */
@@ -304,6 +465,21 @@ async function serveFile(req, res, torrent, index, url) {
 }
 
 const isInside = (child, parent) => child === parent || child.startsWith(parent + path.sep);
+const hasDotPart = (rel) => rel.split(path.sep).some((part) => part.startsWith('.'));
+
+/**
+ * A path as the disk itself names it. A link, or a disk that ignores case — macOS and Windows,
+ * where /Downloads is /downloads — gives one file several names, and a check on the name asked
+ * for only rules out one of them.
+ */
+const foldCase = process.platform === 'darwin' || process.platform === 'win32';
+function realName(p) {
+  let real;
+  try { real = fs.realpathSync.native(p); } catch { real = p; }
+  return foldCase ? real.toLowerCase() : real;
+}
+const REAL_WEB_DIR = realName(WEB_DIR);
+const REAL_DOWNLOAD_DIR = realName(DOWNLOAD_DIR);
 
 async function serveStatic(req, res, pathname) {
   let rel = decodeURIComponent(pathname);
@@ -313,12 +489,18 @@ async function serveStatic(req, res, pathname) {
   // Run from a checkout, the web root is the repository and the downloads sit inside it.
   // Everything under /api asks for the token; the same files must not be one plain GET
   // away here. Dotfiles (.git, .env) are not the app either.
-  if (isInside(file, DOWNLOAD_DIR) || path.relative(WEB_DIR, file).split(path.sep).some((part) => part.startsWith('.'))) {
+  if (isInside(file, DOWNLOAD_DIR) || hasDotPart(path.relative(WEB_DIR, file))) {
     return send(req, res, 404, { error: 'not found' });
   }
   let stat;
   try { stat = fs.statSync(file); } catch { stat = null; }
   if (!stat || !stat.isFile()) return send(req, res, 404, { error: 'not found' });
+  // The same again for the file the disk opens, whatever it was asked as. A file whose real
+  // place is outside the web root ("..") is not the app either.
+  const real = realName(file);
+  if (isInside(real, REAL_DOWNLOAD_DIR) || hasDotPart(path.relative(REAL_WEB_DIR, real))) {
+    return send(req, res, 404, { error: 'not found' });
+  }
   res.writeHead(200, {
     'Content-Type': TYPES[path.extname(file)] || 'application/octet-stream',
     'Content-Length': stat.size,
@@ -340,6 +522,10 @@ async function handle(req, res) {
   if (pathname === '/api/health') return send(req, res, 200, { ok: true, torrents: client.torrents.length });
 
   if (pathname.startsWith('/api/')) {
+    if (!trustedHost(req)) {
+      return send(req, res, 403, { error: 'with no AUTH_TOKEN this server answers only at localhost or an IP address: set AUTH_TOKEN, or add this name to ALLOWED_HOSTS' });
+    }
+    if (foreignWrite(req)) return send(req, res, 403, { error: 'another website may not change this server: name it in ALLOWED_ORIGINS' });
     const fileReq = pathname.match(/^\/api\/transfers\/([a-f0-9]{40})\/files\/(\d+)$/i);
     const signed = fileReq && signedFor(url, fileReq[1].toLowerCase(), Number(fileReq[2]));
     if (!signed && !authorized(req, url)) return send(req, res, 401, { error: 'bad or missing token' });
@@ -359,20 +545,22 @@ async function handle(req, res) {
     }
 
     if (pathname === '/api/transfers' && req.method === 'GET') {
-      return send(req, res, 200, { transfers: client.torrents.map(describe) });
+      return send(req, res, 200, { transfers: [...client.torrents.map(describe), ...failures.values()] });
     }
 
     if (pathname === '/api/transfers' && req.method === 'POST') {
       let source;
-      const type = String(req.headers['content-type'] || '');
       // Both types make a browser ask first (a CORS preflight), which a page on another
       // site does not get past. A text/plain or form body would not, and would let any
-      // page the browser has open add torrents to a server with no token.
-      if (!type.includes('application/json') && !type.includes('application/x-bittorrent')) {
+      // page the browser has open add torrents to a server with no token. The browser goes
+      // by what comes before any ";", so this does too: "text/plain; charset=application/json"
+      // is text/plain, sent without asking.
+      const type = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+      if (type !== 'application/json' && type !== 'application/x-bittorrent') {
         return send(req, res, 415, { error: 'send a magnet as application/json, or the .torrent file as application/x-bittorrent' });
       }
       try {
-        if (type.includes('application/json')) {
+        if (type === 'application/json') {
           const { magnet } = JSON.parse((await readBody(req)).toString() || '{}');
           const given = String(magnet || '').trim();
           const isHash = /^[a-f0-9]{40}$/i.test(given) || /^[a-z2-7]{32}$/i.test(given);
@@ -419,6 +607,8 @@ async function handle(req, res) {
         if (raced) return send(req, res, 200, { transfer: describe(raced) });
         return send(req, res, 400, { error: (failure && failure.message) || 'that is not a torrent' });
       }
+      // Sent again after it failed (the disk has room now, say): a new try, not the old failure.
+      failures.delete(id);
       if (!records.has(id)) {
         records.set(id, { id, source, addedAt: Date.now() });
         await saveState();
@@ -432,13 +622,22 @@ async function handle(req, res) {
     const one = pathname.match(/^\/api\/transfers\/([a-f0-9]{40})$/i);
     if (one) {
       const torrent = findTorrent(one[1].toLowerCase());
+      const failure = failures.get(one[1].toLowerCase());
+      if (!torrent && failure && req.method === 'GET') return send(req, res, 200, { transfer: failure });
+      if (!torrent && failure && req.method === 'DELETE') {
+        failures.delete(failure.id);
+        return send(req, res, 200, { ok: true });
+      }
       if (!torrent) return send(req, res, 404, { error: 'no such transfer' });
       if (req.method === 'GET') return send(req, res, 200, { transfer: describe(torrent) });
       if (req.method === 'DELETE') {
+        const record = records.get(torrent.infoHash);
         records.delete(torrent.infoHash);
         await saveState();
         // Take the files with it: this is the delete of a cloud service, not a "stop".
+        const written = writtenBy(torrent, record);
         await new Promise((resolve) => client.remove(torrent, { destroyStore: true }, resolve));
+        await forgetFiles(written);
         return send(req, res, 200, { ok: true });
       }
     }
@@ -472,7 +671,10 @@ await loadState();
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`phone-torrent server on http://0.0.0.0:${server.address().port}`);
   console.log(`BitTorrent on port ${TORRENT_PORT} (TCP and uTP), DHT on ${DHT_PORT}/udp`);
-  console.log(TOKEN ? 'a token is required' : 'NO TOKEN SET: anyone who can reach this can drive it');
+  console.log(TOKEN
+    ? 'a token is required'
+    : `NO TOKEN SET: anyone who can reach this can drive it, at localhost or an IP address${ALLOWED_HOSTS.length ? ` or ${ALLOWED_HOSTS.join(', ')}` : ''}`);
+  console.log(`other websites that may call it from a browser: ${ALLOWED_ORIGINS.join(', ') || 'none'}`);
   console.log(`downloads in ${DOWNLOAD_DIR}`);
 });
 

@@ -1,8 +1,9 @@
 # Deploy: fly launch --no-deploy && fly secrets set AUTH_TOKEN=$(openssl rand -hex 16) && fly deploy
 #
-# Fly gives the machine a public IPv6 (and IPv4 on request), so peers can
-# connect back — which makes this the closest thing to a seedbox among the
-# one-click options.
+# A machine that keeps running and a disk that stays: downloads carry on and
+# keep seeding with the phone off. Like Render, it reaches peers by connecting
+# out to them; see [[services]] below for why peers finding it is not to be
+# counted on.
 app = "phone-torrent"
 primary_region = "cdg"
 
@@ -33,8 +34,13 @@ primary_region = "cdg"
     path = "/api/health"
     timeout = "5s"
 
-# The BitTorrent port (TCP), so peers can reach this machine rather than only the
-# other way round. The server listens on 6881 for it; see TORRENT_PORT.
+# The BitTorrent port (TCP), published on the app's own address: its IPv6, or a
+# dedicated IPv4 from `fly ips allocate-v4` (a shared IPv4 carries no raw TCP).
+# The server listens on 6881 for it; see TORRENT_PORT. Peers rarely arrive here
+# by themselves, though: a tracker hands out the address a machine announced
+# from, and a Fly machine announces from its outbound address, which is not the
+# one this port is published on. Downloading and seeding over the connections
+# it makes itself are unaffected.
 [[services]]
   internal_port = 6881
   protocol = "tcp"
@@ -42,9 +48,13 @@ primary_region = "cdg"
     port = 6881
 
 # Downloaded files live here. Without a volume they vanish on every restart.
+# `fly launch` and `fly deploy` create it at this size; left out, Fly makes it
+# 1 GB, which a single film fills. Render's is 10 GB too. It can grow later
+# (`fly volumes extend <id> -s 50`), never shrink, and is billed by size.
 [[mounts]]
   source = "downloads"
   destination = "/data"
+  initial_size = "10gb"
 
 [[vm]]
   memory = "1gb"
