@@ -18,7 +18,7 @@ wrangler login
 cd proxy                # wrangler.jsonc here names the worker for every command below
 wrangler deploy
 # required: the worker refuses every request until this is set
-wrangler secret put ALLOWED_ORIGINS   # e.g. https://<user>.github.io
+wrangler secret put ALLOWED_ORIGINS   # e.g. https://<user>.github.io (the app's address works too: it is cut down to its origin)
 # optional: per-request size cap in bytes (default 4 GiB)
 wrangler secret put MAX_BYTES
 # needed for cloud fetch: hosts allowed to receive POST, PUT, DELETE and your Authorization header

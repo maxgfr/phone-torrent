@@ -36,7 +36,8 @@ and saved to the device file by file or as one `.zip`.
   refused with the reason, and stays in the box to be fixed. On Android you can also *share* a
   `.torrent`, a magnet or a link to a `.torrent` into the installed app, which says so when a share
   holds nothing it can add. On desktop Chrome and Edge, `magnet:` links open in the installed app;
-  no Android browser hands them to a web app, so there it is share or paste.
+  no Android browser hands them to a web app, so there it is share or paste. The card of a torrent
+  you add is brought into view, below the cloud library when that is long.
 - **Choose the files you want.** Untick one and its pieces are never requested.
 - **Save file by file, or everything as one `.zip`** with the folder structure. A service worker
   turns each save into an ordinary browser download, so a multi‑gigabyte file never has to fit in
@@ -45,11 +46,15 @@ and saved to the device file by file or as one `.zip`.
 - **Seed and share.** Turn files on the phone into a torrent, and its card opens on the link, selected,
   as soon as it is ready; send it with the system share sheet, and whoever opens it downloads
   straight from your browser. Several files are named as one collection ("Shared files" unless you
-  say otherwise; Cancel there seeds nothing). A CORS‑enabled remote URL can be seeded too. The
-  `.torrent` and the magnet are one tap away.
+  say otherwise; Cancel there seeds nothing). Picked again, files already being shared open the link
+  of the seed there is. A seed stays a seed through a retry: never remembered, and gone with the page.
+  A CORS‑enabled remote URL can be seeded too. The `.torrent` and the magnet are one tap away.
 - **Share hands you the link.** Not a message saying it was copied: the app link and the magnet, both
   shown, selected and one tap from the clipboard — plus the system share sheet where there is one, and
-  **Save .torrent**. Every torrent can be shared, not only the ones you seed.
+  **Save .torrent**. Every torrent can be shared, not only the ones you seed — except a private one:
+  its links carry your passkey, and the copy of the app that opened one would announce its info hash
+  to the public trackers, so its share panel says so and offers only the `.torrent`, which keeps the
+  private flag. Nothing on its card copies a link either.
 - **Pause, resume, remove**, per‑torrent and total speeds, ETA, peer counts, and a details panel with
   the info hash, ratio, pieces, trackers and an event log. Pausing really pauses: a connection that
   was already in flight is dropped rather than allowed to resume the transfer — and it stays paused
@@ -59,9 +64,10 @@ and saved to the device file by file or as one `.zip`.
 - **Installable.** Proper icons, an offline app shell, an **Install** button on Android and the
   "Add to Home Screen" hint on iOS. Dark mode, big touch targets, safe‑area aware, and an optional
   **wake lock** so the screen staying on keeps the download alive — held only while something can
-  still arrive: not with every file unticked, and not for a private torrent the page cannot reach.
+  still arrive: not with every file unticked, and not for a private torrent the page cannot reach,
+  unless a web seed is sending it.
 - **Automatic trackers**, as qBittorrent does it: your list plus a public list of `wss://` trackers,
-  fetched and merged every six hours.
+  fetched and merged every six hours, an app left open included.
 - **Fallbacks.** No metadata from peers → the `.torrent` is fetched from configurable caches and
   checked against the info hash; or add the `.torrent` yourself, and it fills in the magnet's card.
   No peers at all → one tap refreshes the tracker list and
@@ -74,7 +80,9 @@ and saved to the device file by file or as one `.zip`.
   same happens when the network comes back. The card says `reconnecting` while it does, and the event
   log records it. A seed still being hashed and a torrent still checking the pieces it has are not
   looking for peers yet, and are left to finish. With no network at all, the card and the top bar
-  say `offline`, and the metadata caches are left alone until it is back.
+  say `offline`, and the metadata caches are left alone until it is back. The first torrent added
+  asks the browser to keep that storage rather than clear it when the device runs low on space;
+  **Settings → Storage** says whether it will.
 - **Settings with two levels.** **Simple** — the default — shows what decides whether this works:
   the cloud service and its key, whether to keep seeding, the screen lock, and the stored data.
   Nothing behind **Expert** has to be touched to download anything; it holds the trackers, the
@@ -83,7 +91,11 @@ and saved to the device file by file or as one `.zip`.
   Your own server's address stays in Simple, because for that one the address *is* the setting — and
   so does **pick up where it left off**, which is what makes leaving the app and coming back work.
   **Cancel** leaves everything as it was, a field that cannot be saved included: an iPhone has no
-  Escape key. Enter in a field, or a phone keyboard's Go, is Save.
+  Escape key. Enter in a field, or a phone keyboard's Go, is Save. A field that cannot be used is
+  never dropped on Save: a CORS proxy without `{url}` (the address its deploy prints) and a server
+  address without `http://` are mended in the field, to be saved as they read then, and a metadata
+  source without `{infohash}` is named. **Copy diagnostics**, for a bug report, says which keys, proxy
+  and TURN credentials are set without giving them, and an `http(s)` tracker by its host alone.
 
 ### What the page alone cannot do, and why
 
@@ -105,8 +117,13 @@ That is the wall the other three ways exist to cross.
 ## 2. Your own server
 
 ```sh
+curl -fsSLO https://raw.githubusercontent.com/maxgfr/phone-torrent/main/docker-compose.yml
 docker compose up -d          # then open http://localhost:8080
 ```
+
+The first line fetches the compose file, which `docker compose` runs; a clone of the repository has
+it too, and the tunnel below needs the clone. [`server/README.md`](server/README.md) has the same as
+one `docker run`, with no file at all.
 
 One container holds a real BitTorrent client, its HTTP API, and this app — on the same origin, so
 there is no CORS to configure and nothing else to deploy. Open it and the app already knows where
@@ -163,26 +180,30 @@ Five services, five dialects, one table in the app:
 |---|---|---|---|
 | **TorBox** | `POST /v1/api/torrents/createtorrent`; with every slot taken it is queued, and followed in `/v1/api/queued/getqueued` until it starts | `/v1/api/torrents/mylist` | `requestdl?token=…&redirect=true`, once the torrent is done |
 | **put.io** | `POST /v2/files/upload` (on `upload.put.io`; a custom address gets it itself), or `/v2/transfers/add` | `/v2/transfers/{id}` | `/v2/files/{id}/download?oauth_token=…` |
-| **Real‑Debrid** | `addMagnet` / `addTorrent`, then `selectFiles` — without which it downloads nothing; if RD refuses that call, the files are chosen when the torrent is next seen waiting | `/torrents/info/{id}`; the library reads `/torrents` a hundred at a time | `unrestrict/link`, resolved when the transfer turns ready, under three a second and once a session |
+| **Real‑Debrid** | `addMagnet` / `addTorrent`, then `selectFiles` — without which it downloads nothing; if RD refuses that call, the files are chosen when the torrent is next seen waiting — only for the torrents the app added: one left waiting on RD's site is left to you | `/torrents/info/{id}`; the library reads `/torrents` a hundred at a time | `unrestrict/link`, resolved when the transfer turns ready, under three a second and once a session |
 | **AllDebrid** | `/v4/magnet/upload`, or `/v4/magnet/upload/file` | `/v4.1/magnet/status` | `/v4/link/unlock` for every file, eight a second and once a session; its nested folders are flattened |
 | **Your own server** | `POST /api/transfers` | `/api/transfers/{infoHash}` | `/api/transfers/{id}/files/{i}`, signed for that one file, with `Range` |
 
 The library polls while something is running and leaves the API alone once nothing is — a transfer
-that failed is not running. A card follows its transfer through calls that fail but may work next
-time — a dropped network, a service answering 429 or 5xx, or Cloudflare's error page in front of it:
-it says the service is busy or down and asks again, less often each time, up to once a minute. Only
-an answer that will not change stops it, such as a key refused or a transfer the service no longer
-knows. A transfer that failed or is gone can be replaced with **Send to the cloud again** on its card;
+that failed is not running. A listing that fails is said in the library itself, which is on every tab,
+rather than taken for an empty account, and one that may work next time is asked again, less often
+each time, and at once when the network comes back. A card follows its transfer through calls that
+fail but may work next time — a dropped network, a service answering 429 or 5xx, or Cloudflare's
+error page in front of it: it says the service is busy or down and asks again, less often each time,
+up to once a minute. Only an answer that will not change stops it, such as a key refused or a
+transfer the service no longer knows. A transfer that failed or is gone can be replaced with **Send to the cloud again** on its card;
 a key refused is not that — the transfer may still be there — so the card says to fix the key, and
 asks again once Settings are saved. Deleting a transfer in the library lets go of the card that sent it. A file the service refuses a
 link for is shown with the reason, and asked for again; the others keep theirs. Playback is a plain
 `<video>`/`<audio>` on the same direct link, so seeking is whatever the other end supports, and the
-next poll leaves a playing video alone. Each transfer remembers the service it started on, and each
+next poll leaves a playing video alone; a file the browser cannot play (an `.mkv` on Safari) says so,
+and to use Save or a player app instead. Each transfer remembers the service it started on, and each
 service keeps its own key and address in Settings, so switching services does not break older links;
 the library shows only the service chosen now. The key is stored on the device, and no
 payload ever passes through this app. If an API refuses browser requests, the call is retried through
 your own CORS proxy automatically, key included — the worker in [`proxy/`](proxy/) forwards
-`Authorization` only to the hosts in its `API_HOSTS` variable.
+`Authorization` only to the hosts in its `API_HOSTS` variable, and a call it refuses for that says so,
+with the host to add.
 
 **A TorBox or put.io link is your key.** Their file links carry it — TorBox's permalink as `token=`,
 put.io's download link as `oauth_token=` — because that is what lets a `<video>` or a download follow
@@ -202,9 +223,19 @@ would fix it.
 address, not at a name such as `nas.local` or a tunnel's address: set a token (the app takes it as
 the key), or list the name in `ALLOWED_HOSTS`.
 
-**The installed app cannot reach your own server** ("CORS or network") while the page the server
-serves can: name the installed app's origin in `ALLOWED_ORIGINS`, e.g. `https://<user>.github.io`.
-The server logs the origins it took when it starts.
+**The installed app cannot reach your own server** ("does not allow this page") while the page the
+server serves can: name the installed app's origin in `ALLOWED_ORIGINS`, e.g. `https://<user>.github.io`.
+The server logs the origins it took when it starts. On the server's own page, "not answering" means
+just that: the server is stopped or out of reach.
+
+**"This page is https, and a browser will not let it call an http:// address."** The installed app is
+on https, and your server's LAN address is `http://`: the browser refuses the call before it is sent,
+and neither `ALLOWED_ORIGINS` nor a proxy changes that. Open the app at the server's own address, or
+reach the server over https (the tunnel, or a deploy).
+
+**Your own server stops at start**, and its log says `TORRENT_PORT … or DHT_PORT … is taken`: another
+BitTorrent client on the machine, or a second copy of the server, has the port. Stop it, or set
+`TORRENT_PORT` and `DHT_PORT` to ports that are free.
 
 **Your own server does not start**, and its log says `cannot write downloads to DOWNLOAD_DIR`: the
 directory, or a disk mounted over it, belongs to another user. The image hands its download directory
@@ -248,6 +279,10 @@ on desktop Chrome and Edge, so on an iPhone use the picker or paste the link. A 
 other three ways has no such cap: it is an ordinary download.
 In Brave, if nothing ever connects, lower Shields for the site.
 
+**WebRTC turned off** (Tor Browser, Mullvad Browser, Firefox with `media.peerconnection.enabled`
+off): no peer can be reached, and the Download and Seed tabs say so. Web seeds and the Cloud tab still
+work.
+
 ## Tests
 
 ```sh
@@ -266,8 +301,9 @@ zip save byte‑for‑byte, restore after reload, file‑selection persistence, 
 removal, the Web Share Target, magnets in the URL and in the fragment, the tracker‑list merge, the
 network check, metadata from a fallback source with a tampered file rejected, the no‑peers retry,
 and an iPhone‑emulated context: the unfiltered picker, a non‑torrent file refused, a `.torrent` added
-from a URL, an unreachable URL reported, a private torrent explained and kept off the public
-trackers, two complete cloud round trips against stand‑ins speaking TorBox's and put.io's own wire
+from a URL, an unreachable URL reported and a web page's address told apart from it, a private torrent
+explained and kept off the public trackers, its share panel offering the `.torrent` and no passkey, the
+Cloud tab's picker refusing a 3 GB video unread and sending a `.torrent`, two complete cloud round trips against stand‑ins speaking TorBox's and put.io's own wire
 formats, the whole cloud library (account line, listing, a file downloaded from its link
 byte‑for‑byte, a magnet sent with nothing added locally, a delete that cancels the transfer and drops
 its file), and the Real‑Debrid and AllDebrid mappings against stand‑ins speaking theirs — a TorBox
@@ -279,18 +315,19 @@ transfer or of its wait in the queue, asked again until it is ready; a failed tr
 one deleted in the library or on the service let go of; a key refused asked again once Settings
 are saved, and nothing sent twice; files offered only once they are done; and a
 switch of service whose first listing fails. Against Real‑Debrid, a refused `selectFiles` that still
-sends the torrent once and starts it, a twenty‑file pack whose links come paced with one refused, and
-an account of more torrents than one page. And a torrent's life around all that: a paused magnet staying paused through a metadata fallback and a
+sends the torrent once and starts it while one someone else left waiting is left alone, a twenty‑file
+pack whose links come paced with one refused, and an account of more torrents than one page. And a torrent's life around all that: a paused magnet staying paused through a metadata fallback and a
 retry, the screen lock held for a download and let go for nothing selected (a peer connected or not)
 or a private torrent, an unreachable torrent's explanation surviving a reload and a retry, the
 `.torrent` for a waiting magnet filling in its card, the network coming back while a seed is hashing and a restore is checking its
 pieces (hashing is held in place for as long as that takes) with only the torrent waiting for peers
 rebuilt and no "finished" for what had finished before, a removal in one open copy of the app
 reaching another, and web seeds on a slow mirror kept through a pause, a reload and a "keep seeding"
-stop.
+stop, the screen lock held for a private torrent one of them is sending.
 
 Around the edges of the app itself: a seed's name cancelled (nothing is seeded) and a seed opening
-on its link; a save and a zip still busy through the redraws while they run; a `.torrent` link and a
+on its link, again when its files are picked a second time, and still a seed, not remembered, once
+retried; a save and a zip still busy through the redraws while they run; a `.torrent` link and a
 base32 info hash shared into the app, and a share with nothing to add explained, a web page's
 address included; magnets cut short, without an info hash or v2‑only refused with the reason and
 left in the box, and a capital `M` and a sentence around a link accepted; Settings cancelled with no
@@ -299,31 +336,44 @@ secure (plain `http` at a name that is not `localhost`) saying why only the Clou
 first asking to start a linked magnet; a page served by your own server taking it as the service
 with nothing set, asking for its token when it has one, and one that is not keeping its default; a
 library file list, open while your own server finishes a season, taking on each episode in its place
-and leaving the rows it has alone; a card and a top bar that say `offline`, caches that wait for the
-network, and the network's return waking the torrent; and `npm start` staying on loopback unless
-`HOST` says otherwise, and then serving the app's own files and nothing else of the checkout.
+and leaving the rows it has alone, a file it cannot play saying so, and a torrent added below a full
+library brought into view; a library turned away by a token, or by a server that stopped, saying so
+rather than that the account is empty, and listing it again once it is back; your own server at
+another address, or an `http://` one from an https page, blamed on what it is and not on CORS; a
+CORS proxy's refusal passed on with the host to add; a card and a top bar that say `offline`, caches
+that wait for the network, and the network's return waking the torrent; a browser without WebRTC
+saying so; diagnostics without the keys, the proxy, TURN credentials or a passkey; a proxy, a
+metadata source and a server address that cannot be used mended or named rather than dropped on
+Save; the storage asked, once, to be kept; the public tracker list fetched again six hours on, on a
+clock of the test's own; and `npm start` staying on loopback unless `HOST` says otherwise, and then
+serving the app's own files and nothing else of the checkout.
 
 And how it looks: error toasts, primary buttons, muted text and the network check's marks at 4.5:1
 or better in light and dark; at 320px, a top bar at its fullest (the widest speeds and Install) with
 nothing drawn over anything, and a share panel and a cloud library link that stay on the screen, also
 at the 16px iOS gives text fields (the suite applies the stylesheet's iOS‑only rules to check that);
 and, for the installed iPhone app, Cancel in reach beside a long release name on the save bar, and
-something dark under its white status bar in either colour scheme.
+something dark under its white status bar in either colour scheme; and a file picker focused from
+the keyboard showing it.
 
 `test/server.mjs` is the other half, with no browser anywhere: a plain BitTorrent client seeds a file
 over an http tracker, the server is asked for it through its API, and the file comes back out whole
 and by `Range` (suffix ranges and ranges past the end included), byte for byte, through the token and
 through a signed link, before being deleted — it, and a transfer that fails, taking what they wrote
-and nothing else, whatever their name says. On the way it is sent requests it cannot parse and
+and nothing else, whatever their name says: a single file named like a folder of the user's leaves the
+folder, and a file two transfers share goes with the last of them. A file whose name has an apostrophe
+is served under that name; the same DELETE twice at once is answered twice, and the server stays up. On the way it is sent requests it cannot parse and
 torrents that are not torrents, and must answer them; it must not serve its downloads as static files,
 nor answer another origin; it refuses a torrent that would overwrite its list of transfers; and it is
-restarted, and picks the transfer up again. Then both Workers are called as plain modules, with no
+restarted, and picks the transfer up again. A BitTorrent or DHT port already taken stops it with the
+setting to change; a build without uTP says it runs TCP only; `ALLOWED_HOSTS` is taken as written in
+an address bar. Then both Workers are called as plain modules, with no
 Cloudflare account: the Cloudflare one refuses to start the server without a token, and keeps its
 container up while a download is getting data, not for ever; the CORS proxy passes a web seed's
-preflight. CI runs both suites, the browser one on Chromium and on WebKit (`BROWSER=webkit npm test`).
+preflight, and takes an allowed origin written as the app's address. CI runs both suites, the browser one on Chromium and on WebKit (`BROWSER=webkit npm test`).
 `image.yml` publishes the server image on every change to it pushed to `main`, once the image has
-started on a root‑owned `/data`, as Fly and Render mount their disk; a pull request gets that smoke
-test alone.
+started on a root‑owned `/data`, as Fly and Render mount their disk, and once its `arm64` build has
+been checked to load uTP, which it builds from source; a pull request gets those checks alone.
 
 Real‑world peer discovery is the one thing the suite cannot cover: public trackers are unreachable
 from the sandbox this was developed in.

@@ -7,8 +7,9 @@
  * in Settings → "CORS proxy" in the app.
  *
  * Deploy: npm i -g wrangler && cd proxy && wrangler deploy (wrangler.jsonc beside this file names it)
- * Then set ALLOWED_ORIGINS (comma separated), e.g. https://<user>.github.io, with
- * `wrangler secret put ALLOWED_ORIGINS` from the same folder: it refuses every request until then.
+ * Then set ALLOWED_ORIGINS (comma separated), e.g. https://<user>.github.io — the app's address,
+ * path and all, is taken as its origin — with `wrangler secret put ALLOWED_ORIGINS` from the same
+ * folder: it refuses every request until then.
  */
 
 const PASS_REQUEST_HEADERS = ['range', 'accept', 'if-none-match', 'if-modified-since'];
@@ -24,10 +25,24 @@ const API_METHODS = ['GET', 'HEAD', 'POST', 'PUT', 'DELETE'];
 const WRITE_METHODS = ['POST', 'PUT', 'DELETE'];
 const PASS_RESPONSE_HEADERS = ['content-type', 'content-length', 'content-range', 'accept-ranges', 'etag', 'last-modified', 'content-disposition'];
 
+/**
+ * A browser sends only the origin, so an entry pasted as the app's address
+ * ("https://<user>.github.io/phone-torrent/") is taken as the origin it names, as the server does. An
+ * entry with no origin of its own is kept as written, and matches nothing.
+ */
+function asOrigin(entry) {
+  try {
+    const { origin } = new URL(entry);
+    return origin === 'null' ? entry : origin;
+  } catch {
+    return entry;
+  }
+}
+
 export default {
   async fetch(request, env) {
     const origin = request.headers.get('Origin') || '';
-    const allowed = (env && env.ALLOWED_ORIGINS ? env.ALLOWED_ORIGINS.split(',') : []).map((s) => s.trim()).filter(Boolean);
+    const allowed = (env && env.ALLOWED_ORIGINS ? env.ALLOWED_ORIGINS.split(',') : []).map((s) => s.trim()).filter(Boolean).map(asOrigin);
     // Fail closed: without an allow-list this would be an open proxy for anyone on the internet.
     if (!allowed.length) return new Response('ALLOWED_ORIGINS is not configured; refusing to act as an open proxy', { status: 403 });
     if (!allowed.includes(origin)) return new Response('origin not allowed', { status: 403 });

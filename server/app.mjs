@@ -39,8 +39,18 @@ function asOrigin(entry) {
   }
 }
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '').split(',').map((s) => s.trim()).filter(Boolean).map(asOrigin);
+// A request's Host is compared as trustedHost reads it: the name alone, without its port or a
+// final dot. So an entry is cut down the same way, written as the address bar shows it
+// ("nas.local:8080"), as an address ("http://media.lan:8080/") or with the dot ("media.lan.").
+function asHost(entry) {
+  try {
+    return new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(entry) ? entry : `http://${entry}`).hostname.toLowerCase().replace(/\.$/, '');
+  } catch {
+    return entry.toLowerCase();
+  }
+}
 // With no token, the names besides localhost and an IP address this server answers to: see trustedHost.
-const ALLOWED_HOSTS = (process.env.ALLOWED_HOSTS || '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+const ALLOWED_HOSTS = (process.env.ALLOWED_HOSTS || '').split(',').map((s) => s.trim()).filter(Boolean).map(asHost);
 const SEED_AFTER_DONE = process.env.SEED_AFTER_DONE !== '0';
 const STATE_FILE = path.join(DOWNLOAD_DIR, 'transfers.json');
 // Fixed, so that forwarding them means something: TCP and uTP on the first, the DHT on
@@ -64,7 +74,17 @@ try {
 }
 
 const client = new WebTorrent({ dht: true, torrentPort: TORRENT_PORT, dhtPort: DHT_PORT });
-client.on('error', (err) => console.error('client error:', err.message || err));
+client.on('error', (err) => {
+  console.error('client error:', err.message || err);
+  // A port that is taken (another client, a second copy of this one) makes WebTorrent tear
+  // itself down. Left running, the server would answer health checks while refusing every
+  // transfer with "client is destroyed": stop, and say which setting to change, so that a
+  // restart policy or whoever reads the log can do something about it.
+  if (client.destroyed) {
+    console.error(`the BitTorrent client stopped: TORRENT_PORT ${TORRENT_PORT} (TCP) or DHT_PORT ${DHT_PORT} (UDP) is taken; free it, or set another`);
+    process.exit(1);
+  }
+});
 
 /* ---------- what survives a restart ---------- */
 
@@ -216,9 +236,9 @@ function track(torrent, id) {
     // Take the half-written files with it: nothing lists this transfer any more,
     // so anything it left behind is unreachable rather than resumable. Saved after, not
     // before: on a disk this transfer filled, the list can only be written once they are gone.
-    try {
-      if (!torrent.destroyed) await new Promise((resolve) => client.remove(torrent, { destroyStore: true }, resolve));
-    } catch { /* webtorrent had already torn it down */ }
+    // Not the store's own delete, which removes every path the torrent names, folders and all, and
+    // knows nothing of other transfers: forgetFiles takes what this one wrote, and only that.
+    if (!torrent.destroyed) await new Promise((resolve) => client.remove(torrent, { destroyStore: false }, resolve).catch(() => resolve()));
     await forgetFiles(written);
     await saveState();
   });
@@ -424,6 +444,18 @@ function streamTo(source, res) {
   source.pipe(res);
 }
 
+/**
+ * The name a download is saved under, as sw.js writes it for the app's own saves. The UTF-8 form
+ * escapes ' ( ) * too, which encodeURIComponent leaves alone: a browser refuses a value with a
+ * stray apostrophe in it, and with nothing else to go on names the file after the last part of
+ * the URL — "0", for "Don't Look Up.mp4". The plain form beside it is for any that reads only that.
+ */
+function contentDisposition(type, name) {
+  const ascii = name.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_');
+  const encoded = encodeURIComponent(name).replace(/['()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+  return `${type}; filename="${ascii}"; filename*=UTF-8''${encoded}`;
+}
+
 async function serveFile(req, res, torrent, index, url) {
   const file = torrent.files[index];
   if (!file) return send(req, res, 404, { error: 'no such file' });
@@ -432,7 +464,7 @@ async function serveFile(req, res, torrent, index, url) {
   const headers = {
     'Content-Type': 'application/octet-stream',
     'Accept-Ranges': 'bytes',
-    'Content-Disposition': `${url.searchParams.get('inline') ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(file.name)}`,
+    'Content-Disposition': contentDisposition(url.searchParams.get('inline') ? 'inline' : 'attachment', file.name),
     ...corsHeaders(req),
   };
   // Range matters twice over: it is how a <video> seeks, and how a phone resumes a download.
@@ -519,7 +551,12 @@ async function handle(req, res) {
     return res.end();
   }
 
-  if (pathname === '/api/health') return send(req, res, 200, { ok: true, torrents: client.torrents.length });
+  // A client that tore itself down (see its 'error' handler) is not a healthy server, even for the
+  // moment before the process goes.
+  if (pathname === '/api/health') {
+    if (client.destroyed) return send(req, res, 503, { ok: false, error: 'the BitTorrent client stopped' });
+    return send(req, res, 200, { ok: true, torrents: client.torrents.length });
+  }
 
   if (pathname.startsWith('/api/')) {
     if (!trustedHost(req)) {
@@ -634,9 +671,14 @@ async function handle(req, res) {
         const record = records.get(torrent.infoHash);
         records.delete(torrent.infoHash);
         await saveState();
-        // Take the files with it: this is the delete of a cloud service, not a "stop".
+        // Take the files with it: this is the delete of a cloud service, not a "stop". Its store is
+        // closed, not destroyed: the store's own delete removes every path the torrent names,
+        // folders and all — a .torrent called "Photos" took the user's Photos folder with it — and a
+        // file another transfer still has. forgetFiles takes what this one wrote, and only that.
         const written = writtenBy(torrent, record);
-        await new Promise((resolve) => client.remove(torrent, { destroyStore: true }, resolve));
+        // Removed already when a second DELETE of it (a retry, another client) got here first:
+        // WebTorrent's remove then rejects, and the rejection nobody handles would end the process.
+        await new Promise((resolve) => client.remove(torrent, { destroyStore: false }, resolve).catch(() => resolve()));
         await forgetFiles(written);
         return send(req, res, 200, { ok: true });
       }
@@ -670,7 +712,9 @@ await loadState();
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`phone-torrent server on http://0.0.0.0:${server.address().port}`);
-  console.log(`BitTorrent on port ${TORRENT_PORT} (TCP and uTP), DHT on ${DHT_PORT}/udp`);
+  // uTP comes from utp-native, a native module that is left out where it has no prebuilt binary
+  // and could not be built (WebTorrent then says "uTP not supported"): say what is really on.
+  console.log(`BitTorrent on port ${TORRENT_PORT} (${client.utp ? 'TCP and uTP' : 'TCP only: uTP is not available in this build'}), DHT on ${DHT_PORT}/udp`);
   console.log(TOKEN
     ? 'a token is required'
     : `NO TOKEN SET: anyone who can reach this can drive it, at localhost or an IP address${ALLOWED_HOSTS.length ? ` or ${ALLOWED_HOSTS.join(', ')}` : ''}`);

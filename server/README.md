@@ -9,7 +9,19 @@ browser, so none of that applies.
 ## Run it
 
 ```sh
+curl -fsSLO https://raw.githubusercontent.com/maxgfr/phone-torrent/main/docker-compose.yml
 docker compose up -d          # then open http://localhost:8080
+```
+
+`docker compose` needs the file first: that line fetches it, or run it from a
+clone of the repository (`git clone https://github.com/maxgfr/phone-torrent`),
+which the tunnel overlay below needs as well. With no file at all, the same in
+one command:
+
+```sh
+docker run -d --name phone-torrent --restart unless-stopped -v phone-torrent:/data \
+  -p 8080:8080 -p 6881:6881 -p 6881:6881/udp -p 6882:6882/udp \
+  ghcr.io/maxgfr/phone-torrent:latest
 ```
 
 That is the whole thing: the API, the client, and the app on one origin — no
@@ -66,7 +78,7 @@ device gets, rather than the key to the whole server.
 
 | | |
 |---|---|
-| `GET /api/health` | no token; `{ ok, torrents }` |
+| `GET /api/health` | no token; `{ ok, torrents }`, or `503` once the BitTorrent client has stopped |
 | `GET /api/account` | `{ who, detail }` — transfer count and free space |
 | `GET /api/transfers` | `{ transfers: [...] }` |
 | `POST /api/transfers` | `{"magnet": "..."}` as `application/json`, or the `.torrent` bytes as `application/x-bittorrent`; anything else is `415`, whatever follows a `;` |
@@ -101,12 +113,17 @@ and the server starts with no transfers.
 | `PORT` | `8080` | |
 | `AUTH_TOKEN` | *(none)* | set it whenever the server is not alone on your machine |
 | `ALLOWED_ORIGINS` | *(none)* | comma-separated origins allowed to call the API from a browser, such as `https://<user>.github.io` (a page's address is cut down to its origin, and the log lists what was taken); none means only the page this server serves, `*` means any |
-| `ALLOWED_HOSTS` | *(none)* | with no `AUTH_TOKEN`, comma-separated host names the API answers at besides `localhost` and IP addresses, e.g. `nas.local` |
+| `ALLOWED_HOSTS` | *(none)* | with no `AUTH_TOKEN`, comma-separated host names the API answers at besides `localhost` and IP addresses, e.g. `nas.local` (written as the address bar shows it, `nas.local:8080`, it is the name alone that counts, and the log lists the names it took) |
 | `DOWNLOAD_DIR` | `/data/downloads` | where files land (`downloads/` beside `server/` when run from a checkout; never served as static files); a server that cannot write there says so and does not start |
 | `WEB_DIR` | the app | the static files served at `/` |
 | `SEED_AFTER_DONE` | `1` | keep seeding once a download finishes |
-| `TORRENT_PORT` | `6881` | BitTorrent over TCP and uTP |
+| `TORRENT_PORT` | `6881` | BitTorrent over TCP and uTP (the log says `TCP only` in a build without uTP) |
 | `DHT_PORT` | `6882` | the DHT, over UDP |
+
+Either port already taken — another client on the machine, a second copy of
+this server, both with `network_mode: host` — and the BitTorrent client cannot
+run: the server stops with exit code 1 and says which setting to change, rather
+than answering its health check while refusing every transfer.
 
 Ports `6881` (TCP and UDP) and `6882` (UDP) are the BitTorrent side. Forward
 them and peers can connect to you as well as the other way round; without them

@@ -88,8 +88,30 @@ jobs:
           [ "$(stat -c %u:%g host-media host-media/film.mkv)" = "$before" ] || { echo "::error::the image changed the owner of a folder of the host"; exit 1; }
           grep -q 'cannot write downloads' bound.log || { echo "::error::and did not say why it cannot write there"; exit 1; }
 
+  # arm64 is the main target, and it is where uTP has no prebuilt binary: utp-native is built from
+  # source in the image. Without a compiler there, npm left it out without a word and the image ran
+  # TCP only, while this workflow's only check ran on amd64. Built as publish builds it, under QEMU.
+  arm64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: server/Dockerfile
+          platforms: linux/arm64
+          load: true
+          tags: phone-torrent:arm64
+          cache-from: type=gha
+      - name: uTP is in the arm64 image
+        run: |
+          docker run --rm --platform linux/arm64 --entrypoint node phone-torrent:arm64 \
+            -e "require('/app/server/node_modules/utp-native'); console.log('utp-native loads on', process.arch)"
+
   publish:
-    needs: smoke
+    needs: [smoke, arm64]
     # A pull request's ref is refs/pull/<n>/merge, so this rules it out as well.
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest

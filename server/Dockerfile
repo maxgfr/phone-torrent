@@ -1,13 +1,27 @@
 # One image that serves both halves: the torrent client's API and the app itself,
 # on one origin. That makes `docker run` a complete product — and it sidesteps
 # CORS and mixed content entirely, since the page and the API share an origin.
+
+# The dependencies are installed where there is a compiler. uTP comes from
+# utp-native, a native module with a prebuilt binary for amd64 but none for arm64,
+# where npm builds it from source — with python3, make and g++, none of which the
+# slim image has. Without them npm leaves the module out without a word, and the
+# arm64 image ran TCP only. The image itself stays slim: only node_modules is kept.
+FROM node:22-slim AS deps
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends python3 make g++ \
+  && rm -rf /var/lib/apt/lists/*
+WORKDIR /app/server
+COPY server/package.json server/package-lock.json* ./
+RUN npm install --omit=dev --no-audit --no-fund
+
 FROM node:22-slim
 
 WORKDIR /app
 
 # Dependencies first, so a change to the code does not reinstall them.
 COPY server/package.json server/package-lock.json* ./server/
-RUN cd server && npm install --omit=dev --no-audit --no-fund
+COPY --from=deps /app/server/node_modules ./server/node_modules
 
 COPY server/app.mjs server/entrypoint.sh ./server/
 # The app itself, served from here: index.html and everything it loads.
