@@ -27,11 +27,13 @@ Be clear-eyed about it before you rely on it:
 
 - **It needs a paid Workers plan.** Containers are not on the free tier.
 - **The disk is ephemeral, and it goes when the container sleeps.** The
-  container sleeps once half an hour has passed with the app closed and no
-  download getting any data; the downloaded files go with it. So a download
-  carries on with the phone locked, and what it finishes stays for at least
-  half an hour after, not overnight. Save what you want to keep while it is
-  there. A torrent that gets nothing for half an hour does not keep it awake.
+  container sleeps once half an hour has passed with no request from the app
+  and no download getting any data; the downloaded files go with it. An app
+  left open does not keep it awake: it stops asking once nothing is
+  downloading. So a download carries on with the phone locked, and what it
+  finishes stays for at least half an hour after, not overnight. Save what you
+  want to keep soon after it finishes. A torrent that gets nothing for half an
+  hour does not keep it awake.
 - **There is no inbound port.** Peers cannot connect to it; it connects to
   them. That is enough for a healthy swarm and thin for a rare one, and it
   means this is a downloader, not a seedbox.

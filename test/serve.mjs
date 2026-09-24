@@ -25,10 +25,12 @@ const TYPES = {
 
 /**
  * On loopback only this machine asks, and the tests fetch their scratch files from test/.tmp. Bound
- * to any other address it serves the app to the network, and nothing else of the checkout: no
- * dotfiles (.git, .env, the tests' scratch) and no node_modules.
+ * to any other address it serves the app to the network, and nothing else of the checkout: the files
+ * the page loads (the ones server/Dockerfile copies), by name. Anything else can be private, and a
+ * list of what to keep out misses what it did not think of — downloads/, where the server keeps
+ * every file it fetched and its list of transfers when it runs from the checkout, was one.
  */
-const NOT_THE_APP = /(^|\/)(\.[^/]*|node_modules)(\/|$)/;
+const THE_APP = /^(index\.html|app\.js|saver\.js|sw\.js|styles\.css|manifest\.webmanifest|icon\.svg|(icons|vendor)\/[^/.][^/]*)$/;
 
 export function startServer(port = 0, host = '127.0.0.1') {
   const loopback = host === '127.0.0.1' || host === 'localhost' || host === '::1';
@@ -51,7 +53,7 @@ export function startServer(port = 0, host = '127.0.0.1') {
       res.writeHead(403).end();
       return;
     }
-    if (!loopback && NOT_THE_APP.test(path.relative(ROOT, file).split(path.sep).join('/'))) {
+    if (!loopback && !THE_APP.test(path.relative(ROOT, file).split(path.sep).join('/'))) {
       res.writeHead(404, { 'Content-Type': 'text/plain' }).end('Not found');
       return;
     }

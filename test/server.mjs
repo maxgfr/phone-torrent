@@ -398,15 +398,49 @@ try {
   await waitFor(() => !existsSync(path.join(downloads, 'Pack')), { label: 'the pack\'s folder to go', timeout: 5000 });
   log('delete leaves no empty folders behind');
 
+  // And only what the transfer wrote. A magnet is called by its dn= until the metadata comes, and a
+  // .torrent by whatever name it gives itself: a folder of that name that it never wrote to — the
+  // user's own, another transfer's — stays, all of it.
+  mkdirSync(path.join(downloads, 'Photos'), { recursive: true });
+  writeFileSync(path.join(downloads, 'Photos', 'holiday.jpg'), 'not a download');
+  const inPlace = () => ({ photos: existsSync(path.join(downloads, 'Photos', 'holiday.jpg')), release: existsSync(path.join(downloads, 'release.bin')) });
+  for (const dn of ['Photos', './Photos', 'x/../Photos', './release.bin']) {
+    const id = randomBytes(20).toString('hex');
+    const sent = await api('/api/transfers', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ magnet: `magnet:?xt=urn:btih:${id}&dn=${encodeURIComponent(dn)}` }) });
+    assert.equal(sent.status, 201);
+    assert.equal((await api(`/api/transfers/${id}`, { method: 'DELETE' })).status, 200);
+    assert.deepEqual(inPlace(), { photos: true, release: true }, `a magnet called "${dn}", deleted before its metadata came, deletes nothing`);
+  }
+  const photosDir = path.join(tmp, 'elsewhere', 'Photos');
+  mkdirSync(photosDir, { recursive: true });
+  writeFileSync(path.join(photosDir, 'a.txt'), randomBytes(1024));
+  const namesake = await new Promise((resolve) => {
+    seeder.seed(photosDir, { announce: [trackerUrl] }, resolve);
+  });
+  await new Promise((resolve) => seeder.remove(namesake.infoHash, { destroyStore: false }, resolve));
+  assert.equal((await api('/api/transfers', { method: 'POST', headers: { 'Content-Type': 'application/x-bittorrent' }, body: namesake.torrentFile })).status, 201);
+  assert.equal((await api(`/api/transfers/${namesake.infoHash}`, { method: 'DELETE' })).status, 200);
+  assert.deepEqual(inPlace(), { photos: true, release: true }, 'nor does a .torrent called "Photos" that brings files of its own');
+  rmSync(path.join(downloads, 'Photos'), { recursive: true, force: true });
+  log('delete takes what the transfer wrote, not a folder that has its name');
+
   // A transfer that fails — a full disk, a write the disk refuses — stays listed with the
   // reason until it is deleted, rather than vanishing: the phone says why. A folder where its
-  // file must go makes every write fail.
-  const blockedDir = mkdtempSync(path.join(tmpdir(), 'phone-torrent-blocked-'));
-  writeFileSync(path.join(blockedDir, 'blocked.bin'), randomBytes(64 * 1024));
+  // second file must go makes every write to that file fail.
+  const blockedDir = path.join(mkdtempSync(path.join(tmpdir(), 'phone-torrent-blocked-')), 'Blocked');
+  mkdirSync(blockedDir);
+  const alreadyThere = randomBytes(64 * 1024);
+  writeFileSync(path.join(blockedDir, 'a-written.bin'), alreadyThere);
+  writeFileSync(path.join(blockedDir, 'b-blocked.bin'), randomBytes(64 * 1024));
   const blocked = await new Promise((resolve) => {
-    seeder.seed(path.join(blockedDir, 'blocked.bin'), { announce: [trackerUrl] }, resolve);
+    seeder.seed(blockedDir, { announce: [trackerUrl], pieceLength: 16 * 1024 }, resolve);
   });
-  mkdirSync(path.join(downloads, 'blocked.bin'));
+  const inTheWay = path.join(downloads, 'Blocked', 'b-blocked.bin');
+  mkdirSync(inTheWay, { recursive: true });
+  writeFileSync(path.join(inTheWay, 'keep.txt'), 'not the transfer\'s');
+  // Its first file is on the disk already, whole, as the pack's first episode was above: the
+  // transfer checks it and takes it as its own.
+  writeFileSync(path.join(downloads, 'Blocked', 'a-written.bin'), alreadyThere);
   const blockedSubmit = await api('/api/transfers', { method: 'POST', headers: { 'Content-Type': 'application/x-bittorrent' }, body: blocked.torrentFile });
   assert.equal(blockedSubmit.status, 201);
   const failedTransfer = await waitFor(async () => {
@@ -421,11 +455,15 @@ try {
   assert.ok(!failedTransfer.state.includes(downloads), 'without the server\'s own paths');
   const listedFailure = (await (await api('/api/transfers')).json()).transfers.find((t) => t.id === blocked.infoHash);
   assert.ok(listedFailure && listedFailure.failed, 'the library lists it as failed');
+  // What it wrote goes with it, and only that: the folder in its way is not its own.
+  await waitFor(() => !existsSync(path.join(downloads, 'Blocked', 'a-written.bin')), { label: 'the files of the failed transfer to go', timeout: 5000 });
+  assert.ok(existsSync(path.join(inTheWay, 'keep.txt')), 'a failed transfer leaves what it did not write');
   assert.equal((await api(`/api/transfers/${blocked.infoHash}`, { method: 'DELETE' })).status, 200, 'deleting it clears it');
   assert.equal((await api(`/api/transfers/${blocked.infoHash}`)).status, 404, 'for good');
   await new Promise((resolve) => seeder.remove(blocked.infoHash, { destroyStore: false }, resolve));
-  rmSync(blockedDir, { recursive: true, force: true });
-  log('a failed transfer stays listed with its reason until it is deleted');
+  rmSync(path.dirname(blockedDir), { recursive: true, force: true });
+  rmSync(path.join(downloads, 'Blocked'), { recursive: true, force: true });
+  log('a failed transfer stays listed with its reason until it is deleted, and takes only its own files');
 
   // A restart picks every transfer up again, handlers and all: with SEED_AFTER_DONE=0 a
   // resumed download that is complete stops seeding, as a fresh one does. The only seeder
@@ -538,17 +576,24 @@ try {
   log('the downloads are not static files under any other name');
 
   // A transfer an older server saved as a bare magnet, whose metadata never came back: it
-  // keeps its name, and deleting it still takes its file.
+  // keeps its name, and deleting it still takes its file. A folder of that name could hold
+  // anything, and without the metadata nothing says which of it is the transfer's: it stays.
   await stopServer();
   const orphan = randomBytes(20).toString('hex');
-  writeFileSync(path.join(webDownloads, 'transfers.json'), JSON.stringify([{ id: orphan, source: `magnet:?xt=urn:btih:${orphan}`, addedAt: Date.now(), name: 'orphan.bin' }]));
+  const orphanFolder = randomBytes(20).toString('hex');
+  writeFileSync(path.join(webDownloads, 'transfers.json'), JSON.stringify([
+    { id: orphan, source: `magnet:?xt=urn:btih:${orphan}`, addedAt: Date.now(), name: 'orphan.bin' },
+    { id: orphanFolder, source: `magnet:?xt=urn:btih:${orphanFolder}`, addedAt: Date.now(), name: 'Some.Movie' },
+  ]));
   writeFileSync(path.join(webDownloads, 'orphan.bin'), randomBytes(1024));
   await startServer(tokenless);
   const { transfer: stuck } = await (await fetch(`${serverUrl}/api/transfers/${orphan}`)).json();
   assert.equal(stuck.name, 'orphan.bin', 'a transfer with no metadata keeps its name');
   assert.equal((await fetch(`${serverUrl}/api/transfers/${orphan}`, { method: 'DELETE' })).status, 200);
   assert.ok(!existsSync(path.join(webDownloads, 'orphan.bin')), 'and deleting it takes its file');
-  log('a transfer with no metadata keeps its name, and its file goes with it');
+  assert.equal((await fetch(`${serverUrl}/api/transfers/${orphanFolder}`, { method: 'DELETE' })).status, 200);
+  assert.ok(existsSync(path.join(webDownloads, 'Some.Movie', 'movie.mkv')), 'but not a folder of its name');
+  log('a transfer with no metadata keeps its name, and its file goes with it; a folder does not');
 
   // The Cloudflare Worker, as a plain module. What it imports, @cloudflare/containers, is not
   // installed here, so a stand-in takes its place with the little the Worker touches: the

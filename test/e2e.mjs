@@ -394,7 +394,8 @@ function startPutioApi() {
 /* A TorBox for the days it has trouble, scripted by the test as it goes: its torrents and its queue
  * are maps the test edits, `creates` is what the next createtorrent answers, and each of `outages`
  * is one failed call, answered to the first request whose path and query start with its `path` —
- * with the HTML page Cloudflare sends in front of a service that is down, not the API's JSON. */
+ * with the HTML page Cloudflare sends in front of a service that is down, not the API's JSON, or
+ * with the API's own answer when the outage has a `body`. */
 function startScriptedTorbox() {
   const state = { key: 'scripted-key', torrents: new Map(), queue: new Map(), creates: [], created: 0, outages: [] };
   const cors = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'Authorization, Content-Type', 'Cache-Control': 'no-store' };
@@ -406,7 +407,8 @@ function startScriptedTorbox() {
     const json = (body, status = 200) => res.writeHead(status, { ...cors, 'Content-Type': 'application/json' }).end(JSON.stringify(body));
     const outage = state.outages.findIndex((o) => `${url.pathname}${url.search}`.startsWith(o.path));
     if (outage >= 0) {
-      const [{ status }] = state.outages.splice(outage, 1);
+      const [{ status, body }] = state.outages.splice(outage, 1);
+      if (body) return json(body, status);
       return res.writeHead(status, { ...cors, 'Content-Type': 'text/html' }).end(`<html><body><h1>${status}</h1><p>cloudflare</p></body></html>`);
     }
     if ((req.headers.authorization || '') !== `Bearer ${state.key}`) return json({ success: false, detail: 'bad api key' }, 401);
@@ -738,14 +740,18 @@ try {
     const base = `http://${lanAddress || '127.0.0.1'}:${shared.port}/`;
     try {
       assert.equal((await ask(base)).status, 200, 'HOST=0.0.0.0 puts it on the network');
-      assert.equal((await ask(`${base}app.js`)).status, 200);
-      for (const inside of ['.git/HEAD', 'test/.tmp/', 'node_modules/playwright/package.json']) {
+      for (const part of ['index.html', 'app.js', 'saver.js', 'sw.js', 'styles.css', 'manifest.webmanifest', 'icon.svg', 'icons/icon-192.png', 'vendor/webtorrent.min.js']) {
+        assert.equal((await ask(`${base}${part}`)).status, 200, `the page gets /${part}`);
+      }
+      // Nothing else: the server's downloads/ sits in the checkout when it runs from there, and a
+      // list of what to keep out missed it.
+      for (const inside of ['.git/HEAD', 'test/.tmp/', 'node_modules/playwright/package.json', 'server/app.mjs', 'package.json', 'test/serve.mjs', 'downloads/transfers.json']) {
         assert.equal((await ask(`${base}${inside}`)).status, 404, `and serves the app, not /${inside}`);
       }
     } finally {
       shared.server.close();
     }
-    log(`npm start: loopback unless HOST says otherwise, and then no dotfiles or node_modules${lanAddress ? ` (checked at ${lanAddress})` : ''}`);
+    log(`npm start: loopback unless HOST says otherwise, and then the app's files and nothing else${lanAddress ? ` (checked at ${lanAddress})` : ''}`);
   }
 
   /* ---------- the page on a small screen, in both colour schemes, and as the installed iPhone app ---------- */
@@ -762,18 +768,22 @@ try {
     };
 
     // Text against what it is drawn on, by the WCAG formula, which asks 4.5:1 of text this size: an
-    // error toast (nothing pasted, then Add), a primary button's label, and the muted colour of the
-    // tabs not chosen and of the hints in the share, cloud and no-peers panels, on the page colour.
+    // error toast (nothing pasted, then Add), a primary button's label, the muted colour of the
+    // tabs not chosen and of the hints in the share, cloud and no-peers panels, on the page colour,
+    // and the network check's ✓, ✗ and ! on its list.
     for (const colorScheme of ['light', 'dark']) {
       const { ctx, page } = await open({ colorScheme, viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
       await page.click('#magnet-form button[type="submit"]');
       await page.waitForSelector('.toast.error');
       const pairs = await page.evaluate(() => {
         const style = (selector) => getComputedStyle(document.querySelector(selector));
+        // The marks as runNetworkCheck writes them, without asking any tracker.
+        document.querySelector('#netcheck-results').innerHTML = '<li><span class="ok">✓</span></li><li><span class="bad">✗</span></li><li><span class="warn">!</span></li>';
         return {
           'an error toast': [style('.toast.error').color, style('.toast.error').backgroundColor],
           'a primary button': [style('.add-row .btn.primary').color, style('.add-row .btn.primary').backgroundColor],
           'muted text on the page colour': [style('.tab:not(.active)').color, style('.tabs').backgroundColor],
+          ...Object.fromEntries(['ok', 'bad', 'warn'].map((level) => [`the network check's "${level}"`, [style(`.netcheck .${level}`).color, style('.netcheck').backgroundColor]])),
         };
       });
       for (const [what, [text, background]] of Object.entries(pairs)) {
@@ -782,7 +792,7 @@ try {
       }
       await ctx.close();
     }
-    log('error toasts, primary buttons and muted text read at 4.5:1 or more, light and dark');
+    log('error toasts, primary buttons, muted text and the network check read at 4.5:1 or more, light and dark');
 
     const { ctx, page } = await open({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
     const within = () => page.evaluate(() => document.documentElement.clientWidth);
@@ -1452,12 +1462,21 @@ try {
   await waitFor(() => cardNames().then((n) => n.includes(Buffer.from('abcdefghijklmnopqrst').toString('hex'))), { label: 'a shared base32 info hash added', timeout: 15000 });
   await shareFields({ title: 'A page', text: 'Have a look at this, it is great' });
   await waitFor(() => phone.$$eval('.toast', (els) => els.some((e) => /Nothing to add in what was shared/.test(e.textContent))), { label: 'a share with nothing to add says so', timeout: 10000 });
-  log('share target: a .torrent link and an info hash added, and a share with nothing in it explained');
+  // A browser shares the address of the page it is on: a torrent site's page about a torrent is not
+  // the .torrent. It is nothing to add, not a download to confirm that then blames CORS.
+  const dialogsBeforePage = dialogs;
+  await shareFields({ title: 'Ubuntu 24.04 on a torrent site', url: 'https://torrents.example/details/12345', text: '' });
+  await waitFor(() => phone.$$eval('.toast', (els) => els.some((e) => /Nothing to add in what was shared/.test(e.textContent))), { label: 'a shared web page to be nothing to add', timeout: 10000 });
+  assert.equal(dialogs, dialogsBeforePage, 'with nothing to confirm');
+  assert.equal(await phone.$$eval('.toast', (els) => els.some((e) => /CORS/.test(e.textContent))), false, 'and no CORS proxy to set up');
+  log('share target: a .torrent link and an info hash added, and a share with nothing in it, a web page included, explained');
 
   // A magnet WebTorrent would refuse says what is wrong with it, not "Invalid torrent identifier",
   // and stays in the box to be fixed: a link cut short in a chat, one with no info hash, a v2-only one.
   for (const [text, reason] of [
     ['magnet:?xt=urn:btih:123', /3 characters long/],
+    // Hexadecimal, and as long as a base32 hash: still a hex one missing its end.
+    [`magnet:?xt=urn:btih:${'0123456789abcdef'.repeat(2)}`, /32 characters long .*cut short/],
     ['magnet:?dn=foo', /no info hash/],
     [`magnet:?xt=urn:btmh:1220${'ab'.repeat(32)}&dn=v2only`, /v2 info hash/],
   ]) {
@@ -1472,7 +1491,20 @@ try {
   await phone.click('#magnet-form button[type="submit"]');
   await waitFor(() => cardNames().then((n) => n.includes('capital')), { label: 'a magnet typed with a capital M', timeout: 5000 });
   assert.equal(await phone.inputValue('#magnet-input'), '', 'an added magnet leaves the box');
-  log('a magnet that cannot be added says why, and stays to be fixed; a capital M is fine');
+  // Nor is the sentence around a link, when its info hash is the last thing in it: the full stop
+  // after it, the brackets of a Markdown link. WebTorrent reads the hash and not what follows, and
+  // the magnet is kept as the link alone. A bracket of the link's own name stays.
+  for (const [text, hash, kept] of [
+    [`Here it is: magnet:?xt=urn:btih:${'5'.repeat(40)}.`, '5'.repeat(40), `magnet:?xt=urn:btih:${'5'.repeat(40)}`],
+    [`[the link](magnet:?xt=urn:btih:${'6'.repeat(40)})`, '6'.repeat(40), `magnet:?xt=urn:btih:${'6'.repeat(40)}`],
+    [`(magnet:?xt=urn:btih:${'7'.repeat(40)}&dn=Show_(2020)).`, '7'.repeat(40), `magnet:?xt=urn:btih:${'7'.repeat(40)}&dn=Show_(2020)`],
+  ]) {
+    await phone.fill('#magnet-input', text);
+    await phone.click('#magnet-form button[type="submit"]');
+    const source = await waitFor(() => phone.evaluate((h) => [...window.__phoneTorrent.views.values()].find((v) => v.torrent.infoHash === h)?.source?.uri, hash), { label: `"${text}" added`, timeout: 5000 });
+    assert.equal(source, kept, 'kept as the link alone');
+  }
+  log('a magnet that cannot be added says why, and stays to be fixed; a capital M, and a sentence around a link, are fine');
 
   /* ---------- magnet-sourced torrent: restored from stored metadata, retry keeps it ---------- */
   for (const t of await phone.$$('.torrent .remove-btn')) await t.click();
@@ -2016,6 +2048,21 @@ try {
   assert.deepEqual(after, { provider: 'putio', key: 'putio-token', base: putioApi.url }, 'a tested, cancelled key changes nothing');
   log('settings: Test changes nothing until Save; each service keeps its own address and key');
 
+  // Enter in a field — Go, on a phone's keyboard, the natural way to finish typing a key — is Save.
+  // Cancel is no submit button, so it cannot be the one Enter presses.
+  const enterKey = async (key) => {
+    await ios.click('#settings-btn');
+    await ios.waitForSelector('#settings-dialog[open]');
+    await ios.fill('#cloud-key', key);
+    await ios.press('#cloud-key', 'Enter');
+    // Saved on the dialog's close event, which comes a moment after it closes.
+    await waitFor(() => ios.evaluate((k) => window.__phoneTorrent.cloudCtx().key === k, key), { label: `the key "${key}", typed and entered, to be kept`, timeout: 5000 });
+    assert.equal(await ios.$eval('#settings-dialog', (e) => e.returnValue), 'save', 'by Save');
+  };
+  await enterKey('putio-token-typed');
+  await enterKey('putio-token'); // and the one it was, back
+  log('settings: Enter in a field saves, as the Go key of a phone keyboard expects');
+
   /* ---------- Real-Debrid and AllDebrid: the same table, two other dialects ---------- */
   // Driven through the app's own provider functions rather than the UI, which
   // put.io and TorBox already cover: what is under test here is the mapping.
@@ -2205,6 +2252,25 @@ try {
   await waitFor(() => cloudLine('doomed.bin', /Ready on TorBox/), { label: 'the transfer sent again, ready', timeout: 30000 });
   assert.equal(tb.created, createdBefore + 1, 'sent to TorBox once more');
   assert.equal(await sendAgain.isVisible(), false, 'and nothing left to send again');
+
+  // A key refused (a key regenerated on TorBox's site) is not a transfer gone: the transfer is still
+  // there, and sending it again would start a second one beside it. The card says to fix the key,
+  // offers nothing to send again, and asks again once Settings are saved — here, with a TorBox that
+  // takes the key again.
+  tb.creates.push({ torrent_id: 96 });
+  tb.torrents.set(96, tbTorrent(96, 'rekeyed.bin'));
+  await sendPrivate('rekeyed.bin');
+  await waitFor(() => cloudLine('rekeyed.bin', /TorBox: downloading/), { label: 'a transfer under way', timeout: 15000 });
+  tb.outages.push({ path: '/v1/api/torrents/mylist?id=96', status: 401, body: { success: false, detail: 'bad api key' } });
+  await waitFor(() => cloudLine('rekeyed.bin', /bad api key.*Settings/), { label: 'the key refused, and where to fix it', timeout: 15000 });
+  assert.equal(await troubleCard('rekeyed.bin').locator('.cloud-again-btn').isVisible(), false, 'nothing offered to send again');
+  const createdBeforeKey = tb.created;
+  tb.torrents.set(96, tbTorrent(96, 'rekeyed.bin', { state: 'completed', files: oneFile('rekeyed.bin') }));
+  await trouble.click('#settings-btn');
+  await trouble.waitForSelector('#settings-dialog[open]');
+  await trouble.click('#settings-dialog button[value="save"]');
+  await waitFor(() => cloudLine('rekeyed.bin', /Ready on TorBox/), { label: 'the same transfer, asked for again after Save', timeout: 15000 });
+  assert.equal(tb.created, createdBeforeKey, 'and not sent a second time');
 
   // Deleted in the Cloud library, the card's transfer is gone from the card too: it offers to fetch
   // the torrent in the cloud again, and still does after a reload.
@@ -2403,6 +2469,13 @@ try {
   await lifeCard('unwanted.bin').locator('.select-none-btn').click();
   assert.equal(await lifeCard('unwanted.bin').locator('.state').textContent(), 'nothing selected');
   await waitFor(() => lockHeld().then((held) => !held), { label: 'nothing selected to let the screen lock go', timeout: 5000 });
+  // Nor do its peers keep it on — a magnet's are still there once they have sent the metadata — for
+  // a torrent that wants nothing from them. (No peer here: one is said to be connected.)
+  await life.evaluate((h) => Object.defineProperty(window.__phoneTorrent.client.torrents.find((t) => t.infoHash === h), 'numPeers', { configurable: true, get: () => 1 }), unwanted.infoHash);
+  await lifeCard('unwanted.bin').locator('.select-none-btn').click();
+  await new Promise((r) => setTimeout(r, 500)); // time for the lock to be asked for, if it were
+  assert.equal(await lockHeld(), false, 'a peer connected to a torrent with nothing selected does not keep the screen on');
+  await life.evaluate((h) => { delete window.__phoneTorrent.client.torrents.find((t) => t.infoHash === h).numPeers; }, unwanted.infoHash);
 
   // Trackers that are all udp:// or http:// are not the end of it: the app's own wss:// trackers may
   // still find a WebRTC peer, so this one keeps the screen on — and explains itself.
@@ -2629,14 +2702,17 @@ try {
   });
   const lan = await lanCtx.newPage();
   lan.on('pageerror', (e) => console.error('lan page error:', e));
-  lan.on('dialog', (d) => d.accept());
+  const lanDialogs = [];
+  lan.on('dialog', (d) => { lanDialogs.push(d.message()); d.accept(); });
   await lan.goto(`http://phone.lan/#magnet:?xt=urn:btih:${'6'.repeat(40)}&dn=from%20a%20link`);
   await lan.waitForFunction(() => window.__phoneTorrent?.client);
   assert.equal(await lan.evaluate(() => window.isSecureContext), false, 'plain http at a name that is not localhost');
   await waitFor(() => lan.$$eval('.toast', (els) => els.some((e) => /need a secure page, HTTPS or localhost/.test(e.textContent))), { label: 'a linked magnet to say why it cannot be added here', timeout: 10000 });
   assert.equal((await lan.$$('.torrent')).length, 0, 'and nothing is added that could only fail');
+  assert.deepEqual(lanDialogs, [], 'nor first asked whether to start downloading it');
   assert.match(await lan.$eval('#tab-download .insecure-note', (e) => (e.hidden ? '' : e.textContent)), /Here only the Cloud tab works/, 'the Download tab says so');
   assert.deepEqual(await lan.$$eval('#torrent-file-input, #magnet-input', (els) => els.map((e) => e.disabled)), [true, true], 'with no picker or field that could only fail');
+  assert.match(await lan.$eval('#empty-state', (e) => e.textContent), /Cloud tab/, 'and no "pick a .torrent" under them, but where to go instead');
   await lan.click('.tab[data-tab="seed"]');
   assert.equal(await lan.isVisible('#tab-seed .insecure-note'), true, 'so does Seed & share');
   assert.equal(await lan.$eval('#seed-file-input', (e) => e.disabled), true);
@@ -2654,6 +2730,8 @@ try {
   // so the account and the list would reach the static test server instead of these answers.
   const ownCtx = await browser.newContext({ serviceWorkers: 'block' });
   const ownCalls = [];
+  // What the server lists: nothing, until the test puts a transfer there.
+  const ownTransfers = [];
   await ownCtx.route(`${site.url}api/**`, (route) => {
     const req = route.request();
     const { pathname } = new URL(req.url());
@@ -2661,7 +2739,8 @@ try {
     const body = pathname === '/api/health' ? { ok: true, torrents: 0 }
       : pathname === '/api/account' ? { who: 'your server', detail: '0 transfers · 30 GB free', version: 1 }
         : req.method() === 'POST' ? { transfer: { id: '9'.repeat(40) } }
-          : { transfers: [] };
+          : pathname === '/api/transfers' ? { transfers: ownTransfers }
+            : { transfer: ownTransfers.find((t) => pathname === `/api/transfers/${t.id}`) };
     return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
   });
   const own = await ownCtx.newPage();
@@ -2677,6 +2756,31 @@ try {
   await own.fill('#cloud-input', `magnet:?xt=urn:btih:${'9'.repeat(40)}`);
   await own.click('#cloud-form button[type="submit"]');
   await waitFor(() => ownCalls.includes('POST /api/transfers'), { label: 'a magnet sent to the server with nothing set up', timeout: 5000 });
+
+  // The server lists each file as soon as it is complete, before the whole transfer is. A file list
+  // already open takes on each one as it comes, in its place, and leaves the rows it has alone — a
+  // video playing in one included; so does the transfer turning ready.
+  const episode = (i) => ({ id: i, name: `Show.S01E0${i + 1}.mkv`, size: 1000 + i, link: `/api/transfers/${'9'.repeat(40)}/files/${i}?expires=1&sig=x` });
+  const season = { id: '9'.repeat(40), name: 'Show.S01', size: 3003, progress: 0.1, state: 'downloading', ready: false, peers: 3, files: [] };
+  ownTransfers.push(season);
+  const relist = () => own.evaluate(() => window.__phoneTorrent.refreshCloudLibrary({ quiet: true }));
+  await relist();
+  const seasonRow = own.locator('.cloud-item', { has: own.locator('.cloud-item-name', { hasText: 'Show.S01' }) });
+  await seasonRow.locator('.cloud-item-files-btn').click({ timeout: 5000 });
+  await waitFor(() => seasonRow.locator('.cloud-item-files').textContent().then((t) => /once the download finishes/.test(t)), { label: 'no file finished yet', timeout: 5000 });
+  const shownFiles = () => seasonRow.locator('.cloud-file-name').allTextContents();
+  Object.assign(season, { progress: 0.4, files: [episode(1)] });
+  await relist();
+  assert.deepEqual(await shownFiles(), ['Show.S01E02.mkv'], 'the first file to finish, in a list that was already open');
+  await seasonRow.locator('.cloud-file').evaluate((row) => { row.dataset.mark = 'the same one'; });
+  Object.assign(season, { progress: 0.7, files: [episode(0), episode(1)] });
+  await relist();
+  assert.deepEqual(await shownFiles(), ['Show.S01E01.mkv', 'Show.S01E02.mkv'], 'the next one, in its place');
+  assert.match(await seasonRow.locator('.cloud-save').first().getAttribute('href'), /\/files\/0\?expires=1&sig=x$/, 'with its own link');
+  Object.assign(season, { progress: 1, state: 'seeding', ready: true, files: [0, 1, 2].map(episode) });
+  await relist();
+  assert.deepEqual(await shownFiles(), ['Show.S01E01.mkv', 'Show.S01E02.mkv', 'Show.S01E03.mkv'], 'and the last, as the transfer turns ready');
+  assert.equal(await seasonRow.locator('.cloud-file[data-mark="the same one"] .cloud-file-name').textContent(), 'Show.S01E02.mkv', 'the row shown first is still the same one');
   await ownCtx.close();
   // Anywhere else (GitHub Pages, npm start) that address is a 404, and the default stays.
   const elsewhereCtx = await browser.newContext();
@@ -2686,7 +2790,27 @@ try {
   await elsewhere.evaluate(() => window.__phoneTorrent.started);
   assert.equal(await elsewhere.evaluate(() => window.__phoneTorrent.cloudCtx().provider), 'torbox', 'a page no server serves keeps its default');
   await elsewhereCtx.close();
-  log('served by your own server, the page uses it with nothing to set');
+  // A server deployed on Render, Fly or behind a tunnel has an AUTH_TOKEN; its health answers all
+  // the same, and the page takes it as the service. Settings then asks for that token, rather than
+  // saying a server alone on your machine needs none.
+  const tokenCtx = await browser.newContext({ serviceWorkers: 'block' });
+  await tokenCtx.route(`${site.url}api/**`, (route) => {
+    const { pathname } = new URL(route.request().url());
+    const [status, body] = pathname === '/api/health' ? [200, { ok: true, torrents: 0 }] : [401, { error: 'bad or missing token' }];
+    return route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
+  });
+  const tokened = await tokenCtx.newPage();
+  tokened.on('pageerror', (e) => console.error('token server page error:', e));
+  await tokened.goto(site.url);
+  await tokened.waitForFunction(() => window.__phoneTorrent?.client);
+  await tokened.evaluate(() => window.__phoneTorrent.started);
+  await waitFor(() => tokened.$eval('#cloud-account', (e) => /bad or missing token/.test(e.textContent)), { label: 'the server to turn the page away for want of its token', timeout: 5000 });
+  await tokened.click('#settings-btn');
+  await tokened.waitForSelector('#settings-dialog[open]');
+  assert.equal(await tokened.inputValue('#cloud-provider'), 'server', 'the server is the service');
+  assert.match(await tokened.textContent('#cloud-info'), /asks for a token: paste its AUTH_TOKEN/, 'and Settings asks for its token');
+  await tokenCtx.close();
+  log('served by your own server, the page uses it with nothing to set, asks for its token when it has one, and an open file list takes on each file as it finishes');
 
   /* ---------- offline: the card says so, and nothing blames CORS ---------- */
   const offCtx = await browser.newContext();

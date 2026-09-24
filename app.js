@@ -511,26 +511,45 @@ function parseTorrentText(text) {
   // title on the next line, which is not part of the last parameter. A phone keyboard capitalises the
   // first letter of what is typed, and WebTorrent takes only a lower-case "magnet:".
   const magnet = t.match(/magnet:\?[^\s"<>]+/i);
-  if (magnet) return magnet[0].replace(/^magnet:/i, 'magnet:');
+  if (magnet) return trimSentence(magnet[0]).replace(/^magnet:/i, 'magnet:');
   if (/^[a-f0-9]{40}$/i.test(t) || /^[a-z2-7]{32}$/i.test(t)) return `magnet:?xt=urn:btih:${t}`;
   if (/^https?:\/\/\S+$/i.test(t)) return t;
   return null;
 }
 
 /**
+ * A link as it sits in a sentence, without the sentence around it: "here: magnet:?….",
+ * "(magnet:?…)", "[link](magnet:?…)". A closing bracket whose opening one is in the link is the
+ * link's own, as in a name like "Show_(2020)".
+ */
+function trimSentence(link) {
+  const count = (c) => link.split(c).length - 1;
+  for (;;) {
+    const last = link.slice(-1);
+    const opening = { ')': '(', ']': '[', '}': '{' }[last];
+    if (opening ? count(opening) < count(last) : /[.,;:!?']/.test(last)) link = link.slice(0, -1);
+    else return link;
+  }
+}
+
+/**
  * Why this magnet cannot be added, in words, or '' when it can. WebTorrent needs a v1 info hash —
  * xt=urn:btih: and 40 hexadecimal or 32 base32 characters — and without one says only "Invalid
- * torrent identifier", which tells whoever pasted a link cut short in a chat nothing at all.
+ * torrent identifier", which tells whoever pasted a link cut short in a chat nothing at all. It
+ * reads the first 40 characters after "btih:" (the first 32 when there are fewer), and what comes
+ * after them is no reason to refuse a link it takes.
  */
 function magnetProblem(magnet) {
   const xts = magnet.slice(magnet.indexOf('?') + 1).split('&').filter((p) => p.startsWith('xt=')).map((p) => p.slice(3));
   const hashes = xts.filter((xt) => xt.startsWith('urn:btih:')).map((xt) => xt.slice(9));
-  if (hashes.some((h) => /^(?:[a-f0-9]{40}|[a-z2-7]{32})$/i.test(h))) return '';
+  if (hashes.some((h) => (h.length >= 40 ? /^[a-f0-9]{40}/i : /^[a-z2-7]{32}/i).test(h))) return '';
   if (hashes.length) {
-    return hashes[0].length === 40 || hashes[0].length === 32
-      ? 'This magnet\'s info hash has characters no info hash has: it was changed on the way. Copy the whole link again.'
-      : `This magnet's info hash is ${hashes[0].length} characters long where it takes 40 (or 32 in base32): `
-        + 'the link was probably cut short. Copy the whole of it again.';
+    const [h] = hashes;
+    // Shorter than a base32 hash, or hexadecimal and shorter than a hex one: the end is missing.
+    return h.length < 32 || (h.length < 40 && /^[a-f0-9]+$/i.test(h))
+      ? `This magnet's info hash is ${h.length} characters long where it takes 40 (or 32 in base32): `
+        + 'the link was probably cut short. Copy the whole of it again.'
+      : 'This magnet\'s info hash has characters no info hash has: it was changed on the way. Copy the whole link again.';
   }
   if (xts.some((xt) => /^urn:btmh:/i.test(xt))) {
     return 'This magnet only carries a BitTorrent v2 info hash (btmh), and this app needs a v1 one (btih). '
@@ -589,8 +608,16 @@ function preparing(torrent) {
   return !torrent.infoHash || (Boolean(torrent.metadata) && !torrent.ready) || Boolean(views.get(torrent)?.seeding && !torrent.done);
 }
 
-/** Torrents that arrive from outside the app (shared, magnet: handler, URL) need a tap first. */
+/**
+ * Torrents that arrive from outside the app (shared, magnet: handler, URL) need a tap first. Where
+ * torrents cannot run in the page, the answer is no before anything is asked: the question was
+ * whether to start a download that could only be refused once it was said yes to.
+ */
 function confirmExternalAdd(label) {
+  if (IN_BROWSER_BLOCKED) {
+    toast(IN_BROWSER_BLOCKED, { error: true, timeout: 9000 });
+    return false;
+  }
   return confirm(`Add ${label} to Phone Torrent and start downloading it?`);
 }
 
@@ -1573,8 +1600,10 @@ async function refreshCloudLibrary({ quiet = false } = {}) {
     // Each item carries where it lives, which is where its files and its delete go.
     cloudItems = items.map((item) => ({ ...item, provider: ctx.provider, base: ctx.base }));
     els.cloudError.hidden = true;
+    noteServerToken(ctx, null);
   } catch (err) {
     if (from !== cloudItemsFrom) return;
+    noteServerToken(ctx, err);
     els.cloudError.hidden = false;
     els.cloudError.textContent = `${ctx.api.label}: ${err.message}`;
     if (!quiet) toast(`Could not read the cloud library: ${err.message}`, { error: true, timeout: 9000 });
@@ -1604,9 +1633,22 @@ async function cloudAccountLine() {
   try {
     const { who, detail } = await ctx.api.account(ctx);
     els.cloudAccount.textContent = [`${ctx.api.label}${who ? ` · ${who}` : ''}`, detail].filter(Boolean).join(' · ');
+    noteServerToken(ctx, null);
   } catch (err) {
     els.cloudAccount.textContent = `${ctx.api.label}: ${err.message}`;
+    noteServerToken(ctx, err);
   }
+}
+
+/**
+ * Your own server turned the last call away for want of its token (401). The page picks a server
+ * that serves it as the service by itself, with no key (adoptOwnServer), and one deployed on Render,
+ * Fly or behind a tunnel has an AUTH_TOKEN: Settings then says to paste it, not that a server alone
+ * on your machine needs none.
+ */
+let serverWantsToken = false;
+function noteServerToken(ctx, err) {
+  if (ctx.provider === 'server') serverWantsToken = Boolean(err && err.status === 401);
 }
 
 async function cloudExpand(item, el) {
@@ -1634,14 +1676,34 @@ async function fillCloudFiles(item, filesEl) {
 }
 
 function renderCloudFiles(item, filesEl) {
-  const ctx = cloudCtx({ provider: item.provider, base: item.base });
   filesEl.textContent = '';
   if (!item.files.length) {
     filesEl.textContent = item.ready ? 'No files in this transfer.' : 'Files appear once the download finishes.';
     return;
   }
+  addCloudFiles(item, filesEl);
+}
+
+/**
+ * Rows for the files an open list does not show yet, each in its place. Your own server lists a
+ * file as soon as it is complete, so a list can grow while it is open; the rows it already has are
+ * left as they are, and a video playing in one keeps playing.
+ */
+function addCloudFiles(item, filesEl) {
+  const ctx = cloudCtx({ provider: item.provider, base: item.base });
+  const shown = new Map([...filesEl.children].map((el) => [el.dataset.file, el]).filter(([id]) => id !== undefined));
+  // Nothing listed yet: what is there is a message saying so.
+  if (!shown.size) filesEl.textContent = '';
+  let before = filesEl.firstElementChild;
   for (const file of item.files) {
+    const had = shown.get(String(file.id));
+    if (had) {
+      before = had.nextElementSibling;
+      continue;
+    }
     const row = els.cloudFileTemplate.content.firstElementChild.cloneNode(true);
+    row.dataset.file = String(file.id);
+    filesEl.insertBefore(row, before);
     const href = ctx.api.fileLink(ctx, item.id, file);
     $('.cloud-file-name', row).textContent = file.name;
     $('.cloud-file-size', row).textContent = file.error ? `${formatBytes(file.size)} · no link yet: ${file.error}` : formatBytes(file.size);
@@ -1649,7 +1711,6 @@ function renderCloudFiles(item, filesEl) {
     // then): named, with why, and nothing to save or play.
     if (!href) {
       $('.cloud-file-actions', row).hidden = true;
-      filesEl.appendChild(row);
       continue;
     }
     const save = $('.cloud-save', row);
@@ -1684,7 +1745,6 @@ function renderCloudFiles(item, filesEl) {
         linkInput.setSelectionRange(0, linkInput.value.length);
       }
     });
-    filesEl.appendChild(row);
   }
 }
 
@@ -1737,11 +1797,18 @@ function renderCloudLibrary() {
       cloudRows.set(key, row);
     } else {
       const becameReady = !row.item.ready && item.ready;
+      const had = row.item.files.length;
       // Files fetched on demand stay with the row while the transfer is what it was.
-      if (!becameReady && !item.files.length && row.item.files.length) item.files = row.item.files;
+      if (!becameReady && !item.files.length && had) item.files = row.item.files;
       row.item = item;
       const filesEl = $('.cloud-item-files', row.el);
-      if (becameReady && !filesEl.hidden) fillCloudFiles(item, filesEl);
+      if (!filesEl.hidden) {
+        // Listed with the transfer (your own server names each file once it is complete, TorBox
+        // all of them once it is done): an open list takes on the new ones.
+        if (item.files.length > had) addCloudFiles(item, filesEl);
+        // Not listed with it: asked for, now that there is something to ask for.
+        else if (becameReady && !item.files.length) fillCloudFiles(item, filesEl);
+      }
     }
     const { el } = row;
     const pct = Math.min(100, Math.round((item.progress || 0) * 100));
@@ -1773,9 +1840,18 @@ async function cloudSubmit(view) {
   return { id, provider: ctx.provider, base: ctx.base, state: 'queued', progress: 0, ready: false, files: [] };
 }
 
-/** The card's transfer failed, or its poll ended on an answer that will not change: nothing more will come of it. */
+/**
+ * The card's transfer failed, or its poll ended on an answer that will not change: nothing more will
+ * come of it. A key refused is not that: the transfer may well still be there, and sending it again
+ * would start a second one beside it. Such a card asks again once Settings are saved.
+ */
 function cloudDead(view) {
-  return Boolean(view.cloud && (view.cloud.failed || view.cloudError));
+  return Boolean(view.cloud && (view.cloud.failed || (view.cloudError && !view.cloudRefused)));
+}
+
+/** The service turned the key away (401, 403): a matter for Settings, not for this transfer. */
+function keyRefused(err) {
+  return err.status === 401 || err.status === 403;
 }
 
 /** The card's transfer is gone from the account: the card lets go of it, for good — a reload does not bring it back. */
@@ -1783,6 +1859,7 @@ function forgetCloud(view) {
   stopCloudPoll(view);
   view.cloud = null;
   view.cloudError = '';
+  view.cloudRefused = false;
   view.cloudAnnounced = false;
   if (view.record) view.record.cloud = null;
   renderCloud(view);
@@ -1808,6 +1885,7 @@ function stopCloudPoll(view) {
 function startCloudPoll(view) {
   stopCloudPoll(view);
   view.cloudError = '';
+  view.cloudRefused = false;
   const poll = {};
   view.cloudPoll = poll;
   let failures = 0;
@@ -1865,7 +1943,8 @@ function startCloudPoll(view) {
         return;
       }
       stopCloudPoll(view);
-      view.cloudError = err.message;
+      view.cloudRefused = keyRefused(err);
+      view.cloudError = view.cloudRefused ? `${err.message}. Fix the key in Settings → Cloud fetch, and this card asks again.` : err.message;
       logEvent(view, `cloud error: ${err.message}`);
       renderCloud(view);
     } finally {
@@ -3131,6 +3210,8 @@ if (IN_BROWSER_BLOCKED) {
     note.hidden = false;
   }
   for (const control of $$('#tab-download input, #tab-download button, #tab-seed input, #tab-seed button')) control.disabled = true;
+  // Not "pick a .torrent or paste a magnet above", under a picker and a field that are switched off.
+  els.empty.textContent = 'No torrents here: they cannot run on this page. The Cloud tab can fetch them for you.';
 }
 
 /* ---------- screen wake lock: phones suspend the page when the screen locks ---------- */
@@ -3142,7 +3223,10 @@ function wantsWakeLock() {
   return client.torrents.some((t) => {
     if (t.paused) return false;
     const view = views.get(t);
-    if (view?.seeding || t.numPeers > 0) return true;
+    if (view?.seeding) return true;
+    // A finished download is seeding while someone is there to take it. One still to finish is
+    // not kept on by its peers alone: with every file unticked there is nothing it wants from them.
+    if (isComplete(t)) return t.numPeers > 0;
     // Nothing will arrive for a private torrent this page cannot announce, and nothing is needed for
     // one the cloud already holds: the screen staying on would only drain the battery.
     if (cannotDownloadHere(view?.reach) || view?.cloud?.ready) return false;
@@ -3209,7 +3293,9 @@ els.settingsBtn.addEventListener('click', async () => {
   els.cloudInfo.textContent = settings.cloud.apiKey
     ? 'A key is set. Torrents no browser can reach offer "Fetch it in the cloud".'
     : settings.cloud.provider === 'server'
-      ? 'No token: fine for a server alone on your machine. Set AUTH_TOKEN before anyone else can reach it.'
+      ? serverWantsToken
+        ? 'This server asks for a token: paste its AUTH_TOKEN here as the key.'
+        : 'No token: fine for a server alone on your machine. Set AUTH_TOKEN before anyone else can reach it.'
       : 'Without a key, cloud fetch stays hidden and nothing is sent anywhere.';
   els.fallbackDelayInput.value = String(settings.fallbackDelay || 20);
   els.rtcInput.value = settings.rtcConfig ? JSON.stringify(settings.rtcConfig) : '';
@@ -3365,6 +3451,9 @@ els.settingsForm.addEventListener('submit', (event) => {
   checkedSettings = { typed, trackers, rtcConfig, trackerListUrl };
 });
 
+// Leaves without checking or saving anything, a field that cannot be saved included.
+$('button[value="cancel"]', els.settingsDialog).addEventListener('click', () => els.settingsDialog.close('cancel'));
+
 els.settingsDialog.addEventListener('close', () => {
   els.settingsError.hidden = true;
   if (els.settingsDialog.returnValue !== 'save' || !checkedSettings) return;
@@ -3405,6 +3494,8 @@ els.settingsDialog.addEventListener('close', () => {
   updateWakeLock();
   cloudAccountLine();
   refreshCloudLibrary({ quiet: true });
+  // Cards whose key was refused ask again, with the key saved now.
+  for (const view of views.values()) if (view.cloud && view.cloudRefused) startCloudPoll(view);
   if (listChanged) refreshTrackerList({ force: true });
 
   const wantDebug = els.debugToggle.checked;
@@ -3505,10 +3596,23 @@ window.addEventListener('offline', () => {
 /**
  * A share hands over the page's title, its address and whatever text came with them, one per line:
  * "Download X" above "https://…/x.torrent". A magnet anywhere wins, as in the paste box; failing
- * that, the first word that is an info hash or a link.
+ * that, the first word that is an info hash or a link to a .torrent. Not any link: a browser shares
+ * the address of the page it is on, a torrent site's page about a torrent, and that fetched as a
+ * .torrent could only fail, and send whoever shared it off to set up a CORS proxy.
  */
 function parseSharedText(text) {
-  return parseTorrentText(text) || String(text || '').split(/\s+/).map(parseTorrentText).find(Boolean) || null;
+  const usable = (id) => (id && /^https?:/i.test(id) ? torrentLink(id) : id);
+  return usable(parseTorrentText(text)) || String(text || '').split(/\s+/).map((word) => usable(parseTorrentText(word))).find(Boolean) || null;
+}
+
+/** A link that names a .torrent file, in its path or in its query (download.php?file=x.torrent). */
+function torrentLink(url) {
+  try {
+    const { pathname, search } = new URL(url);
+    return /\.torrent$/i.test(pathname) || /\.torrent(?:&|$)/i.test(safeDecode(search)) ? url : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Adds what was shared to the app; resolves with how many shared items were something to add. */

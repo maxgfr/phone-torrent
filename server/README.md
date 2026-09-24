@@ -39,17 +39,22 @@ Prefer no machine at all? `render.yaml`, `fly.toml` and `cloudflare/` deploy
 the same image; the main README compares them. The server in it runs as an
 unprivileged user (uid 10001). The container starts as root only to hand that
 user the download directory, since the disk Fly or Render mounts over `/data`
-arrives owned by root; one that is already the user's is left alone. Started
-with `--user`, it skips that step.
+arrives owned by root — and only when it is root's and empty, as such a disk
+is. A folder of yours mounted there, files and all, keeps its owner: the server
+then says it cannot write there, and `--user <uid>:<gid>` runs it as that
+owner instead, which skips that step.
 
 ## Point the app at it
 
 **Settings → Cloud fetch → service “My own server”**, `AUTH_TOKEN` as the key
-(nothing, for a server with no token), then **Test the key**. Opened from this server, the base URL can stay empty —
-empty means this page’s own address, which is already the right one. Fill it in
-only to drive a server somewhere else. From then on the Cloud tab and the
-library drive this server exactly as they drive TorBox or put.io: send a magnet
-or a `.torrent`, watch the progress, then play or save each file.
+(nothing, for a server with no token), then **Test the key**. Opened from this
+server, the base URL can stay empty — empty means this page’s own address,
+which is already the right one — and while no service has been set up, the
+page picks “My own server” by itself, so a server with no token needs nothing
+set at all. Fill the address in only to drive a server somewhere else. From
+then on the Cloud tab and the library drive this server exactly as they drive
+TorBox or put.io: send a magnet or a `.torrent`, watch the progress, then play
+or save each file — in the library, as soon as that file is complete.
 
 ## The API
 
@@ -66,13 +71,13 @@ device gets, rather than the key to the whole server.
 | `GET /api/transfers` | `{ transfers: [...] }` |
 | `POST /api/transfers` | `{"magnet": "..."}` as `application/json`, or the `.torrent` bytes as `application/x-bittorrent`; anything else is `415`, whatever follows a `;` |
 | `GET /api/transfers/{infoHash}` | one transfer |
-| `DELETE /api/transfers/{infoHash}` | removes it **and its files**, folders included |
+| `DELETE /api/transfers/{infoHash}` | removes it **and its files**, and the folders they leave empty; nothing it did not write, whatever its name |
 | `GET /api/transfers/{infoHash}/files/{index}` | the file, with `Range` support; the token, or the file's signed `link` |
 
 A transfer is `{ id, name, size, progress, state, ready, peers, downloadSpeed, receivedAt, files: [{ id, name, size, link }] }`,
 `receivedAt` being when data last arrived for it (absent until some has, since
 the server started): that is how the Cloudflare Worker tells a download still
-getting somewhere from one that is not, with the app closed.
+getting somewhere from one that is not, with no request coming in.
 `files` lists each file as soon as it is complete, so the first episode of a
 season can be played while the rest downloads. A transfer that fails — a full
 disk, a write the disk refuses — stays listed with `failed: true` and the reason

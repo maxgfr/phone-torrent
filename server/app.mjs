@@ -196,8 +196,10 @@ function track(torrent, id) {
     if (!SEED_AFTER_DONE) torrent.pause();
   });
   torrent.on('error', async (err) => {
-    console.error(`transfer failed: ${torrent.name || id}: ${err.message || err}`);
     const record = records.get(id);
+    // Now, while the torrent still lists its files: WebTorrent empties the list as it tears it down.
+    const written = writtenBy(torrent, record);
+    console.error(`transfer failed: ${torrent.name || id}: ${err.message || err}`);
     const reason = err.code === 'ENOSPC' ? 'the server\'s disk is full' : String(err.message || err).replaceAll(DOWNLOAD_DIR + path.sep, '');
     failures.set(id, {
       id,
@@ -217,7 +219,7 @@ function track(torrent, id) {
     try {
       if (!torrent.destroyed) await new Promise((resolve) => client.remove(torrent, { destroyStore: true }, resolve));
     } catch { /* webtorrent had already torn it down */ }
-    await forgetFiles((record && record.name) || torrent.name);
+    await forgetFiles(written);
     await saveState();
   });
   return true;
@@ -252,16 +254,47 @@ function signedFor(url, infoHash, index) {
 
 /* ---------- the shape the app reads ---------- */
 
+/** Where a file of a torrent is on disk, as its store names it: without the characters no file name may have. */
+function onDisk(file) {
+  const name = [...path.basename(file.path)].filter((c) => c >= ' ' && !'<>:"/\\|?*'.includes(c)).join('');
+  return path.join(path.resolve(DOWNLOAD_DIR, path.dirname(file.path)), name);
+}
+
 /**
- * Delete what a transfer wrote, and nothing else: only inside the download directory, and not
- * a name another transfer still writes to. A torrent's own store deletes its files but leaves
- * their folders, and has nothing to delete when the metadata never came back.
+ * What a transfer wrote: its files, and the folders they sit in, deepest first. Known from the
+ * files its metadata lists, which WebTorrent cleans up — never from the torrent's name: a magnet
+ * is called whatever its dn= says until the metadata comes, a .torrent whatever it calls itself,
+ * and a folder picked by that name can be the user's own, or another transfer's. Read before the
+ * torrent is removed, which empties its list of files.
+ *
+ * With no metadata a transfer wrote nothing, but for one an older server kept as a magnet, with the
+ * name it saw in the metadata: a file of that name is that transfer's; a folder of it could hold
+ * anything, and forgetFiles removes no folder that is not empty.
  */
-async function forgetFiles(name) {
-  if (!name || client.torrents.some((t) => t.name === name)) return;
-  const target = path.resolve(DOWNLOAD_DIR, name);
-  if (!target.startsWith(DOWNLOAD_DIR + path.sep) || isStateName(path.basename(target))) return;
-  await fsp.rm(target, { recursive: true, force: true }).catch(() => {});
+function writtenBy(torrent, record) {
+  const files = torrent.files.map(onDisk);
+  if (!files.length && record && record.name && path.basename(record.name) === record.name) files.push(path.join(DOWNLOAD_DIR, record.name));
+  const folders = new Set();
+  for (const file of files) {
+    for (let dir = path.dirname(file); dir.startsWith(DOWNLOAD_DIR + path.sep); dir = path.dirname(dir)) folders.add(dir);
+  }
+  return { files, folders: [...folders].sort((a, b) => b.length - a.length) };
+}
+
+/**
+ * Delete what a transfer wrote, and nothing else: its own files, but not one another transfer
+ * still has, then the folders they were in, once empty. A torrent's own store deletes its files
+ * but leaves their folders, and a transfer that failed is torn down without its store's delete.
+ */
+async function forgetFiles({ files, folders }) {
+  const others = new Set(client.torrents.flatMap((t) => t.files.map(onDisk)));
+  for (const file of files) {
+    if (!file.startsWith(DOWNLOAD_DIR + path.sep) || others.has(file) || (path.dirname(file) === DOWNLOAD_DIR && isStateName(path.basename(file)))) continue;
+    // Not recursive: where a folder stands in a file's place, it is not this transfer's.
+    await fsp.rm(file, { force: true }).catch(() => {});
+  }
+  // A folder that still holds anything — the user's files, another transfer's — is refused by rmdir.
+  for (const folder of folders) await fsp.rmdir(folder).catch(() => {});
 }
 
 function describe(torrent) {
@@ -602,8 +635,9 @@ async function handle(req, res) {
         records.delete(torrent.infoHash);
         await saveState();
         // Take the files with it: this is the delete of a cloud service, not a "stop".
+        const written = writtenBy(torrent, record);
         await new Promise((resolve) => client.remove(torrent, { destroyStore: true }, resolve));
-        await forgetFiles((record && record.name) || torrent.name);
+        await forgetFiles(written);
         return send(req, res, 200, { ok: true });
       }
     }

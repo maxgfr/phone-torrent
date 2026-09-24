@@ -7,7 +7,10 @@
   --primary: #2563eb;
   --primary-text: #ffffff;
   --accent: #16a34a;
-  --danger: #dc2626;
+  --danger: #c81e1e; /* 5.3:1 on --bg, where the network check draws its ✗ */
+  /* The network check's ✓ and !, text on --bg as well: --accent and an amber are 3:1 there. */
+  --ok: #15803d;
+  --warn: #b45309;
   /* What white text sits on: a primary button, an error toast. The dark scheme's --primary and
      --danger are lighter, to stand out on a dark page, and white on them is 3.7:1 and 2.8:1, under
      the 4.5:1 text needs; so these are set apart, and the button's blue is the same in both. */
@@ -29,6 +32,8 @@
     --primary: #3b82f6;
     --accent: #22c55e;
     --danger: #f87171;
+    --ok: #22c55e;
+    --warn: #d97706;
     --danger-fill: #b91c1c;
     --track: #243049;
     --shadow: none;
@@ -382,9 +387,9 @@ body {
 /* ---- network check ---- */
 .netcheck { list-style: none; margin: 0; padding: 8px 10px; background: var(--bg); border-radius: 8px; font-size: 0.8rem; display: grid; gap: 4px; }
 .netcheck li { display: grid; grid-template-columns: 1.2em 1fr; gap: 6px; overflow-wrap: anywhere; }
-.netcheck .ok { color: var(--accent); }
+.netcheck .ok { color: var(--ok); }
 .netcheck .bad { color: var(--danger); }
-.netcheck .warn { color: #d97706; }
+.netcheck .warn { color: var(--warn); }
 
 /* ---- iOS: second tap to share a prepared file ---- */
 .save-ready {
