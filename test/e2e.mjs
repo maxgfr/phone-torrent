@@ -1830,14 +1830,21 @@ try {
   await waitFor(() => ios.$$eval('.toast', (els) => els.some((e) => /Could not fetch that \.torrent/.test(e.textContent))), { label: 'bad .torrent URL reported', timeout: 15000 });
   assert.equal(await ios.inputValue('#magnet-input'), 'https://torrent.invalid/nope.torrent', 'and the address stays in the box, to be fixed');
   // A torrent site's page about a torrent, pasted from the browser, names no .torrent: a CORS proxy
-  // would only fetch that page. What is wanted is the magnet or the link on it, and that is what it says.
-  await ios.fill('#magnet-input', 'https://torrent.invalid/torrent/123/Some-Show-S01E01/');
+  // would only fetch that page. What is wanted is the magnet or the link on it, and that is what it
+  // says when a page answered.
+  await ios.fill('#magnet-input', `${site.url}index.html`);
   await ios.click('#magnet-form button[type="submit"]');
-  const pageAddress = await waitFor(() => ios.$$eval('.toast', (els) => els.map((e) => e.textContent).find((t) => /Could not fetch a \.torrent from that address/.test(t))), { label: 'a web page\'s address reported', timeout: 15000 });
-  assert.match(pageAddress, /If it is a web page, open it and copy its magnet or its \.torrent link/, 'says what to copy from the page');
+  const pageAddress = await waitFor(() => ios.$$eval('.toast', (els) => els.map((e) => e.textContent).find((t) => /Could not fetch a \.torrent from that address: that address did not return a \.torrent file/.test(t))), { label: 'a web page\'s address reported', timeout: 15000 });
+  assert.match(pageAddress, /If it is a web page, open it and copy its magnet or its \.torrent link\.$/, 'says what to copy from the page');
   assert.doesNotMatch(pageAddress, /CORS proxy/, 'and sends nobody off to set up a CORS proxy');
+  // A download link may name no .torrent either (/torrent/download/<hash>, download.php?id=), and one
+  // that nothing answered may be blocked by CORS: the proxy is its fix, and is offered beside the page's.
+  await ios.fill('#magnet-input', 'https://torrent.invalid/torrent/download/0123456789ABCDEF0123456789ABCDEF01234567');
+  await ios.click('#magnet-form button[type="submit"]');
+  const downloadLink = await waitFor(() => ios.$$eval('.toast', (els) => els.map((e) => e.textContent).find((t) => /Could not fetch a \.torrent from that address: blocked by CORS or unreachable/.test(t))), { label: 'a download link that names no .torrent reported', timeout: 15000 });
+  assert.match(downloadLink, /If it is a web page, open it and copy its magnet or its \.torrent link; if it is the \.torrent's own download link, a CORS proxy can be set in Settings\./, 'offers the proxy for a download link, and the page\'s advice first');
   await ios.fill('#magnet-input', '');
-  log('unreachable .torrent URL reported; a web page\'s address says to copy the link on it');
+  log('unreachable .torrent URL reported; a web page\'s address says to copy the link on it, a download link that did not answer offers the proxy');
 
   // A private-tracker .torrent parses and is listed, but says up front that no browser can reach it,
   // and its info hash must never be announced to the public trackers (BEP 27).
@@ -1869,6 +1876,9 @@ try {
     torrentFile: !card.querySelector('.share-torrent-btn').hidden,
   }));
   assert.match(offered.notice, /private: its links carry your passkey/, 'a private torrent\'s share panel says why it has no link');
+  // The .torrent carries the passkey as well: it is for the user's own devices, not someone else's.
+  assert.match(offered.notice, /Save the \.torrent instead,\s+for your own devices and clients only:\s+it\s+carries your passkey too/, 'and that the .torrent is for your own devices');
+  assert.doesNotMatch(offered.notice, /someone with an account/, 'not to be handed to someone else');
   assert.deepEqual(offered.links, [], 'and shows none: no app link, no magnet, no passkey');
   assert.equal(offered.rows, 0, 'nor a place for one');
   assert.deepEqual(offered.copies, [], 'nor anything on the card that copies one');
@@ -2743,6 +2753,12 @@ try {
   await waitFor(() => web.evaluate(() => window.__lock.held), { label: 'the screen lock held while it downloads', timeout: 10000 });
   await waitFor(() => webCard('private-listed.bin').locator('.pct').textContent().then((t) => t === '100%'), { label: 'the private torrent from its web seed to finish', timeout: 90000 });
   log('screen lock: held for a private torrent that a web seed is sending');
+  // Its share panel says why it offers no link, and not that no browser can download it: this one did.
+  await webCard('private-listed.bin').locator('.share-link-btn').click();
+  const listedNotice = await webCard('private-listed.bin').locator('.share-private').textContent();
+  assert.match(listedNotice, /its links carry your passkey/, 'a private torrent\'s share panel says why it has no link');
+  assert.doesNotMatch(listedNotice, /No browser can download/, 'and not that no browser can download it, which this one just did');
+  await webCard('private-listed.bin').locator('.share-close-btn').click();
 
   const listed = rnd(1024 * 1024, 71);
   mirror.state.files.set('/listed.bin', listed);
@@ -2764,6 +2780,12 @@ try {
   webSeedUrl = `${mirror.url}/by%20hand.bin`;
   await webCard('by hand.bin').locator('.webseed-btn').click();
   await waitFor(() => webProgress('by hand.bin').then((p) => p > 0.1), { label: 'a download from a web seed added by hand', timeout: 30000 });
+  // The same one again, while it is connected: WebTorrent warned "ignoring duplicate web seed: <address>",
+  // through a CORS proxy the proxy's own, into the log that Copy diagnostics copies.
+  await webCard('by hand.bin').locator('.webseed-btn').click();
+  const byHandLog = () => webCard('by hand.bin').locator('.log li').allTextContents();
+  await waitFor(() => byHandLog().then((l) => l.filter((t) => /web seed added/.test(t)).length >= 2 || l.some((t) => /web seed added.*\(×2\)$/.test(t))), { label: 'the same web seed added again', timeout: 5000 });
+  assert.deepEqual((await byHandLog()).filter((t) => /duplicate web seed/.test(t)), [], 'without a warning naming its address');
   await webCard('by hand.bin').locator('.pause-btn').click();
   await web.evaluate(() => Promise.all([...window.__phoneTorrent.views.values()].map((v) => v.persisted)));
   await web.reload();
@@ -2904,6 +2926,42 @@ try {
   assert.equal(await seasonRow.locator('.cloud-player').first().isHidden(), true, 'and no empty player left behind');
   log('a file the browser cannot play says so, and what to do instead');
 
+  // A connection lost mid-play — the phone changed networks, the server restarted — is not a file the
+  // browser cannot play: that used to hide the player and send the user off to VLC. The player stays,
+  // and Play goes on from where it stopped. The link hangs here, and the element is told what the
+  // browser would say.
+  await ownCtx.route((url) => url.pathname.endsWith('/files/1'), () => { /* never answers */ });
+  const secondEpisode = seasonRow.locator('.cloud-file', { has: own.locator('.cloud-file-name', { hasText: 'Show.S01E02.mkv' }) });
+  const lostToasts = () => own.$$eval('.toast', (els) => els.filter((e) => /Lost the connection while playing "Show\.S01E02\.mkv": tap Play/.test(e.textContent)).length);
+  await secondEpisode.locator('.cloud-play').click();
+  await secondEpisode.locator('.cloud-player video').evaluate((v) => {
+    Object.defineProperty(v, 'currentTime', { configurable: true, get: () => 42 });
+    Object.defineProperty(v, 'error', { configurable: true, value: { code: MediaError.MEDIA_ERR_NETWORK } });
+    v.dispatchEvent(new Event('error'));
+  });
+  await waitFor(() => lostToasts().then((n) => n === 1), { label: 'a connection lost mid-play to say so', timeout: 5000 });
+  assert.equal(await own.$$eval('.toast', (els) => els.some((e) => /cannot play "Show\.S01E02\.mkv"/.test(e.textContent))), false, 'not that the browser cannot play it');
+  assert.equal(await secondEpisode.locator('.cloud-player').isVisible(), true, 'the player stays');
+  assert.equal(await secondEpisode.locator('.cloud-play').isVisible(), true, 'with Play there to go on');
+  // Play again: from where it stopped. And once some of it has played, any error is the connection —
+  // Chrome reports a link refused as a format it does not know.
+  await own.evaluate(() => {
+    const { get, set } = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'currentTime');
+    Object.defineProperty(HTMLMediaElement.prototype, 'currentTime', { configurable: true, get, set(t) { window.__seekedTo = t; set.call(this, t); } });
+  });
+  await secondEpisode.locator('.cloud-play').click();
+  await secondEpisode.locator('.cloud-player video').evaluate((v) => {
+    v.dispatchEvent(new Event('loadedmetadata'));
+    v.dispatchEvent(new Event('loadeddata'));
+    Object.defineProperty(v, 'error', { configurable: true, value: { code: MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED } });
+    v.dispatchEvent(new Event('error'));
+  });
+  assert.equal(await own.evaluate(() => window.__seekedTo), 42, 'Play goes on from where it stopped');
+  await waitFor(() => lostToasts().then((n) => n === 2), { label: 'an error after it played to say the connection', timeout: 5000 });
+  assert.equal(await own.$$eval('.toast', (els) => els.some((e) => /cannot play "Show\.S01E02\.mkv"/.test(e.textContent))), false, 'and still not that the browser cannot play it');
+  assert.equal(await secondEpisode.locator('.cloud-player').isVisible(), true, 'the player stays');
+  log('a connection lost mid-play says so, keeps the player, and Play goes on from where it stopped');
+
   // The library is on every tab, above the list of torrents. With a few transfers in it, a torrent added
   // on the Download tab landed screens below, and nothing on screen said it had come: it is brought into view.
   for (const digit of '12345') ownTransfers.push({ id: digit.repeat(40), name: `Older ${digit}`, size: 1000, progress: 1, state: 'seeding', ready: true, files: [] });
@@ -3000,22 +3058,24 @@ try {
   log('your own server not answering: said as such in the library, which lists it again once it is back');
 
   /* ---------- the installed app, on https, pointed at a server's http:// address ---------- */
-  // The browser refuses the call outright (mixed content), before anything is sent: neither
-  // ALLOWED_ORIGINS nor a CORS proxy, which is what the app said, can change that.
+  // The browser refuses the call outright (mixed content), before anything is sent: ALLOWED_ORIGINS,
+  // which is what the app said, cannot change that.
   const httpsCtx = await browser.newContext({ serviceWorkers: 'block' });
   const httpsCalls = [];
   httpsCtx.on('request', (req) => { if (req.url().startsWith('http://192.0.2.1')) httpsCalls.push(req.url()); });
-  await httpsCtx.route('https://phone.test/**', (route) => {
+  const servePhoneTest = (route) => {
     const { pathname } = new URL(route.request().url());
     const file = path.join(REPO, pathname.endsWith('/') ? `${pathname}index.html` : pathname);
     return statSync(file, { throwIfNoEntry: false })?.isFile() ? route.fulfill({ path: file }) : route.fulfill({ status: 404, body: 'Not found' });
-  });
+  };
+  await httpsCtx.route('https://phone.test/**', servePhoneTest);
   const secure = await httpsCtx.newPage();
   secure.on('pageerror', (e) => console.error('https page error:', e));
-  await secure.addInitScript(({ t }) => localStorage.setItem('phone-torrent:settings', JSON.stringify({
-    trackers: [t], trackerList: false, metadataSources: [],
+  const httpServerSettings = ({ t, proxy }) => localStorage.setItem('phone-torrent:settings', JSON.stringify({
+    trackers: [t], trackerList: false, metadataSources: [], ...(proxy ? { corsProxy: proxy } : {}),
     cloud: { provider: 'server', apiKey: '', apiBase: 'http://192.0.2.1:8080', viaProxy: false, accounts: {} },
-  })), { t: trackerUrl });
+  }));
+  await secure.addInitScript(httpServerSettings, { t: trackerUrl });
   await secure.goto('https://phone.test/');
   await secure.waitForFunction(() => window.__phoneTorrent?.client);
   assert.equal(await secure.evaluate(() => window.isSecureContext && location.protocol), 'https:', 'an https page');
@@ -3024,8 +3084,47 @@ try {
   assert.match(mixedSaid, /Open the app at http:\/\/192\.0\.2\.1:8080 itself, or reach the server over https/, 'and what to do instead');
   assert.doesNotMatch(mixedSaid, /CORS/, 'not CORS');
   assert.deepEqual(httpsCalls, [], 'without sending anything there');
-  await httpsCtx.close();
   log('an https page pointed at an http:// server says why that cannot work, not CORS');
+
+  // A ws:// tracker is refused on an https page for the same reason, WebRTC or not: expected, like a
+  // udp:// one, and not a warning for every card that names one. (Without WebRTC, below, it is logged.)
+  await secure.click('.tab[data-tab="download"]');
+  await secure.fill('#magnet-input', `magnet:?xt=urn:btih:${'b'.repeat(40)}&dn=ws%20tracker&tr=${encodeURIComponent('ws://tracker.example:8000/announce')}`);
+  await secure.click('#magnet-form button[type="submit"]');
+  await waitFor(() => secure.evaluate((h) => Boolean(window.__phoneTorrent.client.torrents.find((t) => t.infoHash === h)?.discovery?.tracker), 'b'.repeat(40)), { label: 'the torrent to ask its trackers', timeout: 10000 });
+  await new Promise((r) => setTimeout(r, 1000));
+  const wsLog = await secure.$$eval('.torrent .log li', (els) => els.map((e) => e.textContent));
+  assert.deepEqual(wsLog.filter((l) => /Unsupported tracker protocol/.test(l)), [], 'no warning for a ws:// tracker on an https page');
+  await httpsCtx.close();
+  log('an https page drops the refusal of a ws:// tracker, as it does a udp:// one');
+
+  // With a CORS proxy set, the proxy is asked instead: it fetches the address itself, and reaches a
+  // server on the internet. The page used to refuse before asking anyone, and the proxy that had
+  // relayed these calls was never asked again.
+  const relayedCtx = await browser.newContext({ serviceWorkers: 'block' });
+  const relayedDirect = [];
+  const relayedProxied = [];
+  relayedCtx.on('request', (req) => { if (req.url().startsWith('http://192.0.2.1')) relayedDirect.push(req.url()); });
+  await relayedCtx.route('https://phone.test/**', servePhoneTest);
+  await relayedCtx.route('https://proxy.test/**', (route) => {
+    const target = new URL(new URL(route.request().url()).searchParams.get('url'));
+    relayedProxied.push(`${route.request().method()} ${target.origin}${target.pathname}`);
+    const body = target.pathname === '/api/account' ? { who: 'your server', detail: '1 transfer' }
+      : { transfers: [{ id: 'f'.repeat(40), name: 'Some.Transfer', size: 1000, progress: 1, state: 'seeding', ready: true, files: [] }] };
+    return route.fulfill({ status: 200, contentType: 'application/json', headers: { 'Access-Control-Allow-Origin': 'https://phone.test' }, body: JSON.stringify(body) });
+  });
+  const relayedPage = await relayedCtx.newPage();
+  relayedPage.on('pageerror', (e) => console.error('https page with a proxy error:', e));
+  await relayedPage.addInitScript(httpServerSettings, { t: trackerUrl, proxy: 'https://proxy.test/?url={url}' });
+  await relayedPage.goto('https://phone.test/');
+  await relayedPage.waitForFunction(() => window.__phoneTorrent?.client);
+  await relayedPage.click('.tab[data-tab="cloud"]');
+  await waitFor(() => relayedPage.$eval('#cloud-account', (e) => /your server · 1 transfer/.test(e.textContent)), { label: 'the account of an http:// server, through the proxy', timeout: 10000 });
+  await relayedPage.locator('.cloud-item', { hasText: 'Some.Transfer' }).waitFor({ timeout: 10000 });
+  assert.ok(relayedProxied.includes('GET http://192.0.2.1:8080/api/account'), `the proxy was asked for it (${relayedProxied.join(', ')})`);
+  assert.deepEqual(relayedDirect, [], 'and the page sent nothing to the http:// address itself');
+  await relayedCtx.close();
+  log('an https page pointed at an http:// server goes through the CORS proxy when one is set');
 
   /* ---------- offline: the card says so, and nothing blames CORS ---------- */
   const offCtx = await browser.newContext();
@@ -3094,7 +3193,10 @@ try {
   log('the page asks once, on adding, to keep what it stores, and Settings says whether it may');
 
   // Copy diagnostics is made to be pasted into a bug report, in public: the cloud keys, the proxy, TURN
-  // credentials and a private tracker's passkey are not in it.
+  // credentials and a private tracker's passkey are not in it. The proxy reaches the log filled in, as
+  // proxied() writes it and never as its {url} template: in WebTorrent's warning for a web seed added twice.
+  await diag.evaluate(() => window.__phoneTorrent.client.torrents.find((t) => t.name === 'second.bin')
+    .emit('warning', new Error('ignoring duplicate web seed: https://myproxy-secret.workers.dev/?url=https%3A%2F%2Fmirror.example%2Fsecond.bin')));
   await diag.click('#copy-diag-btn');
   const copied = await waitFor(() => diag.evaluate(() => window.__copied), { label: 'the diagnostics copied', timeout: 5000 });
   assert.deepEqual(secrets.filter((s) => copied.includes(s)), [], 'no key, proxy, credential or passkey in the diagnostics');
@@ -3102,6 +3204,7 @@ try {
   assert.equal(report.settings.cloud.apiKey, '<set>', 'which say a key is set');
   assert.equal(report.settings.cloud.accounts.putio.apiKey, '<set>');
   assert.equal(report.settings.corsProxy, '<set>', 'and a proxy');
+  assert.ok(report.torrents.find((t) => t.name === 'second.bin').log.some((l) => l.includes('duplicate web seed: <hidden>https%3A%2F%2Fmirror.example')), 'and the proxy is hidden where the log names it');
   assert.deepEqual(report.torrents.find((t) => t.name === 'diagnosed.bin').announce, ['https://private.example/…'], 'and a private tracker by its host alone');
   log('diagnostics say what is set, not the keys, the proxy or a passkey');
 
@@ -3118,6 +3221,21 @@ try {
   assert.match(await diag.textContent('#settings-error'), /\{infohash\}.*my-cache\.example/, 'a metadata source without {infohash} is named');
   await diag.fill('#metasources-input', 'https://itorrents.org/torrent/{INFOHASH}.torrent');
   await diag.selectOption('#cloud-provider', 'server');
+  // An IP and a port, the usual address of a server at home, never reached that mending: the field was
+  // a URL one, and the browser's own "Please enter a URL" stopped Save before the app saw it.
+  await diag.fill('#cloud-base', '192.168.1.5:8080');
+  await diag.click('#settings-dialog button[value="save"]');
+  assert.match(await diag.textContent('#settings-error'), /It now reads http:\/\/192\.168\.1\.5:8080\. Save again to keep it\./, 'an IP and a port are mended too');
+  assert.equal(await diag.inputValue('#cloud-base'), 'http://192.168.1.5:8080', 'in the field');
+  // One that cannot be mended says to correct it, not to save or test it again for the same refusal.
+  await diag.fill('#cloud-base', 'htp://nas.local:8080');
+  await diag.click('#settings-dialog button[value="save"]');
+  assert.equal(await diag.$eval('#settings-dialog', (e) => e.open), true, 'an address that cannot be mended is not saved');
+  const unmendable = await diag.textContent('#settings-error');
+  assert.match(unmendable, /must be an http:\/\/ or https:\/\/ address: correct it/, 'it says to correct it');
+  assert.doesNotMatch(unmendable, /Save again/, 'not to save it again');
+  await diag.click('#cloud-test-btn');
+  assert.doesNotMatch(await diag.textContent('#cloud-info'), /Test it again/, 'nor to test it again');
   await diag.fill('#cloud-base', 'nas.local:8080');
   await diag.click('#settings-dialog button[value="save"]');
   assert.match(await diag.textContent('#settings-error'), /needs http:\/\/ or https:\/\/. It now reads http:\/\/nas\.local:8080/, 'an address without its scheme is mended, and says so');
@@ -3149,6 +3267,8 @@ try {
   await noRtc.click('#magnet-form button[type="submit"]');
   await waitFor(() => noRtc.$eval('.torrent .nopeers-text', (e) => /WebRTC is turned off/.test(e.textContent)).catch(() => false), { label: 'the card to say why nothing comes', timeout: 5000 });
   assert.doesNotMatch(await noRtc.textContent('.torrent .nopeers-text'), /trackers/, 'not that it waits on trackers');
+  // Here the refusal of a ws:// tracker is the news, and its log keeps it, where a page with WebRTC drops it.
+  await waitFor(() => noRtc.$$eval('.torrent .log li', (els) => els.some((e) => /warning: Unsupported tracker protocol: ws:\/\/127\.0\.0\.1/.test(e.textContent))), { label: 'the refused tracker in the log', timeout: 5000 });
   await noRtcCtx.close();
   log('without WebRTC, the page and the card say so');
 
@@ -3191,6 +3311,10 @@ try {
   await clocked.goto(site.url);
   await clocked.waitForFunction(() => window.__phoneTorrent?.client);
   await waitFor(() => listFetches === 1, { label: 'the tracker list fetched at start', timeout: 10000 });
+  // Answered is not taken in: the page stamps the list once it has read it, and start() sets its timer
+  // after that. A jump before either and the list looked fresh, or the timer began six hours late.
+  await clocked.waitForFunction(() => localStorage.getItem('phone-torrent:trackerlist'), null, { timeout: 10000 });
+  await clocked.evaluate(() => window.__phoneTorrent.started);
   await clocked.clock.fastForward('06:30:00');
   await waitFor(() => listFetches === 2, { label: 'the tracker list fetched again, six hours on', timeout: 10000 });
   await clockCtx.close();

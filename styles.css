@@ -340,7 +340,7 @@ body {
 .share-link-btn { flex: 1; }
 
 /* ---- settings extras ---- */
-.field input[type="url"], .field input[type="number"], .field select {
+.field input[type="url"], .field input[type="text"], .field input[type="number"], .field select {
   font: inherit; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--border);
   background: var(--bg); color: var(--text); min-width: 0; width: 100%;
 }

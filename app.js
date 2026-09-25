@@ -939,14 +939,15 @@ function cloudCtx(over = {}) {
 /**
  * An https page may not call an http:// address (mixed content): the browser refuses before anything
  * is sent, and tells a script nothing it could tell from CORS. The installed app, on https, pointed at
- * your own server's LAN address is the case: neither ALLOWED_ORIGINS nor a proxy can help there — a
- * proxy on the internet cannot reach a machine at home. Loopback is allowed by the browsers that allow
- * it, and asked as usual.
+ * your own server's http:// address is the case. A CORS proxy fetches that address itself, so it is
+ * asked instead when one is set, and reaches a server on the internet; ALLOWED_ORIGINS cannot help,
+ * and a proxy cannot reach a machine at home on its LAN address. Loopback (localhost, *.localhost,
+ * 127.0.0.0/8, [::1]) is allowed by the browsers that allow it, and asked as usual.
  */
 function mixedContent(url) {
   let target;
   try { target = new URL(url, location.href); } catch { return ''; }
-  if (location.protocol !== 'https:' || target.protocol !== 'http:' || /^(localhost|127\.0\.0\.1|\[::1\])$/.test(target.hostname)) return '';
+  if (location.protocol !== 'https:' || target.protocol !== 'http:' || /^(localhost|.+\.localhost|127(\.\d{1,3}){3}|\[::1\])$/i.test(target.hostname)) return '';
   return `this page is https, and a browser will not let it call an http:// address. Open the app at ${target.origin} itself, or reach the server over https (the tunnel, or a deploy)`;
 }
 
@@ -969,11 +970,13 @@ function unreachableApi(url, provider) {
  * with the answer, and whether it came through that proxy.
  */
 async function cloudFetch(url, { method = 'GET', body, json = false, contentType, key = '', viaProxy: onlyProxy = false, provider = '' } = {}) {
-  const mixed = mixedContent(url);
-  if (mixed) throw Object.assign(new Error(mixed), { transient: false });
   const viaProxy = proxied(url);
   const hasProxy = viaProxy !== url;
-  const targets = onlyProxy && hasProxy ? [viaProxy] : hasProxy ? [url, viaProxy] : [url];
+  // An address the browser will not call from here is not asked directly: only through the proxy,
+  // if there is one, and otherwise not at all.
+  const mixed = mixedContent(url);
+  if (mixed && !hasProxy) throw Object.assign(new Error(mixed), { transient: false });
+  const targets = (onlyProxy || mixed) && hasProxy ? [viaProxy] : hasProxy ? [url, viaProxy] : [url];
   const headers = key ? { Authorization: `Bearer ${key}` } : {};
   if (json) headers['Content-Type'] = 'application/json';
   if (contentType) headers['Content-Type'] = contentType;
@@ -987,7 +990,7 @@ async function cloudFetch(url, { method = 'GET', body, json = false, contentType
     }
   }
   const err = !navigator.onLine ? new Error('you are offline')
-    : new Error(hasProxy ? `${last}, and the proxy did not help` : provider === 'server' ? last : `${last}. Set a CORS proxy in Settings to relay it.`);
+    : new Error(mixed ? `${last}, and ${mixed}` : hasProxy ? `${last}, and the proxy did not help` : provider === 'server' ? last : `${last}. Set a CORS proxy in Settings to relay it.`);
   // Worth asking again all the same: a phone changes networks, and a poll of a transfer that was
   // sent through this very API was not refused by CORS.
   err.transient = true;
@@ -1811,6 +1814,10 @@ function addCloudFiles(item, filesEl) {
     save.setAttribute('download', file.name);
     const play = $('.cloud-play', row);
     if (PLAYABLE.test(file.name)) {
+      // Where a file that was playing stopped, when the connection went; and whether this browser
+      // ever decoded any of it, which is what it takes to play it.
+      let resumeAt = 0;
+      let played = false;
       play.addEventListener('click', () => {
         const holder = $('.cloud-player', row);
         holder.hidden = false;
@@ -1818,12 +1825,24 @@ function addCloudFiles(item, filesEl) {
         const media = document.createElement(/\.(mp3|m4a|aac|ogg|opus|flac|wav)$/i.test(file.name) ? 'audio' : 'video');
         media.controls = true;
         media.playsInline = true;
+        const from = resumeAt;
+        resumeAt = 0;
+        if (from) media.addEventListener('loadedmetadata', () => { media.currentTime = from; }, { once: true });
+        media.addEventListener('loadeddata', () => { played = true; }, { once: true });
         // Offered by the name alone: whether this browser can play the file is known only by trying —
         // an .mkv, the most common, plays in Chrome and not in Safari, whatever canPlayType says. One
-        // that cannot says so, with what to do instead, rather than leaving a black box.
+        // that cannot says so, with what to do instead, rather than leaving a black box. A network
+        // error, or any error once some of it has played, is the connection instead — the phone
+        // changed networks, the server restarted — and Play goes on from where it stopped. (Chrome
+        // reports a link refused before anything played as a format it does not know.)
         media.addEventListener('error', () => {
-          holder.hidden = true;
           play.hidden = false;
+          if (played || media.error?.code === MediaError.MEDIA_ERR_NETWORK) {
+            resumeAt = media.currentTime || from;
+            toast(`Lost the connection while playing "${file.name}": tap Play to go on from where it stopped.`, { error: true, timeout: 9000 });
+            return;
+          }
+          holder.hidden = true;
           toast(`This browser cannot play "${file.name}": use Save, or copy the Link into a player app such as VLC.`, { error: true, timeout: 9000 });
         }, { once: true });
         media.src = href;
@@ -2199,9 +2218,12 @@ async function fetchTorrentUrl(url) {
   const viaProxy = proxied(url);
   if (viaProxy !== url) targets.push(viaProxy);
   let last = new Error('unreachable');
+  // Whether anything answered at all: a script cannot tell CORS from a host that is not there.
+  let answered = false;
   for (const target of targets) {
     try {
       const res = await fetch(target, { cache: 'no-store' });
+      answered = true;
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const bytes = new Uint8Array(await res.arrayBuffer());
       if (!torrentReach(bytes)) throw new Error('that address did not return a .torrent file');
@@ -2210,12 +2232,16 @@ async function fetchTorrentUrl(url) {
       last = err instanceof TypeError ? unreachable() : err;
     }
   }
+  const proxyHint = viaProxy === url && navigator.onLine;
   // An address that names no .torrent is most often a torrent site's page about one, pasted from the
-  // browser: a proxy would only fetch that page. What is wanted is the magnet or the link on it.
+  // browser: a proxy would only fetch that page. What is wanted is the magnet or the link on it. Some
+  // download links name no .torrent either (/torrent/download/<hash>, download.php?id=): when nothing
+  // answered, that one may be blocked by CORS, which is what the proxy is for.
   if (!torrentLink(url)) {
-    throw new Error(`Could not fetch a .torrent from that address: ${last.message}. If it is a web page, open it and copy its magnet or its .torrent link.`);
+    const orProxy = !answered && proxyHint ? '; if it is the .torrent\'s own download link, a CORS proxy can be set in Settings' : '';
+    throw new Error(`Could not fetch a .torrent from that address: ${last.message}. If it is a web page, open it and copy its magnet or its .torrent link${orProxy}.`);
   }
-  throw new Error(`Could not fetch that .torrent: ${last.message}${proxied(url) === url && navigator.onLine ? '. A CORS proxy can be set in Settings.' : ''}`);
+  throw new Error(`Could not fetch that .torrent: ${last.message}${proxyHint ? '. A CORS proxy can be set in Settings.' : ''}`);
 }
 
 /**
@@ -2347,9 +2373,10 @@ function attachTorrent(torrent, { record, seeding, reach = null }) {
   });
   torrent.on('warning', (err) => {
     const msg = String(err && err.message || err);
-    // udp:// and http:// trackers in .torrent files are expected to be unusable from a browser. A
-    // ws:// or wss:// one is not: refused, it means this browser has no WebRTC (see NO_WEBRTC).
-    if (/Unsupported tracker protocol: (?!wss?:)/i.test(msg)) return;
+    // udp:// and http:// trackers in .torrent files are expected to be unusable from a browser, and so
+    // is a ws:// one on an https page (mixed content). With no WebRTC at all (see NO_WEBRTC), every
+    // ws:// and wss:// one is refused too, and that is worth saying.
+    if (/Unsupported tracker protocol/i.test(msg) && !(NO_WEBRTC && /Unsupported tracker protocol: wss?:/i.test(msg))) return;
     console.warn('torrent warning:', msg);
     logEvent(view, `warning: ${msg}`);
   });
@@ -2974,7 +3001,8 @@ function addWebSeedPrompt(torrent) {
     // WebTorrent appends "/<file path>" to a web seed for multi-file torrents; that cannot go through
     // a ?url= proxy template, so the proxy is only used for single-file torrents.
     const seed = torrent.files.length > 1 ? url.trim() : proxied(url.trim());
-    torrent.addWebSeed(seed);
+    // Added again while connected, WebTorrent warns "ignoring duplicate web seed: <proxied address>".
+    if (!torrent._peers?.has(seed)) torrent.addWebSeed(seed);
     if (view) {
       // Kept with the torrent: a pause, a reload or a rebuild drops the connection, not the seed.
       if (!view.webSeeds.includes(seed)) view.webSeeds.push(seed);
@@ -3013,8 +3041,8 @@ function shareTorrent(torrent) {
   // A private torrent's links are not for sharing. Its magnet names its own tracker, whose address
   // carries the user's passkey; and a magnet has no private flag, so the copy of this app that opens
   // one adds the public trackers and asks the torrent caches for its info hash — what gets accounts
-  // banned — for a torrent no browser can download anyway. The .torrent keeps the flag: it is what
-  // the panel offers instead.
+  // banned. The .torrent keeps the flag: it is what the panel offers instead, for the user's own
+  // devices, since it carries the passkey too.
   const secret = Boolean(view.reach?.private);
   $('.share-private', view.el).hidden = !secret;
   for (const row of $$('.share-row', view.el)) row.hidden = secret;
@@ -3574,7 +3602,7 @@ els.cloudTestBtn.addEventListener('click', async () => {
   // An address without its scheme was taken for none at all, and this page's own was tested instead.
   const problem = cloudBaseProblem();
   if (problem) {
-    els.cloudInfo.textContent = `${problem} Test it again.`;
+    els.cloudInfo.textContent = problem.mended ? `${problem.message} Test it again.` : problem.message;
     return;
   }
   els.cloudTestBtn.disabled = true;
@@ -3661,22 +3689,29 @@ els.settingsForm.addEventListener('submit', (event) => {
   }
 
   const base = cloudBaseProblem();
-  if (base) return refuse(`${base} Save again to keep it.`, els.cloudBaseInput);
+  if (base) return refuse(base.mended ? `${base.message} Save again to keep it.` : base.message, els.cloudBaseInput);
   checkedSettings = { typed, trackers, rtcConfig, trackerListUrl };
 });
 
 /**
- * What is wrong with the service address typed, or ''. "nas.local:8080" passes the field's own check,
- * since to a browser "nas.local:" is a scheme, and was then taken as no address at all: this page's.
- * A name and a port are mended with the scheme a server at home has, a bare name with a deploy's.
+ * What is wrong with the service address typed, or null: its message, and whether the field was
+ * mended, to be saved (or tested) again as it reads then. "nas.local:8080" was taken as no address at
+ * all: this page's. A name and a port are mended with the scheme a server at home has, a bare name
+ * with a deploy's. The field is plain text, not a URL one: the browser's own check turned an IP and
+ * a port, or a bare name, away with "Please enter a URL" before they got here.
  */
 function cloudBaseProblem() {
   const typed = els.cloudBaseInput.value.trim();
-  if (!typed || /^https?:\/\//i.test(typed)) return '';
-  if (!/^[\w.-]+(:\d+)?(\/\S*)?$/.test(typed)) return 'The service address must start with http:// or https://.';
+  const unusable = { mended: false, message: 'The service address must be an http:// or https:// address: correct it, or empty the field.' };
+  if (!typed) return null;
+  if (/^https?:\/\//i.test(typed)) {
+    try { new URL(typed); } catch { return unusable; }
+    return null;
+  }
+  if (!/^[\w.-]+(:\d+)?(\/\S*)?$/.test(typed)) return unusable;
   const home = /:\d+/.test(typed) || /^[\d.]+(:|\/|$)/.test(typed) || /\.(local|lan|home|internal)(:|\/|$)/i.test(typed);
   els.cloudBaseInput.value = `${home ? 'http' : 'https'}://${typed}`;
-  return `The service address needs http:// or https://. It now reads ${els.cloudBaseInput.value}.`;
+  return { mended: true, message: `The service address needs http:// or https://. It now reads ${els.cloudBaseInput.value}.` };
 }
 
 // Leaves without checking or saving anything, a field that cannot be saved included.
@@ -3793,8 +3828,13 @@ function redactedTracker(url) {
 
 els.copyDiagBtn.addEventListener('click', async () => {
   // What the log may say of them too — a web seed added by hand, a warning naming a tracker — goes.
+  // The proxy is never logged as its template, only filled in by proxied(): what goes is what comes
+  // before {url}, then its host on its own.
+  const proxyPrefix = (settings.corsProxy || '').trim().split('{url}')[0];
+  const proxyHost = (() => { try { return new URL(proxyPrefix).host; } catch { return ''; } })();
   const secrets = [
-    settings.cloud?.apiKey, ...Object.values(settings.cloud?.accounts || {}).map((a) => a?.apiKey), settings.corsProxy,
+    settings.cloud?.apiKey, ...Object.values(settings.cloud?.accounts || {}).map((a) => a?.apiKey),
+    ...(proxyHost ? [proxyPrefix, proxyHost] : []),
     ...client.torrents.flatMap((t) => (t.announce || []).filter((u) => redactedTracker(u) !== u)),
   ].filter((secret) => typeof secret === 'string' && secret.length >= 4);
   const scrub = (line) => secrets.reduce((text, secret) => text.split(secret).join('<hidden>'), line);
