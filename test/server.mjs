@@ -250,16 +250,23 @@ try {
     const socket = net.connect(torrentPort, '127.0.0.1', () => { socket.destroy(); resolve(); });
     socket.on('error', reject);
   });
-  // And uTP, over UDP on the same port, when the log says so: that port is taken.
-  assert.match(serverLog, new RegExp(`BitTorrent on port ${torrentPort} \\(TCP and uTP\\)`), 'with uTP here, the log says so');
-  const utpProbe = dgram.createSocket('udp4');
-  const utpBind = await new Promise((resolve) => {
-    utpProbe.once('error', (err) => resolve(err.code));
-    utpProbe.bind(torrentPort, () => resolve('bound'));
-  });
-  try { utpProbe.close(); } catch { /* never bound */ }
-  assert.equal(utpBind, 'EADDRINUSE', 'and uTP listens on that port');
-  log('BitTorrent listens on the configured port', torrentPort, 'over TCP and uTP');
+  // And uTP, over UDP on the same port, when the log says so: that port is taken. Where this install
+  // has no utp-native (Linux on arm, `npm ci --omit=optional`), neither has the server, which shares
+  // its node_modules, and the log says TCP only.
+  if (WebTorrent.UTP_SUPPORT) {
+    assert.match(serverLog, new RegExp(`BitTorrent on port ${torrentPort} \\(TCP and uTP\\)`), 'with uTP here, the log says so');
+    const utpProbe = dgram.createSocket('udp4');
+    const utpBind = await new Promise((resolve) => {
+      utpProbe.once('error', (err) => resolve(err.code));
+      utpProbe.bind(torrentPort, () => resolve('bound'));
+    });
+    try { utpProbe.close(); } catch { /* never bound */ }
+    assert.equal(utpBind, 'EADDRINUSE', 'and uTP listens on that port');
+    log('BitTorrent listens on the configured port', torrentPort, 'over TCP and uTP');
+  } else {
+    assert.match(serverLog, new RegExp(`BitTorrent on port ${torrentPort} \\(TCP only`), 'without uTP here, the log says TCP only');
+    log('BitTorrent listens on the configured port', torrentPort, 'over TCP (no uTP in this install)');
+  }
 
   // A request the server cannot parse is refused, and the server is still there after it.
   assert.equal(await raw('/%'), 400, 'a malformed escape is a bad request');

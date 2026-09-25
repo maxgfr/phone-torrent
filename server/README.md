@@ -25,17 +25,18 @@ docker run -d --name phone-torrent --restart unless-stopped -v phone-torrent:/da
 ```
 
 That is the whole thing: the API, the client, and the app on one origin — no
-CORS to configure, nothing else to deploy. Downloads land in the `downloads`
-volume and survive restarts; unfinished transfers resume by themselves. With no
+CORS to configure, nothing else to deploy. Downloads land in the volume mounted
+at `/data` (`downloads` in the compose file, `phone-torrent` with `docker run`)
+and survive restarts; unfinished transfers resume by themselves. With no
 `ALLOWED_ORIGINS`, no other website open in your browser can call it. With no
 `AUTH_TOKEN` either, it answers only at `localhost` or an IP address: a site that
 points its own domain name at your machine (DNS rebinding) is otherwise
 same-origin with it. To reach it by a name such as `nas.local`, set a token or
 list the name in `ALLOWED_HOSTS`.
 
-Set `AUTH_TOKEN` in `docker-compose.yml` the moment the server is reachable
-from anywhere but your own machine, and put the same value in the app as the
-key.
+Set `AUTH_TOKEN` in `docker-compose.yml`, or add `-e AUTH_TOKEN=…` to the
+`docker run`, the moment the server is reachable from anywhere but your own
+machine, and put the same value in the app as the key.
 
 To reach it from your phone when you are out:
 

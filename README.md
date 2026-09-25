@@ -54,7 +54,8 @@ and saved to the device file by file or as one `.zip`.
   **Save .torrent**. Every torrent can be shared, not only the ones you seed — except a private one:
   its links carry your passkey, and the copy of the app that opened one would announce its info hash
   to the public trackers, so its share panel says so and offers only the `.torrent`, which keeps the
-  private flag. Nothing on its card copies a link either.
+  private flag — for your own devices, as it carries the passkey too. Nothing on its card copies a
+  link either.
 - **Pause, resume, remove**, per‑torrent and total speeds, ETA, peer counts, and a details panel with
   the info hash, ratio, pieces, trackers and an event log. Pausing really pauses: a connection that
   was already in flight is dropped rather than allowed to resume the transfer — and it stays paused
@@ -93,9 +94,10 @@ and saved to the device file by file or as one `.zip`.
   **Cancel** leaves everything as it was, a field that cannot be saved included: an iPhone has no
   Escape key. Enter in a field, or a phone keyboard's Go, is Save. A field that cannot be used is
   never dropped on Save: a CORS proxy without `{url}` (the address its deploy prints) and a server
-  address without `http://` are mended in the field, to be saved as they read then, and a metadata
-  source without `{infohash}` is named. **Copy diagnostics**, for a bug report, says which keys, proxy
-  and TURN credentials are set without giving them, and an `http(s)` tracker by its host alone.
+  address without `http://` (`192.168.1.5:8080`, `nas.local`) are mended in the field, to be saved as
+  they read then, and a metadata source without `{infohash}` is named. **Copy diagnostics**, for a bug
+  report, says which keys, proxy and TURN credentials are set without giving them, and an `http(s)`
+  tracker by its host alone.
 
 ### What the page alone cannot do, and why
 
@@ -197,7 +199,8 @@ asks again once Settings are saved. Deleting a transfer in the library lets go o
 link for is shown with the reason, and asked for again; the others keep theirs. Playback is a plain
 `<video>`/`<audio>` on the same direct link, so seeking is whatever the other end supports, and the
 next poll leaves a playing video alone; a file the browser cannot play (an `.mkv` on Safari) says so,
-and to use Save or a player app instead. Each transfer remembers the service it started on, and each
+and to use Save or a player app instead, while one whose connection drops mid-play says that, and
+**Play** goes on from where it stopped. Each transfer remembers the service it started on, and each
 service keeps its own key and address in Settings, so switching services does not break older links;
 the library shows only the service chosen now. The key is stored on the device, and no
 payload ever passes through this app. If an API refuses browser requests, the call is retried through
@@ -229,9 +232,10 @@ The server logs the origins it took when it starts. On the server's own page, "n
 just that: the server is stopped or out of reach.
 
 **"This page is https, and a browser will not let it call an http:// address."** The installed app is
-on https, and your server's LAN address is `http://`: the browser refuses the call before it is sent,
-and neither `ALLOWED_ORIGINS` nor a proxy changes that. Open the app at the server's own address, or
-reach the server over https (the tunnel, or a deploy).
+on https, and your server's address is `http://`: the browser refuses the call before it is sent, and
+`ALLOWED_ORIGINS` does not change that. A CORS proxy set in Settings is asked instead, and reaches a
+server on the internet — never a LAN address, which a proxy out there cannot reach. Open the app at
+the server's own address, or reach the server over https (the tunnel, or a deploy).
 
 **Your own server stops at start**, and its log says `TORRENT_PORT … or DHT_PORT … is taken`: another
 BitTorrent client on the machine, or a second copy of the server, has the port. Stop it, or set
@@ -336,10 +340,11 @@ secure (plain `http` at a name that is not `localhost`) saying why only the Clou
 first asking to start a linked magnet; a page served by your own server taking it as the service
 with nothing set, asking for its token when it has one, and one that is not keeping its default; a
 library file list, open while your own server finishes a season, taking on each episode in its place
-and leaving the rows it has alone, a file it cannot play saying so, and a torrent added below a full
-library brought into view; a library turned away by a token, or by a server that stopped, saying so
-rather than that the account is empty, and listing it again once it is back; your own server at
-another address, or an `http://` one from an https page, blamed on what it is and not on CORS; a
+and leaving the rows it has alone, a file it cannot play saying so and one whose connection drops
+saying that instead, and a torrent added below a full library brought into view; a library turned
+away by a token, or by a server that stopped, saying so rather than that the account is empty, and
+listing it again once it is back; your own server at another address, or an `http://` one from an
+https page, blamed on what it is and not on CORS, and reached through a CORS proxy when one is set; a
 CORS proxy's refusal passed on with the host to add; a card and a top bar that say `offline`, caches
 that wait for the network, and the network's return waking the torrent; a browser without WebRTC
 saying so; diagnostics without the keys, the proxy, TURN credentials or a passkey; a proxy, a

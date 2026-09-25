@@ -161,8 +161,8 @@
       <div class="share-panel" hidden>
         <p class="hint share-private" hidden>This torrent is private: its links carry your passkey for its
           tracker, and a copy of this app that opened one would announce it to public trackers, which is
-          what gets accounts banned. No browser can download it either. Save the .torrent instead, for
-          your own devices or someone with an account there.</p>
+          what gets accounts banned. Save the .torrent instead, for your own devices and clients only: it
+          carries your passkey too, so anyone else should get it from the tracker with their own account.</p>
         <label class="share-row">
           <span>Link to this torrent — opens it in this app</span>
           <span class="share-field">
@@ -377,7 +377,7 @@
         </label>
         <label class="field" id="cloud-base-field">
           <span>API base URL (optional)</span>
-          <input id="cloud-base" type="url" spellcheck="false" placeholder="https://api.torbox.app" />
+          <input id="cloud-base" type="text" inputmode="url" autocapitalize="off" spellcheck="false" placeholder="https://api.torbox.app" />
           <span class="hint">Leave empty for the service's own API — and for your own server, empty means <em>this page's address</em>, which is already right when the server is the one serving this page (<code>docker compose up -d</code>, then open it). Fill it in to drive a server somewhere else.</span>
         </label>
         <label class="toggle" data-expert>
