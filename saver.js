@@ -107,6 +107,7 @@ function onWorkerMessage(event) {
   activeStreams++;
   startKeepAlive();
   port.postMessage({ type: 'head', name: job.name, size: job.size });
+  let sent = 0;
 
   const finish = (err) => {
     activeStreams = Math.max(0, activeStreams - 1);
@@ -126,10 +127,13 @@ function onWorkerMessage(event) {
     try {
       const { value, done } = await reader.read();
       if (done) {
+        // A torrent removed while it was being saved ends its files early, as if they were whole.
+        if (Number.isFinite(job.size) && sent !== job.size) throw endedEarly();
         port.postMessage(null);
         finish();
         return;
       }
+      sent += value.byteLength;
       // Copy, never transfer: the chunk may be WebTorrent's cached piece buffer, and
       // transferring would detach it for every later read (second save, zip, uploads).
       port.postMessage(value.slice());
@@ -167,14 +171,22 @@ function saveViaWorker(item) {
   });
 }
 
+/** What a save that came up short says: never a file cut off, handed over as if it were whole. */
+function endedEarly() {
+  return new Error('it ended early: the torrent was removed, or another open copy of the app took it over. Save it again');
+}
+
 async function saveViaBlob(item) {
   const chunks = [];
+  let total = 0;
   const reader = item.stream().getReader();
   for (;;) {
     const { value, done } = await reader.read();
     if (done) break;
     chunks.push(value);
+    total += value.byteLength;
   }
+  if (Number.isFinite(item.size) && total !== item.size) throw endedEarly();
   const blob = new Blob(chunks, { type: 'application/octet-stream' });
   if (IS_IOS && isStandalone() && navigator.canShare) {
     const file = new File([blob], item.name, { type: 'application/octet-stream' });

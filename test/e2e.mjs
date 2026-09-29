@@ -2769,6 +2769,9 @@ try {
   await waitFor(() => secondCard('udp only.bin').count().then((n) => n === 0), { label: 'and from the second copy', timeout: 5000 });
   log('a second open copy shows what the first runs, and hands it adds, pauses, ticks, saves, seeds, removals and settings');
 
+  // Paused, a seed stays paused wherever it goes.
+  await secondCard('picked in the second copy.bin').locator('.pause-btn').click();
+  await waitFor(() => life.evaluate(() => window.__phoneTorrent.client.torrents.find((t) => t.name === 'picked in the second copy.bin')?.paused), { label: 'a seed paused from the second copy', timeout: 5000 });
   await life.close();
   await waitFor(() => secondCopy.evaluate((h) => !window.__phoneTorrent.follower && window.__phoneTorrent.client.torrents.some((t) => t.infoHash === h), unwanted.infoHash), { label: 'the second copy to take over when the first closes', timeout: 15000 });
   await secondCard('unwanted.bin').waitFor({ timeout: 5000 });
@@ -2779,6 +2782,7 @@ try {
     const { client, views } = window.__phoneTorrent;
     return client.torrents.some((t) => t.name === 'picked in the second copy.bin' && views.get(t)?.seeding);
   }), { label: 'the seed picked in the second copy to go on in it once the first closes', timeout: 15000 });
+  await waitFor(() => secondCopy.evaluate(() => window.__phoneTorrent.client.torrents.find((t) => t.name === 'picked in the second copy.bin')?.paused), { label: 'and to stay paused there', timeout: 5000 });
   log('closing the copy that runs the torrents hands them to the next one, from storage, and its seeds');
 
   // A phone freezes the copy it does not show. One looked at while the running one does not answer
