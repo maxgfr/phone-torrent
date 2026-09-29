@@ -60,8 +60,15 @@ and saved to the device file by file or as one `.zip`.
   the info hash, ratio, pieces, trackers and an event log. Pausing really pauses: a connection that
   was already in flight is dropped rather than allowed to resume the transfer — and it stays paused
   when the metadata arrives from a cache or the torrent is retried. Resuming brings back its web
-  seeds, the torrent's own and any added by hand. Removing a torrent in one open copy of the app (a
-  second tab, a link opened in the browser beside the installed app) removes it from the others.
+  seeds, the torrent's own and any added by hand.
+- **Every open copy in step.** A second tab, or a link opened in the browser beside the installed
+  app, is a second copy of the app on the same storage. One copy runs the torrents; every other one
+  shows the same list as it goes — progress, peers, ticks, the log — and whatever is done there is
+  done for real: add, seed, pause, tick, save (the file streams over from the copy that runs it),
+  retry, remove, delete everything. Settings saved in one apply in all. Close the copy that runs the
+  torrents and the next one picks them up from storage; open or look at another while a phone has
+  frozen the first, and it takes over within seconds. (A browser without Web Locks or
+  BroadcastChannel runs them in every copy, as before, and passes on only a removal.)
 - **Installable.** Proper icons, an offline app shell, an **Install** button on Android and the
   "Add to Home Screen" hint on iOS. Dark mode, big touch targets, safe‑area aware, and an optional
   **wake lock** so the screen staying on keeps the download alive — held only while something can
@@ -325,8 +332,10 @@ retry, the screen lock held for a download and let go for nothing selected (a pe
 or a private torrent, an unreachable torrent's explanation surviving a reload and a retry, the
 `.torrent` for a waiting magnet filling in its card, the network coming back while a seed is hashing and a restore is checking its
 pieces (hashing is held in place for as long as that takes) with only the torrent waiting for peers
-rebuilt and no "finished" for what had finished before, a removal in one open copy of the app
-reaching another, and web seeds on a slow mirror kept through a pause, a reload and a "keep seeding"
+rebuilt and no "finished" for what had finished before, a second open copy of the app showing the
+same list and handing the first its adds, pauses, ticks, saves (a file and a zip, byte for byte), a
+seed, settings and removals, then taking over from storage when the first closes, and a third copy
+taking over from it when it stops answering, and web seeds on a slow mirror kept through a pause, a reload and a "keep seeding"
 stop, the screen lock held for a private torrent one of them is sending.
 
 Around the edges of the app itself: a seed's name cancelled (nothing is seeded) and a seed opening

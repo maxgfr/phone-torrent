@@ -2687,26 +2687,122 @@ try {
   }
   log('coming back rebuilds a magnet waiting for peers, and leaves a hashing seed, a piece check and an unwanted torrent alone');
 
-  /* Two copies of the app open at once each run every torrent. Removing one in either copy removes
-   * it from the other too: the other would otherwise offer files whose pieces are gone, and write the
-   * record back on its next change, bringing the torrent back at 0% on the next launch. */
+  /* Two copies of the app open at once share one storage, and the same torrent run in both would
+   * download twice into it. The first one runs every torrent; the second shows them as they go, and
+   * hands the first whatever is done in it: an add, a pause, a tick, a save, a seed, a removal, the
+   * settings. When the first closes, the second takes over from storage — and what was removed in
+   * either does not come back. */
   const secondCopy = await lifeCtx.newPage();
   secondCopy.on('pageerror', (e) => console.error('second copy page error:', e));
   secondCopy.on('dialog', (d) => d.accept());
   await secondCopy.goto(site.url);
   await secondCopy.waitForFunction(() => window.__phoneTorrent?.client);
-  const secondCopyCard = secondCopy.locator('.torrent', { has: secondCopy.locator('.name', { hasText: 'udp only.bin' }) }).first();
-  await secondCopyCard.locator('.file').waitFor({ timeout: 15000 });
-  await secondCopyCard.locator('.remove-btn').click();
-  await waitFor(() => life.evaluate((h) => !window.__phoneTorrent.client.torrents.some((t) => t.infoHash === h), udpOnly.infoHash), { label: 'the other copy to drop the removed torrent', timeout: 5000 });
-  assert.equal(await lifeCard('udp only.bin').count(), 0, 'its card is gone there too');
-  await secondCopy.close();
-  const nextLaunch = await lifeCtx.newPage();
-  await nextLaunch.goto(site.url);
-  await nextLaunch.waitForFunction(() => window.__phoneTorrent?.client);
-  await nextLaunch.locator('.torrent .name', { hasText: 'unwanted.bin' }).waitFor({ timeout: 15000 });
-  assert.equal(await nextLaunch.locator('.torrent .name', { hasText: 'udp only.bin' }).count(), 0, 'and the next launch does not bring it back');
-  log('removing a torrent in one open copy of the app removes it from the other');
+  const secondCard = (name) => secondCopy.locator('.torrent', { has: secondCopy.locator('.name', { hasText: name }) }).first();
+  const shownNames = (page) => page.$$eval('.torrent .name', (els) => els.map((e) => e.textContent).join('\n'));
+  await secondCard('udp only.bin').locator('.file').waitFor({ timeout: 15000 });
+  assert.equal(await secondCopy.evaluate(() => window.__phoneTorrent.follower), true, 'the second copy follows the first');
+  assert.equal(await secondCopy.evaluate(() => window.__phoneTorrent.client.torrents.length), 0, 'and runs no torrent of its own');
+  await waitFor(async () => (await shownNames(secondCopy)) === (await shownNames(life)), { label: 'the second copy to show the same torrents, in the same order', timeout: 5000 });
+
+  const pausedInFirst = (h) => life.evaluate((hash) => window.__phoneTorrent.client.torrents.find((t) => t.infoHash === hash)?.paused, h);
+  await secondCard('nobody has it').locator('.pause-btn').click();
+  await waitFor(() => pausedInFirst(nobodyHasIt), { label: 'a pause in the second copy to pause the torrent in the first', timeout: 5000 });
+  await waitFor(() => secondCard('nobody has it').locator('.state').textContent().then((t) => t === 'paused'), { label: 'the second copy to say it is paused', timeout: 5000 });
+  await secondCard('nobody has it').locator('.pause-btn').click();
+  await waitFor(() => pausedInFirst(nobodyHasIt).then((paused) => paused === false), { label: 'a resume in the second copy to resume it', timeout: 5000 });
+
+  const ticksInFirst = () => lifeCard('Phone Torrent Test').locator('.file input[type="checkbox"]').evaluateAll((boxes) => boxes.map((b) => b.checked));
+  await secondCard('Phone Torrent Test').locator('.file input[type="checkbox"]').first().uncheck();
+  await waitFor(() => ticksInFirst().then((t) => t[0] === false && t.slice(1).every(Boolean)), { label: 'a file unticked in the second copy to be unticked in the first', timeout: 5000 });
+  assert.deepEqual(await life.evaluate(() => [...window.__phoneTorrent.views.values()].find((v) => v.torrent.name === 'Phone Torrent Test').record.deselected), [0], 'and remembered there');
+  await secondCard('Phone Torrent Test').locator('.file input[type="checkbox"]').first().check();
+  await waitFor(() => ticksInFirst().then((t) => t.every(Boolean)), { label: 'a file ticked again in the second copy to be ticked in the first', timeout: 5000 });
+
+  // Saved in the second copy, a file streams over from the first, whole.
+  const [fromSecond] = await Promise.all([
+    secondCopy.waitForEvent('download', { timeout: 30000 }),
+    secondCard('Phone Torrent Test').locator('.file .save-btn').nth(saveIndex).click(),
+  ]);
+  const fromSecondPath = path.join(TMP, 'saved-in-second-copy.bin');
+  await fromSecond.saveAs(fromSecondPath);
+  assert.equal(fromSecond.suggestedFilename(), files[0].name, 'a file saved in the second copy keeps its name');
+  assert.equal(sha(readFileSync(fromSecondPath)), files[0].sha, 'and its bytes');
+  const [zipFromSecond] = await Promise.all([
+    secondCopy.waitForEvent('download', { timeout: 30000 }),
+    secondCard('Phone Torrent Test').locator('.zip-btn').click(),
+  ]);
+  const zipFromSecondPath = path.join(TMP, 'all-from-second-copy.zip');
+  await zipFromSecond.saveAs(zipFromSecondPath);
+  const unzippedFromSecond = path.join(TMP, 'unzipped-from-second-copy');
+  execFileSync('unzip', ['-q', '-o', zipFromSecondPath, '-d', unzippedFromSecond]);
+  for (const f of files) assert.equal(sha(readFileSync(path.join(unzippedFromSecond, 'Phone Torrent Test', f.name))), f.sha, `zip entry ${f.name} from the second copy matches`);
+
+  const addedThere = createHash('sha1').update(`added in the second copy ${Math.random()}`).digest('hex');
+  await secondCopy.fill('#magnet-input', `magnet:?xt=urn:btih:${addedThere}&dn=added%20in%20the%20second%20copy`);
+  await secondCopy.click('#magnet-form button[type="submit"]');
+  await waitFor(() => life.evaluate((h) => window.__phoneTorrent.client.torrents.some((t) => t.infoHash === h), addedThere), { label: 'a magnet added in the second copy to run in the first', timeout: 5000 });
+  await lifeCard('added in the second copy').waitFor({ timeout: 5000 });
+  await secondCard('added in the second copy').waitFor({ timeout: 5000 });
+  await lifeCard('added in the second copy').locator('.remove-btn').click();
+  await waitFor(() => secondCard('added in the second copy').count().then((n) => n === 0), { label: 'a removal in the first copy to reach the second', timeout: 5000 });
+
+  await secondCopy.click('.tab[data-tab="seed"]');
+  await secondCopy.setInputFiles('#seed-file-input', { name: 'picked in the second copy.bin', mimeType: 'application/octet-stream', buffer: rnd(40 * 1024, 66) });
+  await waitFor(() => life.evaluate(() => window.__phoneTorrent.client.torrents.some((t) => t.name === 'picked in the second copy.bin')), { label: 'files picked in the second copy to be seeded by the first', timeout: 15000 });
+  await secondCard('picked in the second copy.bin').locator('.share-panel:not([hidden])').waitFor({ timeout: 15000 });
+
+  await secondCopy.evaluate(() => {
+    const saved = JSON.parse(localStorage.getItem('phone-torrent:settings'));
+    localStorage.setItem('phone-torrent:settings', JSON.stringify({ ...saved, uploadLimit: 321 }));
+  });
+  await waitFor(() => life.evaluate(() => window.__phoneTorrent.settings.uploadLimit === 321), { label: 'settings saved in the second copy to apply in the first', timeout: 5000 });
+
+  await secondCard('udp only.bin').locator('.remove-btn').click();
+  await waitFor(() => life.evaluate((h) => !window.__phoneTorrent.client.torrents.some((t) => t.infoHash === h), udpOnly.infoHash), { label: 'the first copy to drop the torrent removed in the second', timeout: 5000 });
+  assert.equal(await lifeCard('udp only.bin').count(), 0, 'its card is gone there');
+  await waitFor(() => secondCard('udp only.bin').count().then((n) => n === 0), { label: 'and from the second copy', timeout: 5000 });
+  log('a second open copy shows what the first runs, and hands it adds, pauses, ticks, saves, seeds, removals and settings');
+
+  await life.close();
+  await waitFor(() => secondCopy.evaluate((h) => !window.__phoneTorrent.follower && window.__phoneTorrent.client.torrents.some((t) => t.infoHash === h), unwanted.infoHash), { label: 'the second copy to take over when the first closes', timeout: 15000 });
+  await secondCard('unwanted.bin').waitFor({ timeout: 5000 });
+  assert.equal(await secondCopy.evaluate((h) => window.__phoneTorrent.client.torrents.some((t) => t.infoHash === h), udpOnly.infoHash), false, 'and what was removed does not come back');
+  assert.equal(await secondCard('udp only.bin').count(), 0, 'nor its card');
+  log('closing the copy that runs the torrents hands them to the next one, from storage');
+
+  // A phone freezes the copy it does not show. One looked at while the running one does not answer
+  // takes over; the frozen one follows once it wakes up.
+  const thirdCopy = await lifeCtx.newPage();
+  thirdCopy.on('pageerror', (e) => console.error('third copy page error:', e));
+  await thirdCopy.goto(site.url);
+  await thirdCopy.waitForFunction(() => window.__phoneTorrent?.client);
+  await thirdCopy.locator('.torrent .name', { hasText: 'unwanted.bin' }).waitFor({ timeout: 15000 });
+  assert.equal(await thirdCopy.evaluate(() => window.__phoneTorrent.follower), true, 'a third copy follows the second');
+  // A seed is not remembered: the copy that loses the lead hands it to the one that took it.
+  await secondCopy.click('.tab[data-tab="seed"]');
+  await secondCopy.setInputFiles('#seed-file-input', { name: 'handed over.bin', mimeType: 'application/octet-stream', buffer: rnd(40 * 1024, 67) });
+  await waitFor(() => secondCopy.$$eval('.torrent.seeding .state', (els) => els.some((e) => /^seeding/.test(e.textContent))), { label: 'a seed in the second copy', timeout: 15000 });
+  const stuck = secondCopy.evaluate(() => { const until = Date.now() + 10000; while (Date.now() < until) { /* not answering */ } });
+  await new Promise((r) => setTimeout(r, 300));
+  const asked = Date.now();
+  await thirdCopy.evaluate(() => 1);
+  if (Date.now() - asked < 2000) {
+    await waitFor(() => thirdCopy.evaluate((h) => !window.__phoneTorrent.follower && window.__phoneTorrent.client.torrents.some((t) => t.infoHash === h), unwanted.infoHash), { label: 'the third copy to take over from one that stopped answering', timeout: 20000 });
+    await stuck;
+    await waitFor(() => secondCopy.evaluate(() => window.__phoneTorrent.follower && window.__phoneTorrent.client.torrents.length === 0), { label: 'the copy that stopped answering to follow once it answers again', timeout: 10000 });
+    await secondCard('unwanted.bin').waitFor({ timeout: 10000 });
+    if (opfs) {
+      await waitFor(() => thirdCopy.evaluate(() => {
+        const { client, views } = window.__phoneTorrent;
+        return client.torrents.some((t) => t.name === 'handed over.bin' && views.get(t)?.seeding);
+      }), { label: 'the seed handed over to the copy that took over', timeout: 15000 });
+      await waitFor(() => thirdCopy.$$eval('.torrent.seeding .state', (els) => els.some((e) => /^seeding/.test(e.textContent))), { label: 'and seeding there, from the data it left', timeout: 15000 });
+    }
+    log('a copy looked at while the running one does not answer takes over, its seeds included, and the other follows it');
+  } else {
+    await stuck;
+    log('a copy that stops answering: skipped, the pages of one context share a thread in this engine');
+  }
   await lifeCtx.close();
 
   // Handed to a cloud service and ready there, a torrent needs the screen on no more than a private one.
