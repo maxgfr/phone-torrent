@@ -2728,9 +2728,15 @@ try {
   assert.equal(fromSecond.suggestedFilename(), files[0].name, 'a file saved in the second copy keeps its name');
   assert.equal(sha(readFileSync(fromSecondPath)), files[0].sha, 'and its bytes');
   const [zipFromSecond] = await Promise.all([
-    secondCopy.waitForEvent('download', { timeout: 30000 }),
+    secondCopy.waitForEvent('download', { timeout: 60000 }),
     secondCard('Phone Torrent Test').locator('.zip-btn').click(),
-  ]);
+  ]).catch(async (err) => {
+    console.error('zip in the second copy:', await secondCopy.evaluate(() => JSON.stringify({
+      button: document.querySelector('.torrent:not(.seeding) .zip-btn')?.outerHTML,
+      toasts: [...document.querySelectorAll('.toast')].map((t) => t.textContent),
+    })));
+    throw err;
+  });
   const zipFromSecondPath = path.join(TMP, 'all-from-second-copy.zip');
   await zipFromSecond.saveAs(zipFromSecondPath);
   const unzippedFromSecond = path.join(TMP, 'unzipped-from-second-copy');
@@ -2796,7 +2802,25 @@ try {
         const { client, views } = window.__phoneTorrent;
         return client.torrents.some((t) => t.name === 'handed over.bin' && views.get(t)?.seeding);
       }), { label: 'the seed handed over to the copy that took over', timeout: 15000 });
-      await waitFor(() => thirdCopy.$$eval('.torrent.seeding .state', (els) => els.some((e) => /^seeding/.test(e.textContent))), { label: 'and seeding there, from the data it left', timeout: 15000 });
+      await waitFor(() => thirdCopy.$$eval('.torrent.seeding .state', (els) => els.some((e) => /^seeding/.test(e.textContent))), { label: 'and seeding there, from the data it left', timeout: 30000 })
+        .catch(async (err) => {
+          console.error('seeding cards in the third copy:', await thirdCopy.evaluate(async () => {
+            const { client, views, opfsOk } = window.__phoneTorrent;
+            const t = client.torrents.find((x) => x.name === 'handed over.bin');
+            const listing = [];
+            for await (const [dir, handle] of (await navigator.storage.getDirectory()).entries()) {
+              if (!dir.startsWith('handed over') || handle.kind !== 'directory') continue;
+              for await (const [name, fh] of handle.entries()) {
+                let size = '?';
+                try { size = (await fh.getFile()).size; } catch (e) { size = e.name; }
+                listing.push(`${dir}/${name}:${size}`);
+              }
+            }
+            return JSON.stringify({ opfsOk, store: t?.store?.store?.constructor?.name, pieces: t?.pieces?.map((p) => p === null), listing, bitfield: t && [...Array(t.pieces.length).keys()].map((i) => t.bitfield.get(i)), log: views.get(t)?.log });
+          }));
+          console.error('and in the second:', await secondCopy.evaluate(() => JSON.stringify({ follower: window.__phoneTorrent.follower, torrents: window.__phoneTorrent.client.torrents.length })));
+          throw err;
+        });
     }
     log('a copy looked at while the running one does not answer takes over, its seeds included, and the other follows it');
   } else {

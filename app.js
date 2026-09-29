@@ -553,8 +553,9 @@ function toast(message, { error = false, timeout = 4500 } = {}) {
   el.textContent = message;
   els.toasts.appendChild(el);
   setTimeout(() => el.remove(), timeout);
-  // What the copy running the torrents says is for the copy being looked at (see LEAD_LOCK).
-  if (decided && !follower && followersNear()) otherCopies.postMessage({ type: 'toast', message: String(message), error, timeout });
+  // What the copy running the torrents says is for the copy being looked at (see LEAD_LOCK) — unless
+  // this is the one in use, and it answers what was done in it.
+  if (decided && !follower && followersNear() && !document.hasFocus()) otherCopies.postMessage({ type: 'toast', message: String(message), error, timeout });
 }
 
 function parseTorrentText(text) {
@@ -2295,7 +2296,7 @@ async function fetchTorrentUrl(url) {
 async function addTorrent(id, { record, seeding = false } = {}) {
   if (IN_BROWSER_BLOCKED) throw new Error(IN_BROWSER_BLOCKED);
   // A copy that follows hands it to the one that runs the torrents (see LEAD_LOCK).
-  if (!(await leading)) return addThroughLead({ op: 'add', id: typeof id === 'string' ? id : new Uint8Array(id) });
+  if (!(await leading)) return record ? null : addThroughLead({ op: 'add', id: typeof id === 'string' ? id : new Uint8Array(id), seeding });
   await storageReady;
   // A .torrent URL is fetched here rather than inside WebTorrent: the proxy can help, the error is
   // a real message, and the rules below get to see the bytes before anything is announced.
@@ -2317,7 +2318,7 @@ async function addTorrent(id, { record, seeding = false } = {}) {
   }
 
   // Another copy took the lead over meanwhile: it runs the torrents now, and a restore is its to do.
-  if (follower) return record ? null : addThroughLead({ op: 'add', id: typeof id === 'string' ? id : new Uint8Array(id) });
+  if (follower) return record ? null : addThroughLead({ op: 'add', id: typeof id === 'string' ? id : new Uint8Array(id), seeding });
 
   // What the torrent's own trackers allow, judged from the bytes the user gave (or known from the
   // record) — never from the file WebTorrent rebuilds, which a restore and a retry start from: its
@@ -2944,6 +2945,8 @@ async function replaceTorrent(torrent, id, why, { source: newSource } = {}) {
   });
   // A seed rebuilt stays a seed: rebuilt as a download, it was remembered, and shared again at every launch.
   const next = await addTorrent(id, { record, seeding: view.seeding });
+  // Another copy took the lead over meanwhile: it runs the torrent now, and the card is its own.
+  if (!next || next.remote) return next;
   const nextView = views.get(next);
   if (nextView) {
     if (wasPaused || autoStopped) {
@@ -3200,6 +3203,10 @@ async function dropTorrent(torrent) {
 
 /** Resolves true once this copy runs the torrents itself, false when it follows another one. */
 let leading = Promise.resolve(true);
+/** Resolves once the torrents of a copy that just took the lead over are back. */
+let restored = Promise.resolve();
+/** Leading goes with a Web Lock here: only the copy that leads removes, and no other is listened to. */
+let withLocks = false;
 let leadQueue = null;
 let takingLead = false;
 
@@ -3225,6 +3232,7 @@ function requestLead(options) {
 async function electLead() {
   const held = otherCopies && navigator.locks?.request ? await requestLead({ ifAvailable: true }) : null;
   decided = true;
+  withLocks = held !== null;
   // Web Locks that refuse to work are no Web Locks: this copy runs its own torrents, as it always did.
   if (held !== false) return true;
   follow();
@@ -3258,6 +3266,8 @@ let leadHeardAt = 0;
 let leadTotals = { down: 0, up: 0, peers: 0, count: 0 };
 let pingTimer = null;
 let pingedAt = 0;
+/** LEAD_SILENCE_MS and a little more, different in each copy: two looked at do not both take over. */
+let silenceLimit = LEAD_SILENCE_MS;
 /** Requests to the leading copy waiting for their answer. */
 const calls = new Map();
 let lastCallId = 0;
@@ -3268,6 +3278,7 @@ function follow() {
   follower = true;
   leadHeardAt = Date.now();
   pingedAt = leadHeardAt;
+  silenceLimit = LEAD_SILENCE_MS + Math.floor(Math.random() * 2000);
   queueForLead();
   clearInterval(pingTimer);
   pingTimer = setInterval(ping, 1000);
@@ -3284,7 +3295,7 @@ function ping() {
   pingedAt = now;
   otherCopies.postMessage({ type: 'ping', from: copyId });
   // A phone freezes the copy it does not show, and a frozen copy answers nothing.
-  if (now - leadHeardAt > LEAD_SILENCE_MS) takeLead();
+  if (now - leadHeardAt > silenceLimit) takeLead();
 }
 
 document.addEventListener('visibilitychange', () => {
@@ -3319,7 +3330,18 @@ function followState(state) {
   // one and never answered is asked of this one.
   if (state.lead !== leadHeard) {
     for (const torrent of [...remotes.values()]) dropRemote(torrent);
-    if (leadHeard) for (const [id, call] of calls) otherCopies.postMessage({ type: 'call', id, from: copyId, message: call.message });
+    if (leadHeard) {
+      for (const entry of [...incoming]) entry.fail(new Error('the copy of this app that ran the torrents went away; save it again'));
+      for (const [id, call] of [...calls]) {
+        if (call.taken && call.message.op === 'cloud') {
+          calls.delete(id);
+          clearTimeout(call.timer);
+          call.reject(new Error(UNSURE_CLOUD));
+        } else {
+          postCall(id, call.message, state.lead);
+        }
+      }
+    }
     leadHeard = state.lead;
   }
   leadTotals = state.totals;
@@ -3406,7 +3428,7 @@ function askLead(message) {
     }, 120000);
     calls.set(id, call);
     try {
-      otherCopies.postMessage({ type: 'call', id, from: copyId, message });
+      postCall(id, message, leadHeard);
     } catch (err) {
       // Something that cannot be handed over, such as files this browser will not pass between tabs.
       clearTimeout(call.timer);
@@ -3414,6 +3436,15 @@ function askLead(message) {
       reject(err);
     }
   });
+}
+
+/**
+ * A request, for the copy that leads as far as this one knows (any, before it has heard of one), and
+ * only for a while: a copy that thaws after a follower took the lead over, and re-ran what was
+ * waiting, must not run it a second time.
+ */
+function postCall(id, message, to) {
+  otherCopies.postMessage({ type: 'call', id, from: copyId, to, sentAt: Date.now(), message });
 }
 
 /** askLead for a button: what goes wrong is said, not thrown. */
@@ -3431,66 +3462,76 @@ async function addThroughLead(message, { share = false } = {}) {
   return torrent;
 }
 
+/** How many chunks of a file streaming over from the leading copy may be on their way at once. */
+const STREAM_WINDOW = 4;
+
 /**
- * A file of a torrent the leading copy runs, streamed over from it a piece at a time: asked for one
- * chunk after another, so no more than one is ever on its way, and a save that waits holds nothing.
+ * A file of a torrent the leading copy runs, streamed over from it: asked for a few chunks at a time
+ * (STREAM_WINDOW), and for more only as they are read, so a save that waits holds little. Nothing
+ * is asked before the first read: a zip opens a stream for every file it will hold, and reads them
+ * one after the other.
  */
 function streamFromLead(torrent, what) {
   const id = `${copyId}.${++lastCallId}`;
-  const channel = new BroadcastChannel(`phone-torrent:stream:${id}`);
-  let asked = 1; // the first chunk comes unasked
+  let channel = null;
+  let controller = null;
+  let asked = 0; // chunks asked for and not come yet
   let wake = null;
   let silence = null;
-  let entry = null;
+  const entry = {};
   const done = () => {
     clearTimeout(silence);
-    channel.close();
+    channel?.close();
     incoming.delete(entry);
   };
-  const expect = (fail) => {
+  entry.fail = (err) => {
+    try { channel?.postMessage({ type: 'cancel' }); } catch { /* already closed */ }
+    done();
+    try { controller.error(err); } catch { /* already over */ }
+    wake?.();
+  };
+  const expect = () => {
     clearTimeout(silence);
-    silence = setTimeout(() => fail(new Error('the copy of this app that runs the torrents stopped sending it')), 30000);
+    if (asked > 0) silence = setTimeout(() => entry.fail(new Error('the copy of this app that runs the torrents stopped sending it')), 30000);
   };
   return new ReadableStream({
-    start(controller) {
-      const fail = (err) => {
-        done();
-        try { controller.error(err); } catch { /* already over */ }
-        wake?.();
-      };
-      entry = { fail };
-      incoming.add(entry);
-      channel.onmessage = ({ data }) => {
-        clearTimeout(silence);
-        if (data.type === 'chunk') {
-          asked -= 1;
-          controller.enqueue(data.bytes);
-        } else if (data.type === 'end') {
-          done();
-          controller.close();
-        } else if (data.type === 'error') {
-          fail(new Error(data.message));
-        }
-        wake?.();
-        wake = null;
-      };
-      entry.expect = () => expect(fail);
-      entry.expect();
-      otherCopies.postMessage({ type: 'stream', id, ...refOf(torrent), ...what });
+    start(c) {
+      controller = c;
     },
     pull() {
-      if (asked === 0) {
-        asked = 1;
-        channel.postMessage({ type: 'more' });
-        entry.expect();
+      // What is asked for and what waits to be read make the window, never more.
+      const credit = STREAM_WINDOW - asked - Math.max(0, -controller.desiredSize);
+      if (!channel) {
+        channel = new BroadcastChannel(`phone-torrent:stream:${id}`);
+        incoming.add(entry);
+        channel.onmessage = ({ data }) => {
+          if (data.type === 'chunk') {
+            asked -= 1;
+            controller.enqueue(data.bytes);
+            expect();
+          } else if (data.type === 'end') {
+            done();
+            controller.close();
+          } else if (data.type === 'error') {
+            entry.fail(new Error(data.message));
+          }
+          wake?.();
+          wake = null;
+        };
+        asked = STREAM_WINDOW;
+        otherCopies.postMessage({ type: 'stream', id, credit: STREAM_WINDOW, ...refOf(torrent), ...what });
+      } else if (credit > 0) {
+        asked += credit;
+        channel.postMessage({ type: 'more', credit });
       }
+      expect();
       return new Promise((resolve) => { wake = resolve; });
     },
     cancel() {
-      channel.postMessage({ type: 'cancel' });
+      try { channel?.postMessage({ type: 'cancel' }); } catch { /* already closed */ }
       done();
     },
-  });
+  }, { highWaterMark: 0 });
 }
 
 /* Leading: the torrents run here, and what the followers see of them. */
@@ -3578,6 +3619,9 @@ function postState() {
 
 async function answerCall({ id, from, message }) {
   followerSeenAt = Date.now();
+  // Started on: should this copy stop answering now, the follower knows not to have it done twice.
+  otherCopies.postMessage({ type: 'taken', id, to: from });
+  await restored.catch(() => {});
   let answer;
   try {
     answer = { value: await runCall(message || {}, from) };
@@ -3598,7 +3642,11 @@ async function runCall(message, from = '') {
   };
   switch (message.op) {
     // A seed handed over by a copy that led before this one is added as a seed again: its data is here.
-    case 'add': return { sid: syncId(await addTorrent(message.id, { seeding: message.seeding === true })) };
+    case 'add': {
+      const added = await addTorrent(message.id, { seeding: message.seeding === true });
+      if (message.seeding === true && added && !added.remote) checkHandedOver(added);
+      return { sid: syncId(added) };
+    }
     case 'seed': return { sid: syncId(await seedFiles(message.files || [], { name: message.name, pickedIn: from })) };
     case 'remove':
       if (torrent) await dropTorrent(torrent);
@@ -3645,12 +3693,37 @@ async function runCall(message, from = '') {
   }
 }
 
-/** Stream a file to the follower saving it: one chunk now, and one more each time it asks. */
-function sendStream({ id, sid, infoHash, file, torrentFile }) {
+/**
+ * A seed handed over by the copy that led before this one: its data is in storage, but the last of it
+ * can land there a moment after the check WebTorrent makes as it is added, which then finds nothing to
+ * seed. Its pieces are checked again, a few times, until they are all there.
+ */
+function checkHandedOver(torrent, waits = [1000, 3000, 6000, 12000]) {
+  if (!waits.length) return;
+  setTimeout(() => {
+    if (torrent.destroyed || !views.has(torrent) || torrent.done) return;
+    if (!torrent.ready) {
+      checkHandedOver(torrent, waits.slice(1));
+      return;
+    }
+    try {
+      torrent.rescanFiles((err) => {
+        const view = views.get(torrent);
+        if (view) refreshView(view);
+        if (!err && !torrent.done) checkHandedOver(torrent, waits.slice(1));
+      });
+    } catch { /* removed meanwhile */ }
+  }, waits[0]);
+}
+
+/** Stream a file to the follower saving it: as many chunks as it has room for, and more as it asks. */
+function sendStream({ id, sid, infoHash, file, torrentFile, credit: first }) {
   const channel = new BroadcastChannel(`phone-torrent:stream:${id}`);
   let reader = null;
   let closed = false;
   let idle = null;
+  let credit = Math.max(1, Math.min(STREAM_WINDOW, Number(first) || 1));
+  let pumping = false;
   const stop = () => {
     if (closed) return;
     closed = true;
@@ -3659,7 +3732,9 @@ function sendStream({ id, sid, infoHash, file, torrentFile }) {
     reader?.cancel().catch(() => {});
   };
   const post = (message) => { if (!closed) channel.postMessage(message); };
-  const send = async () => {
+  const pump = async () => {
+    if (pumping) return;
+    pumping = true;
     // A follower closed in the middle of a save asks for nothing more: its stream is let go.
     clearTimeout(idle);
     idle = setTimeout(stop, 60 * 60 * 1000);
@@ -3672,24 +3747,34 @@ function sendStream({ id, sid, infoHash, file, torrentFile }) {
         if (!source) throw new Error('it is no longer here');
         reader = source.stream().getReader();
       }
-      const { value, done } = await reader.read();
-      if (done) {
-        post({ type: 'end' });
-        stop();
-      } else {
+      while (credit > 0 && !closed) {
+        const { value, done } = await reader.read();
+        if (done) {
+          post({ type: 'end' });
+          stop();
+          break;
+        }
+        credit -= 1;
         // A chunk can be a window on a bigger buffer, all of which would be copied over with it.
         post({ type: 'chunk', bytes: value.byteLength === value.buffer.byteLength ? value : value.slice() });
       }
     } catch (err) {
       post({ type: 'error', message: err?.message || String(err) });
       stop();
+    } finally {
+      pumping = false;
     }
+    if (credit > 0 && !closed) pump();
   };
   channel.onmessage = ({ data }) => {
-    if (data?.type === 'more') send();
-    else if (data?.type === 'cancel') stop();
+    if (data?.type === 'more') {
+      credit = Math.min(STREAM_WINDOW, credit + Math.max(1, Number(data.credit) || 1));
+      pump();
+    } else if (data?.type === 'cancel') {
+      stop();
+    }
   };
-  send();
+  pump();
 }
 
 /** The lead came to this copy: the one that had it closed, or stopped answering. */
@@ -3703,18 +3788,32 @@ async function promote() {
   for (const entry of [...incoming]) entry.fail(new Error('the copy of this app that ran the torrents went away; save it again'));
   leadHeard = '';
   updateEmptyState();
-  const records = await dbAll().catch(() => []);
-  await restoreTorrents(records.sort((a, b) => a.addedAt - b.addedAt));
-  // Asked of the copy that went away and not answered: done here instead.
-  for (const [id, call] of [...calls]) {
+  const waiting = [...calls.keys()];
+  // What other copies ask meanwhile waits for the torrents to be back: a pause names one of them.
+  restored = dbAll().catch(() => []).then((records) => restoreTorrents(records.sort((a, b) => a.addedAt - b.addedAt)));
+  await restored;
+  for (const id of waiting) {
+    const call = calls.get(id);
+    if (!call) continue;
+    // Taken over in turn meanwhile: what was waiting is asked of the copy that leads now.
+    if (follower) {
+      postCall(id, call.message, leadHeard);
+      continue;
+    }
+    // Asked of the copy that went away and not answered: done here instead — unless it had started on
+    // it, and it is a cloud transfer, which done twice is two transfers in the account.
     calls.delete(id);
     clearTimeout(call.timer);
-    runCall(call.message).then(call.resolve, call.reject);
+    if (call.taken && call.message.op === 'cloud') call.reject(new Error(UNSURE_CLOUD));
+    else runCall(call.message).then(call.resolve, call.reject);
   }
+  if (follower) return;
   updateEmptyState();
   updateWakeLock();
   postState();
 }
+
+const UNSURE_CLOUD = 'The copy of this app that was sending it to the cloud stopped answering: look in the cloud library before sending it again.';
 
 /** Another copy took the lead over: it runs the torrents from storage now, and this one shows them. */
 function demote() {
@@ -3727,16 +3826,19 @@ function demote() {
   const seeds = opfsOk
     ? client.torrents.filter((t) => views.get(t)?.seeding && t.metadata && t.torrentFile).map((t) => new Uint8Array(t.torrentFile))
     : [];
-  for (const torrent of [...client.torrents]) {
+  // Handed over once their stores are closed: what was written is only there for another copy then.
+  const closed = [...client.torrents].map((torrent) => {
     removeView(torrent);
-    client.remove(torrent, { destroyStore: false }).catch(() => {});
-  }
+    return new Promise((resolve) => client.remove(torrent, { destroyStore: false }, () => resolve()).catch(() => resolve()));
+  });
   follow();
   followState({ ...last, lead: '' });
   leadHeard = '';
-  for (const bytes of seeds) askLead({ op: 'add', id: bytes, seeding: true }).catch(() => {});
   updateEmptyState();
   updateWakeLock();
+  Promise.all(closed).then(() => {
+    for (const bytes of seeds) askLead({ op: 'add', id: bytes, seeding: true }).catch(() => {});
+  });
 }
 
 /**
@@ -3746,6 +3848,9 @@ function demote() {
  * data; the others only let go of it. A follower drops the card at once.
  */
 function letGo(data) {
+  // With Web Locks, only the copy that leads removes: one that says so and runs torrents here is one
+  // that was frozen, and finishes what it started before it knew another copy had taken over.
+  if (withLocks && !follower) return;
   const gone = [...views.keys()].filter((t) => data.type === 'cleared' || (data.type === 'removed' && Boolean(t.infoHash) && t.infoHash === data.infoHash));
   for (const torrent of gone) {
     if (torrent.remote) {
@@ -3772,7 +3877,7 @@ otherCopies?.addEventListener('message', ({ data }) => {
       }
       break;
     case 'call':
-      if (decided && !follower) answerCall(data);
+      if (decided && !follower && (!data.to || data.to === copyId) && !(Date.now() - data.sentAt > LEAD_SILENCE_MS)) answerCall(data);
       break;
     case 'stream':
       if (decided && !follower) sendStream(data);
@@ -3786,6 +3891,11 @@ otherCopies?.addEventListener('message', ({ data }) => {
     case 'state':
       followState(data);
       break;
+    case 'taken': {
+      const call = data.to === copyId && calls.get(data.id);
+      if (call) call.taken = true;
+      break;
+    }
     case 'reply': {
       const call = data.to === copyId && calls.get(data.id);
       if (!call) break;
@@ -4482,6 +4592,12 @@ els.settingsDialog.addEventListener('close', () => {
       if (wantDebug) localStorage.setItem('debug', DEBUG_NAMESPACES);
       else localStorage.removeItem('debug');
     } catch { /* ignore */ }
+    // The torrents may run in another open copy, which reads this as it starts; and reloading this one
+    // may hand them to a copy that started without it.
+    if (otherCopies && (follower || followersNear())) {
+      toast(`Debug logging ${wantDebug ? 'enabled' : 'disabled'}. Reload every open copy of this app to apply it: the one that runs the torrents logs them in its own console.`, { timeout: 9000 });
+      return;
+    }
     toast(`Debug logging ${wantDebug ? 'enabled' : 'disabled'}. Reloading…`);
     setTimeout(() => location.reload(), 600);
     return;
@@ -4510,16 +4626,20 @@ els.clearStorageBtn.addEventListener('click', async () => {
 /** Every torrent and its data, gone: asked for here, or in a copy that follows this one. */
 async function deleteEverything() {
   await dbClear();
+  // Taken over meanwhile: the copy that leads now has its own torrents, and they stay.
+  if (follower) return;
   otherCopies?.postMessage({ type: 'cleared' });
   for (const torrent of [...client.torrents]) {
     removeView(torrent);
     await removeFromClient(torrent);
   }
-  // Only touch our own directories: on *.github.io every project page shares one origin.
+  // Only touch our own directories: on *.github.io every project page shares one origin. A copy that
+  // lost the lead meanwhile (frozen, then taken over) leaves them to the one that runs the torrents now.
   try {
-    if (!opfsOk) throw new Error('no OPFS');
+    if (!opfsOk || follower) throw new Error('not here');
     const root = await navigator.storage.getDirectory();
     for await (const name of root.keys()) {
+      if (follower) break;
       if (STORE_DIR_RE.test(name) || name === 'chunks') await root.removeEntry(name, { recursive: true }).catch(() => {});
     }
   } catch { /* OPFS unavailable */ }
@@ -4753,7 +4873,10 @@ const started = (async function start() {
   maybeShowIosInstallHint();
 
   // A copy that follows restores nothing: the leading one runs them, and this one takes over from storage.
-  if (await elected) await restoreTorrents(records);
+  if (await elected) {
+    restored = restoreTorrents(records);
+    await restored;
+  }
 
   const params = new URLSearchParams(location.search);
   const fromQuery = parseTorrentText(params.get('magnet') || '');
