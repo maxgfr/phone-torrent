@@ -414,8 +414,9 @@ async function cleanOrphanStoresIfAlone(records) {
  *
  * Leading goes with a Web Lock. When the leading copy closes, the next one takes over and restores
  * the torrents from storage; one being looked at while the leading copy no longer answers (a phone
- * freezes what it does not show) takes over at once. Without Web Locks or BroadcastChannel every
- * copy runs every torrent, as it always did, and only a removal is passed on.
+ * freezes what it does not show) takes over at once. Without Web Locks every copy runs every
+ * torrent, as it always did; with BroadcastChannel a removal or a delete-all is passed on, and
+ * settings apply in every copy all the same.
  */
 const LEAD_LOCK = 'phone-torrent:lead';
 /** How long the leading copy may stay silent to a follower being looked at before that one takes over. */
@@ -2363,7 +2364,7 @@ function sourceToId(record) {
   return null;
 }
 
-async function seedFiles(files, { name, pickedIn = '' } = {}) {
+async function seedFiles(files, { name, pickedIn = '', handedOver = false } = {}) {
   if (!files.length) return null;
   if (IN_BROWSER_BLOCKED) throw new Error(IN_BROWSER_BLOCKED);
   if (!(await leading)) return addThroughLead({ op: 'seed', files: [...files], name }, { share: true });
@@ -2375,7 +2376,7 @@ async function seedFiles(files, { name, pickedIn = '' } = {}) {
   // Files already being shared make the same torrent: WebTorrent closes the new one without a word
   // and hands over the one there is. Picked again to get the link back, that is where it is.
   const torrent = client.seed(files, opts, (seeded) => {
-    if (seeded === torrent || !views.has(seeded)) return;
+    if (seeded === torrent || !views.has(seeded) || handedOver) return;
     toast(`"${seeded.name}" is already being shared.`);
     shareTorrent(seeded);
     // Picked in a copy that follows this one: that is where its link is wanted.
@@ -2384,8 +2385,12 @@ async function seedFiles(files, { name, pickedIn = '' } = {}) {
       otherCopies?.postMessage({ type: 'share', to: pickedIn, sid: syncId(seeded) });
     }
   });
-  attachTorrent(torrent, { seeding: true });
+  const view = attachTorrent(torrent, { seeding: true });
+  // A seed is never remembered: what was picked is what another open copy needs to go on sharing it.
+  view.picked = { files: [...files], name };
   keepStorage();
+  // Shared already, in the copy that ran it before this one: nothing new to say.
+  if (handedOver) return torrent;
   // Sharing is what a seed is for: the link, shown and selected, rather than the details panel.
   torrent.once('ready', () => {
     toast(`Seeding "${torrent.name}". Share the link so others can download it.`);
@@ -2956,6 +2961,7 @@ async function replaceTorrent(torrent, id, why, { source: newSource } = {}) {
     if (source && typeof id !== 'string' && !(record && record.source)) nextView.source = { type: 'torrent', bytes: new Uint8Array(id) };
     else if (source) nextView.source = source;
     nextView.log = [...view.log];
+    nextView.picked = view.picked;
     $('.log', nextView.el).hidden = view.log.length === 0;
     for (const line of view.log) {
       const li = document.createElement('li');
@@ -3330,6 +3336,8 @@ function followState(state) {
   // one and never answered is asked of this one.
   if (state.lead !== leadHeard) {
     for (const torrent of [...remotes.values()]) dropRemote(torrent);
+    // Another copy took over from the one that handed its seeds over as it closed: they are its.
+    if (handedOver && handedOver.from !== state.lead) handedOver = null;
     if (leadHeard) {
       for (const entry of [...incoming]) entry.fail(new Error('the copy of this app that ran the torrents went away; save it again'));
       for (const [id, call] of [...calls]) {
@@ -3647,7 +3655,7 @@ async function runCall(message, from = '') {
       if (message.seeding === true && added && !added.remote) checkHandedOver(added);
       return { sid: syncId(added) };
     }
-    case 'seed': return { sid: syncId(await seedFiles(message.files || [], { name: message.name, pickedIn: from })) };
+    case 'seed': return { sid: syncId(await seedFiles(message.files || [], { name: message.name, pickedIn: message.handover ? '' : from, handedOver: message.handover === true })) };
     case 'remove':
       if (torrent) await dropTorrent(torrent);
       return null;
@@ -3789,8 +3797,13 @@ async function promote() {
   leadHeard = '';
   updateEmptyState();
   const waiting = [...calls.keys()];
+  const seeds = handedOver?.seeds || [];
+  handedOver = null;
   // What other copies ask meanwhile waits for the torrents to be back: a pause names one of them.
-  restored = dbAll().catch(() => []).then((records) => restoreTorrents(records.sort((a, b) => a.addedAt - b.addedAt)));
+  restored = dbAll().catch(() => []).then(async (records) => {
+    await restoreTorrents(records.sort((a, b) => a.addedAt - b.addedAt));
+    for (const message of seeds) if (!follower) await runCall(message).catch(() => {});
+  });
   await restored;
   for (const id of waiting) {
     const call = calls.get(id);
@@ -3821,11 +3834,8 @@ function demote() {
   leading = Promise.resolve(false);
   // Until the copy that took over answers, the list stays as it was rather than going blank.
   const last = lastState();
-  // A seed is not remembered, so the copy that took over cannot restore it: it is handed over, and
-  // its data is where that copy will look for it. Pieces kept in memory stay with this copy.
-  const seeds = opfsOk
-    ? client.torrents.filter((t) => views.get(t)?.seeding && t.metadata && t.torrentFile).map((t) => new Uint8Array(t.torrentFile))
-    : [];
+  // A seed is not remembered, so the copy that took over cannot restore it: it is handed over.
+  const seeds = seedsToHandOver();
   // Handed over once their stores are closed: what was written is only there for another copy then.
   const closed = [...client.torrents].map((torrent) => {
     removeView(torrent);
@@ -3837,9 +3847,34 @@ function demote() {
   updateEmptyState();
   updateWakeLock();
   Promise.all(closed).then(() => {
-    for (const bytes of seeds) askLead({ op: 'add', id: bytes, seeding: true }).catch(() => {});
+    for (const message of seeds) askLead(message).catch(() => {});
   });
 }
+
+/**
+ * What another copy needs to go on sharing this one's seeds, which are never remembered: the files
+ * that were picked, or for a seed rebuilt by a retry, its .torrent, whose data is in storage.
+ */
+function seedsToHandOver() {
+  return [...views.values()].filter((v) => v.seeding && !v.torrent.remote && !v.torrent.destroyed).map((v) => {
+    if (v.picked) return { op: 'seed', files: v.picked.files, name: v.picked.name, handover: true };
+    if (opfsOk && v.torrent.metadata && v.torrent.torrentFile) return { op: 'add', id: new Uint8Array(v.torrent.torrentFile), seeding: true };
+    return null;
+  }).filter(Boolean);
+}
+
+/** Seeds the leading copy handed over as it closed, for whichever copy takes over from it. */
+let handedOver = null;
+
+// Closing, the copy that leads hands its seeds to the one that will take over: a seed started in a
+// copy that follows went on for as long as that copy was open before, and goes on for as long as one is.
+window.addEventListener('pagehide', () => {
+  if (!decided || follower || !withLocks) return;
+  const seeds = seedsToHandOver();
+  try {
+    if (seeds.length) otherCopies.postMessage({ type: 'handover', from: copyId, seeds });
+  } catch { /* files this browser will not pass between tabs */ }
+});
 
 /**
  * Without Web Locks every copy runs every torrent, and a removal in one is passed to the others:
@@ -3890,6 +3925,9 @@ otherCopies?.addEventListener('message', ({ data }) => {
     }
     case 'state':
       followState(data);
+      break;
+    case 'handover':
+      if (follower && Array.isArray(data.seeds)) handedOver = { from: data.from, seeds: data.seeds };
       break;
     case 'taken': {
       const call = data.to === copyId && calls.get(data.id);

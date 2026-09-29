@@ -66,9 +66,10 @@ and saved to the device file by file or as one `.zip`.
   shows the same list as it goes — progress, peers, ticks, the log — and whatever is done there is
   done for real: add, seed, pause, tick, save (the file streams over from the copy that runs it),
   retry, remove, delete everything. Settings saved in one apply in all. Close the copy that runs the
-  torrents and the next one picks them up from storage; open or look at another while a phone has
-  frozen the first, and it takes over within seconds. (A browser without Web Locks or
-  BroadcastChannel runs them in every copy, as before, and passes on only a removal.)
+  torrents and the next one picks them up from storage, seeds included; open or look at another
+  while a phone has frozen the first, and it takes over within seconds. (Without Web Locks every
+  copy runs every torrent, as before; settings still apply in all of them, and with BroadcastChannel
+  a removal or a delete-all is passed on.)
 - **Installable.** Proper icons, an offline app shell, an **Install** button on Android and the
   "Add to Home Screen" hint on iOS. Dark mode, big touch targets, safe‑area aware, and an optional
   **wake lock** so the screen staying on keeps the download alive — held only while something can

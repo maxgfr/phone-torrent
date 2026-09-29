@@ -2774,7 +2774,12 @@ try {
   await secondCard('unwanted.bin').waitFor({ timeout: 5000 });
   assert.equal(await secondCopy.evaluate((h) => window.__phoneTorrent.client.torrents.some((t) => t.infoHash === h), udpOnly.infoHash), false, 'and what was removed does not come back');
   assert.equal(await secondCard('udp only.bin').count(), 0, 'nor its card');
-  log('closing the copy that runs the torrents hands them to the next one, from storage');
+  // A seed is never remembered: the copy that closed handed it over, and it goes on being shared.
+  await waitFor(() => secondCopy.evaluate(() => {
+    const { client, views } = window.__phoneTorrent;
+    return client.torrents.some((t) => t.name === 'picked in the second copy.bin' && views.get(t)?.seeding);
+  }), { label: 'the seed picked in the second copy to go on in it once the first closes', timeout: 15000 });
+  log('closing the copy that runs the torrents hands them to the next one, from storage, and its seeds');
 
   // A phone freezes the copy it does not show. One looked at while the running one does not answer
   // takes over; the frozen one follows once it wakes up.
@@ -2787,8 +2792,9 @@ try {
   // A seed is not remembered: the copy that loses the lead hands it to the one that took it.
   await secondCopy.click('.tab[data-tab="seed"]');
   await secondCopy.setInputFiles('#seed-file-input', { name: 'handed over.bin', mimeType: 'application/octet-stream', buffer: rnd(40 * 1024, 67) });
-  await waitFor(() => secondCopy.$$eval('.torrent.seeding .state', (els) => els.some((e) => /^seeding/.test(e.textContent))), { label: 'a seed in the second copy', timeout: 15000 });
-  const stuck = secondCopy.evaluate(() => { const until = Date.now() + 10000; while (Date.now() < until) { /* not answering */ } });
+  await waitFor(() => secondCard('handed over.bin').locator('.state').textContent().then((t) => /^seeding/.test(t)).catch(() => false), { label: 'a seed in the second copy', timeout: 15000 });
+  // Longer than any copy waits for an answer (LEAD_SILENCE_MS and up to two seconds more), and a ping.
+  const stuck = secondCopy.evaluate(() => { const until = Date.now() + 15000; while (Date.now() < until) { /* not answering */ } });
   await new Promise((r) => setTimeout(r, 300));
   const asked = Date.now();
   await thirdCopy.evaluate(() => 1);
@@ -2797,31 +2803,16 @@ try {
     await stuck;
     await waitFor(() => secondCopy.evaluate(() => window.__phoneTorrent.follower && window.__phoneTorrent.client.torrents.length === 0), { label: 'the copy that stopped answering to follow once it answers again', timeout: 10000 });
     await secondCard('unwanted.bin').waitFor({ timeout: 10000 });
-    if (opfs) {
-      await waitFor(() => thirdCopy.evaluate(() => {
-        const { client, views } = window.__phoneTorrent;
-        return client.torrents.some((t) => t.name === 'handed over.bin' && views.get(t)?.seeding);
-      }), { label: 'the seed handed over to the copy that took over', timeout: 15000 });
-      await waitFor(() => thirdCopy.$$eval('.torrent.seeding .state', (els) => els.some((e) => /^seeding/.test(e.textContent))), { label: 'and seeding there, from the data it left', timeout: 30000 })
-        .catch(async (err) => {
-          console.error('seeding cards in the third copy:', await thirdCopy.evaluate(async () => {
-            const { client, views, opfsOk } = window.__phoneTorrent;
-            const t = client.torrents.find((x) => x.name === 'handed over.bin');
-            const listing = [];
-            for await (const [dir, handle] of (await navigator.storage.getDirectory()).entries()) {
-              if (!dir.startsWith('handed over') || handle.kind !== 'directory') continue;
-              for await (const [name, fh] of handle.entries()) {
-                let size = '?';
-                try { size = (await fh.getFile()).size; } catch (e) { size = e.name; }
-                listing.push(`${dir}/${name}:${size}`);
-              }
-            }
-            return JSON.stringify({ opfsOk, store: t?.store?.store?.constructor?.name, pieces: t?.pieces?.map((p) => p === null), listing, bitfield: t && [...Array(t.pieces.length).keys()].map((i) => t.bitfield.get(i)), log: views.get(t)?.log });
-          }));
-          console.error('and in the second:', await secondCopy.evaluate(() => JSON.stringify({ follower: window.__phoneTorrent.follower, torrents: window.__phoneTorrent.client.torrents.length })));
-          throw err;
-        });
-    }
+    await waitFor(() => thirdCopy.evaluate(() => {
+      const { client, views } = window.__phoneTorrent;
+      return client.torrents.some((t) => t.name === 'handed over.bin' && views.get(t)?.seeding);
+    }), { label: 'the seed handed over to the copy that took over', timeout: 15000 });
+    const handedCard = thirdCopy.locator('.torrent', { has: thirdCopy.locator('.name', { hasText: 'handed over.bin' }) }).first();
+    await waitFor(() => handedCard.locator('.state').textContent().then((t) => /^seeding/.test(t)).catch(() => false), { label: 'and seeding there', timeout: 30000 })
+      .catch(async (err) => {
+        console.error('the handed-over seed:', await handedCard.locator('.state').textContent(), await handedCard.locator('.log li').allTextContents());
+        throw err;
+      });
     log('a copy looked at while the running one does not answer takes over, its seeds included, and the other follows it');
   } else {
     await stuck;
