@@ -61,6 +61,42 @@ async function waitFor(fn, { timeout = 60000, interval = 250, label = 'condition
   }
 }
 
+/** Whether a port can be bound on every interface, over TCP and over UDP. */
+async function canBind(port) {
+  const tcp = net.createServer();
+  const tcpOk = await new Promise((resolve) => {
+    tcp.once('error', () => resolve(false));
+    tcp.listen(port, '0.0.0.0', () => resolve(true));
+  });
+  if (!tcpOk) return false;
+  await new Promise((resolve) => tcp.close(resolve));
+  const udp = dgram.createSocket('udp4');
+  const udpOk = await new Promise((resolve) => {
+    udp.once('error', () => resolve(false));
+    udp.bind(port, '0.0.0.0', () => resolve(true));
+  });
+  await new Promise((resolve) => { try { udp.close(resolve); } catch { resolve(); } });
+  return udpOk;
+}
+
+/**
+ * A port for BitTorrent to listen on, free for TCP and UDP alike: uTP takes the TCP port's number
+ * over UDP. Port 0 asks for TCP alone, and from the ephemeral range every outgoing connection on the
+ * machine draws from; with a container seeding through Docker Desktop, one run in three found that
+ * number already taken over UDP — by WebTorrent's uTP here, or the server's at start. So: below every
+ * system's ephemeral range (Linux starts at 32768, macOS and Windows at 49152), and never the same
+ * one twice in a run.
+ */
+const portsGiven = new Set();
+async function freePort() {
+  for (;;) {
+    const port = 20000 + Math.floor(Math.random() * 12000);
+    if (portsGiven.has(port) || !(await canBind(port))) continue;
+    portsGiven.add(port);
+    return port;
+  }
+}
+
 const tmp = mkdtempSync(path.join(tmpdir(), 'phone-torrent-server-'));
 const tracker = new TrackerServer({ udp: false, http: true, ws: false, stats: false });
 await new Promise((resolve) => tracker.listen(0, '127.0.0.1', resolve));
@@ -71,7 +107,7 @@ log('tracker at', trackerUrl);
 const payload = randomBytes(512 * 1024);
 const seedFile = path.join(tmp, 'release.bin');
 writeFileSync(seedFile, payload);
-const seeder = new WebTorrent({ dht: false });
+const seeder = new WebTorrent({ dht: false, torrentPort: await freePort() });
 const seeded = await new Promise((resolve) => {
   seeder.seed(seedFile, { announce: [trackerUrl] }, resolve);
 });
@@ -87,7 +123,7 @@ await new Promise((resolve) => (dhtRouter.dht.listening ? resolve() : dhtRouter.
 const dhtRouterPort = dhtRouter.dht.address().port;
 // With uTP, as a peer the DHT hands out is tried over uTP first: a seeder without it costs four
 // unanswered attempts, some forty seconds on Linux, before the server falls back to TCP.
-const dhtSeeder = new WebTorrent({ dht: { bootstrap: [`127.0.0.1:${dhtRouterPort}`] }, tracker: false, lsd: false });
+const dhtSeeder = new WebTorrent({ dht: { bootstrap: [`127.0.0.1:${dhtRouterPort}`] }, tracker: false, lsd: false, torrentPort: await freePort() });
 const dhtPayload = randomBytes(256 * 1024);
 writeFileSync(path.join(tmp, 'found-on-the-dht.bin'), dhtPayload);
 const dhtSeeded = await new Promise((resolve) => dhtSeeder.seed(path.join(tmp, 'found-on-the-dht.bin'), { announce: [] }, resolve));
@@ -99,23 +135,8 @@ const downloads = path.join(HERE, '.tmp', 'server-downloads');
 rmSync(downloads, { recursive: true, force: true });
 mkdirSync(downloads, { recursive: true });
 
-/** A port nothing is using right now, TCP or UDP. */
-async function freePort(udp = false) {
-  if (udp) {
-    const socket = dgram.createSocket('udp4');
-    await new Promise((resolve) => socket.bind(0, '127.0.0.1', resolve));
-    const { port } = socket.address();
-    await new Promise((resolve) => socket.close(resolve));
-    return port;
-  }
-  const probe = net.createServer();
-  await new Promise((resolve) => probe.listen(0, '127.0.0.1', resolve));
-  const { port } = probe.address();
-  await new Promise((resolve) => probe.close(resolve));
-  return port;
-}
 const torrentPort = await freePort();
-const dhtPort = await freePort(true);
+const dhtPort = await freePort();
 
 let server = null;
 let serverUrl = '';
@@ -226,7 +247,7 @@ try {
   const heldUdp = dgram.createSocket('udp4');
   const heldUdpPort = await new Promise((resolve) => heldUdp.bind(0, () => resolve(heldUdp.address().port)));
   try {
-    for (const [setting, port, other] of [['TORRENT_PORT', heldTcpPort, { DHT_PORT: String(await freePort(true)) }], ['DHT_PORT', heldUdpPort, { TORRENT_PORT: String(await freePort()) }]]) {
+    for (const [setting, port, other] of [['TORRENT_PORT', heldTcpPort, { DHT_PORT: String(await freePort()) }], ['DHT_PORT', heldUdpPort, { TORRENT_PORT: String(await freePort()) }]]) {
       const taken = await startAside({ [setting]: String(port), ...other });
       assert.equal(taken.code, 1, `a server whose ${setting} is taken stops (it said: ${taken.output.trim().split('\n').slice(-2).join(' | ')})`);
       assert.match(taken.output, new RegExp(`${setting} ${port}\\b.*is taken`), 'and says which setting to change');
@@ -249,7 +270,7 @@ try {
     '  return load.call(this, request, ...rest);',
     '};',
   ].join('\n'));
-  const withoutUtp = await startAside({ NODE_OPTIONS: `--require ${noUtpHook}`, TORRENT_PORT: String(await freePort()), DHT_PORT: String(await freePort(true)) }, { until: /BitTorrent on port .*\n/ });
+  const withoutUtp = await startAside({ NODE_OPTIONS: `--require ${noUtpHook}`, TORRENT_PORT: String(await freePort()), DHT_PORT: String(await freePort()) }, { until: /BitTorrent on port .*\n/ });
   assert.match(withoutUtp.output, /BitTorrent on port \d+ \(TCP only/, `a server without uTP does not claim it (it said: ${withoutUtp.output.match(/BitTorrent.*/)?.[0]})`);
   log('a build without uTP says it runs TCP only');
 
