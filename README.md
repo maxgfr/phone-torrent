@@ -335,7 +335,7 @@ one deleted in the library or on the service let go of; a key refused asked agai
 are saved, and nothing sent twice; files offered only once they are done; and a
 switch of service whose first listing fails. Against Real‑Debrid, a refused `selectFiles` that still
 sends the torrent once and starts it while one someone else left waiting is left alone, a twenty‑file
-pack whose links come paced with one refused, and an account of more torrents than one page. And a torrent's life around all that: a paused magnet staying paused through a metadata fallback and a
+pack whose links come paced with one refused, and an account of more torrents than one page. Then each service answering as its current docs write it: AllDebrid refusing a key with a 200 and an `AUTH_` code, a link still being made and a magnet gone between two calls; put.io deleting a seeding transfer, which a cancel only stops; Real-Debrid refusing the choice of files for good, delivering three files as one archive, listing one torrent on two pages and one left waiting; a delete of a transfer already gone; and TorBox with no torrent at all, between its queue and its list, with stored files expired, and its plan by name. And a torrent's life around all that: a paused magnet staying paused through a metadata fallback and a
 retry, the screen lock held for a download and let go for nothing selected (a peer connected or not)
 or a private torrent, an unreachable torrent's explanation surviving a reload and a retry, the
 `.torrent` for a waiting magnet filling in its card, the network coming back while a seed is hashing and a restore is checking its
