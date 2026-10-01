@@ -85,7 +85,9 @@ log('seeding', seeded.name, `${payload.length} B`, seeded.infoHash);
 const dhtRouter = new WebTorrent({ dht: { bootstrap: false }, tracker: false, lsd: false, utp: false });
 await new Promise((resolve) => (dhtRouter.dht.listening ? resolve() : dhtRouter.dht.once('listening', resolve)));
 const dhtRouterPort = dhtRouter.dht.address().port;
-const dhtSeeder = new WebTorrent({ dht: { bootstrap: [`127.0.0.1:${dhtRouterPort}`] }, tracker: false, lsd: false, utp: false });
+// With uTP, as a peer the DHT hands out is tried over uTP first: a seeder without it costs four
+// unanswered attempts, some forty seconds on Linux, before the server falls back to TCP.
+const dhtSeeder = new WebTorrent({ dht: { bootstrap: [`127.0.0.1:${dhtRouterPort}`] }, tracker: false, lsd: false });
 const dhtPayload = randomBytes(256 * 1024);
 writeFileSync(path.join(tmp, 'found-on-the-dht.bin'), dhtPayload);
 const dhtSeeded = await new Promise((resolve) => dhtSeeder.seed(path.join(tmp, 'found-on-the-dht.bin'), { announce: [] }, resolve));
