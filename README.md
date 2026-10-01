@@ -356,7 +356,7 @@ keyboard, past a field that cannot be saved, and saved by Enter in a field; a pa
 secure (plain `http` at a name that is not `localhost`) saying why only the Cloud tab works, without
 first asking to start a linked magnet; a page served by your own server taking it as the service
 with nothing set, asking for its token when it has one, and one that is not keeping its default; the
-account line counting a transfer as soon as the library lists it; a library file list, open while your own server finishes a season, taking on each episode in its place
+account line counting a transfer as soon as the library lists it, and no longer once it is deleted there; a library file list, open while your own server finishes a season, taking on each episode in its place
 and leaving the rows it has alone, a file it cannot play saying so and one whose connection drops
 saying that instead, and a torrent added below a full library brought into view; a library turned
 away by a token, or by a server that stopped, saying so rather than that the account is empty, and
