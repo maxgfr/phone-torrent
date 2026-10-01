@@ -1,0 +1,9 @@
+# Every deploy builds server/Dockerfile with the repository as its context: Render, Fly, Cloudflare
+# and `docker compose … --build`. The image copies the files it needs by name, so what follows would
+# only be uploaded to the builder for nothing — downloads/ above all, where the server keeps every
+# file it fetched when it runs from a checkout.
+.git
+.claude
+**/node_modules
+downloads
+test

@@ -168,7 +168,7 @@ Every command about the tunnel takes both files, `down` included. That address i
 | | what it gives you | what it costs |
 |---|---|---|
 | [**Render**](https://render.com/deploy?repo=https://github.com/maxgfr/phone-torrent) | a disk that persists, an HTTPS address, a token it generates for you | a paid plan for the disk |
-| **Fly** — `fly launch --no-deploy && fly secrets set AUTH_TOKEN=… && fly deploy` | a disk that persists (10 GB, and it can grow) and a machine that never stops, so a download carries on and keeps seeding with the phone off; like Render, it reaches peers by connecting out to them | a card on file; the disk is billed by size |
+| **Fly** — `fly launch --no-deploy --copy-config --name <a-name-of-yours> && fly secrets set AUTH_TOKEN=… && fly deploy` (app names are global on Fly) | a disk that persists (10 GB, and it can grow) and a machine that never stops, so a download carries on and keeps seeding with the phone off; like Render, it reaches peers by connecting out to them | a card on file; the disk is billed by size |
 | **Cloudflare** — `cd cloudflare && npm install && npx wrangler secret put AUTH_TOKEN && npx wrangler deploy` | the quickest start, no server of your own (Docker, once, to build the image) | Workers paid plan; an ephemeral disk, emptied once half an hour passes with no download getting data and no request from the app, which stops asking once nothing is downloading, open or not; no UDP and no inbound port — [the details](cloudflare/README.md) |
 
 All three build the same `server/Dockerfile`. The image is also published for `amd64` and `arm64` at

@@ -25,3 +25,8 @@ services:
         value: "*"
       - key: SEED_AFTER_DONE
         value: "1"
+      # The server also listens on 6881 for BitTorrent: named here, the HTTP port is the one Render
+      # routes to, rather than one it has to guess between two ("always bind your public HTTP
+      # server to the value of the PORT environment variable").
+      - key: PORT
+        value: "8080"
