@@ -263,7 +263,10 @@ server.
 **Blocked DNS.** Some ISPs blackhole tracker hostnames. **Settings → Expert → Network check**
 resolves each tracker over DNS‑over‑HTTPS (Cloudflare, Google or Quad9) and tries to connect, then
 tells you which are dead and which exist but are unreachable from your network — the second is
-blocking. The fix is on the device: Android → Private DNS → `one.one.one.one`; iPhone → the 1.1.1.1
+blocking. A tracker is dead, not blocked, when its name no longer exists, when it points at no
+server (`127.0.0.1`, as a parked domain's does), or when its server answers but refuses the tracker
+connection; a resolver that does not answer within seconds leaves the name unverified rather than
+holding the check. The fix is on the device: Android → Private DNS → `one.one.one.one`; iPhone → the 1.1.1.1
 app or Cloudflare's encrypted‑DNS profile; or your router.
 
 **A phone that suspends the tab.** No web page downloads while you are in another app: the browser
@@ -313,7 +316,9 @@ surviving a reload, the details panel, saving the `.torrent`, per‑file save (t
 zip save byte‑for‑byte, restore after reload, file‑selection persistence, the delete‑all cycle,
 removal, the Web Share Target, magnets in the URL and in the fragment, the tracker‑list merge (a
 tracker written with its default port counted once), dead default trackers and caches leaving
-settings saved before them, the network check, metadata from a fallback source with a tampered file rejected, the no‑peers retry,
+settings saved before them, the network check (a dead tracker whose name still resolves named dead
+rather than blocked, and a resolver that never answers given up on), metadata from a fallback
+source with a tampered file rejected, the no‑peers retry,
 and an iPhone‑emulated context: the unfiltered picker, a non‑torrent file refused, a `.torrent` added
 from a URL, an unreachable URL reported and a web page's address told apart from it, a private torrent
 explained and kept off the public trackers, its share panel offering the `.torrent` and no passkey, the
