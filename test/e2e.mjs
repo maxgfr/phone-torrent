@@ -3019,7 +3019,7 @@ try {
     const { pathname } = new URL(req.url());
     ownCalls.push(`${req.method()} ${pathname}`);
     const body = pathname === '/api/health' ? { ok: true, torrents: 0 }
-      : pathname === '/api/account' ? { who: 'your server', detail: '0 transfers · 30 GB free', version: 1 }
+      : pathname === '/api/account' ? { who: 'your server', detail: `${ownTransfers.length} transfer${ownTransfers.length === 1 ? '' : 's'} · 30 GB free`, version: 1 }
         : req.method() === 'POST' ? { transfer: { id: '9'.repeat(40) } }
           : pathname === '/api/transfers' ? { transfers: ownTransfers }
             : { transfer: ownTransfers.find((t) => pathname === `/api/transfers/${t.id}`) };
@@ -3050,6 +3050,12 @@ try {
   ownTransfers.push(season);
   const relist = () => own.evaluate(() => window.__phoneTorrent.refreshCloudLibrary({ quiet: true }));
   await relist();
+  // The account line counts the transfers: it said "0 transfers" beside one the library listed,
+  // until the Cloud tab was tapped again.
+  await waitFor(() => own.$eval('#cloud-account', (e) => e.textContent === 'My own server · your server · 1 transfer · 30 GB free'), { label: 'the account line to count the transfer the library lists', timeout: 5000 });
+  const accountCalls = ownCalls.filter((c) => c === 'GET /api/account').length;
+  await relist();
+  assert.equal(ownCalls.filter((c) => c === 'GET /api/account').length, accountCalls, 'and a listing that changed nothing does not ask for the account again');
   const seasonRow = own.locator('.cloud-item', { has: own.locator('.cloud-item-name', { hasText: 'Show.S01' }) });
   await seasonRow.locator('.cloud-item-files-btn').click({ timeout: 5000 });
   await waitFor(() => seasonRow.locator('.cloud-item-files').textContent().then((t) => /once the download finishes/.test(t)), { label: 'no file finished yet', timeout: 5000 });
