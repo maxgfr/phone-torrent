@@ -1995,6 +1995,9 @@ async function cloudRemoveItem(item) {
     await ctx.api.remove(ctx, item.id, item);
     cloudItems = cloudItems.filter((i) => i.id !== item.id);
     renderCloudLibrary();
+    // Taken off here without listing again, so the account line (a count, the space used) is asked
+    // for directly: nothing else may come to correct it, with nothing left downloading.
+    cloudAccountLine();
     // A card that sent it lets go of it too, and can send the torrent again.
     for (const view of views.values()) {
       if (!view.cloud || String(view.cloud.id) !== String(item.id)) continue;

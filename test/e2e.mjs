@@ -3042,6 +3042,11 @@ try {
     const req = route.request();
     const { pathname } = new URL(req.url());
     ownCalls.push(`${req.method()} ${pathname}`);
+    if (req.method() === 'DELETE') {
+      const at = ownTransfers.findIndex((t) => pathname === `/api/transfers/${t.id}`);
+      if (at >= 0) ownTransfers.splice(at, 1);
+      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true }) });
+    }
     const body = pathname === '/api/health' ? { ok: true, torrents: 0 }
       : pathname === '/api/account' ? { who: 'your server', detail: `${ownTransfers.length} transfer${ownTransfers.length === 1 ? '' : 's'} · 30 GB free`, version: 1 }
         : req.method() === 'POST' ? { transfer: { id: '9'.repeat(40) } }
@@ -3159,6 +3164,15 @@ try {
   assert.ok(addedCard.library >= 6, `the library lists its transfers (${addedCard.library})`);
   assert.ok(addedCard.top < addedCard.screen && addedCard.bottom > 0, `and the card added is on the screen (${Math.round(addedCard.top)}–${Math.round(addedCard.bottom)} of ${addedCard.screen}px)`);
   log('a torrent added below a full cloud library is brought into view');
+
+  // Delete in the library takes the transfer off the list without listing again, and the account line
+  // went on counting it: nothing was downloading, so no poll came to put it right.
+  await waitFor(() => own.$eval('#cloud-account', (e) => e.textContent === 'My own server · your server · 6 transfers · 30 GB free'), { label: 'the account line to count six transfers', timeout: 5000 });
+  own.once('dialog', (d) => d.accept());
+  await own.locator('.cloud-item', { has: own.locator('.cloud-item-name', { hasText: 'Older 5' }) }).locator('.cloud-item-delete').click();
+  await waitFor(() => ownCalls.includes(`DELETE /api/transfers/${'5'.repeat(40)}`), { label: 'the delete to reach the server', timeout: 5000 });
+  await waitFor(() => own.$eval('#cloud-account', (e) => e.textContent === 'My own server · your server · 5 transfers · 30 GB free'), { label: 'the account line to stop counting the transfer deleted', timeout: 5000 });
+  log('a transfer deleted in the library leaves the account line too');
   await ownCtx.close();
   // Anywhere else (GitHub Pages, npm start) that address is a 404, and the default stays.
   const elsewhereCtx = await browser.newContext();
