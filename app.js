@@ -1154,7 +1154,11 @@ async function cloudJson(url, opts) {
           ? `your CORS proxy refused it (${res.status}: ${text.trim().slice(0, 120)})${/API_HOSTS/.test(text) ? `: add ${hostOf(url)} to its API_HOSTS` : ''}`
           : `${hostOf(url)} answered ${res.status}, and not with this API — check the address in Settings → Cloud fetch.`)
       || text.slice(0, 120) || `HTTP ${res.status}`;
-    throw Object.assign(new Error(String(detail)), { status: res.status, transient: busy });
+    // The service's own name for it, where it gives one: AllDebrid's error.code (AUTH_BAD_APIKEY,
+    // with HTTP 200 since it dropped its 401s), TorBox's error (ITEM_NOT_FOUND), Real-Debrid's error.
+    const code = json && ((json.error && typeof json.error === 'object' && json.error.code)
+      || (typeof json.error === 'string' && json.error) || json.error_code);
+    throw Object.assign(new Error(String(detail)), { status: res.status, transient: busy, code: code ? String(code) : '' });
   }
   return json || {};
 }
@@ -1241,14 +1245,18 @@ const CLOUD_PROVIDERS = {
     },
 
     normalize(raw) {
-      const ready = Boolean(pick(raw, 'download_present', 'downloadPresent')) || Boolean(pick(raw, 'download_finished', 'downloadFinished'));
+      // Present is whether its files are stored now. A torrent finished long ago whose files have
+      // expired is still "finished", and its links lead to an error page: finished alone counts only
+      // where present is not given.
+      const present = pick(raw, 'download_present', 'downloadPresent');
+      const ready = present === undefined ? Boolean(pick(raw, 'download_finished', 'downloadFinished')) : Boolean(present);
       const state = String(pick(raw, 'download_state', 'downloadState') || 'unknown');
       return {
         state,
         progress: Number(pick(raw, 'progress') || 0),
         ready,
         // Nothing left to wait for: polling it again would only ask the same question.
-        failed: !ready && /error|fail/i.test(state),
+        failed: !ready && /error|fail|missing|expired/i.test(state),
         name: pick(raw, 'name') || '',
         size: Number(pick(raw, 'size') || 0),
         // Its list names the files of a torrent still downloading too, but their links lead to an
@@ -1274,6 +1282,18 @@ const CLOUD_PROVIDERS = {
       });
     },
 
+    /** Every torrent on the account. An account with none is ITEM_NOT_FOUND to TorBox (a 404), not an error. */
+    myList(ctx) {
+      return ctx.json(`${ctx.base}/v1/api/torrents/mylist?bypass_cache=true`).catch((err) => {
+        if (err.code === 'ITEM_NOT_FOUND') return { data: [] };
+        throw err;
+      });
+    },
+
+    // How many looks in a row a transfer that left the queue was found nowhere: TorBox may take it off
+    // the queue a moment before it lists it among the torrents, and one look is not enough to say lost.
+    handoffMisses: new Map(),
+
     async status(ctx, id) {
       const queued = this.queued(id);
       if (queued) {
@@ -1281,9 +1301,15 @@ const CLOUD_PROVIDERS = {
         const row = Array.isArray(waiting.data) ? waiting.data[0] : waiting.data;
         if (row) return { id, ...this.normalizeQueued(row) };
         // It has left the queue: an ordinary torrent now, under the id TorBox gave it.
-        const { data } = await ctx.json(`${ctx.base}/v1/api/torrents/mylist?bypass_cache=true`);
+        const { data } = await this.myList(ctx);
         const started = (Array.isArray(data) ? data : []).find((t) => queued.hash && String(pick(t, 'hash') || '').toLowerCase() === queued.hash);
-        if (!started) throw new Error('the cloud no longer knows this transfer');
+        if (!started) {
+          const misses = (this.handoffMisses.get(id) || 0) + 1;
+          this.handoffMisses.set(id, misses);
+          if (misses < 4) throw Object.assign(new Error('TorBox has not listed it among the torrents yet'), { transient: true });
+          throw new Error('the cloud no longer knows this transfer');
+        }
+        this.handoffMisses.delete(id);
         return { id: pick(started, 'id'), ...this.normalize(started) };
       }
       const { data } = await ctx.json(`${ctx.base}/v1/api/torrents/mylist?id=${encodeURIComponent(id)}&bypass_cache=true`);
@@ -1293,10 +1319,7 @@ const CLOUD_PROVIDERS = {
     },
 
     async list(ctx) {
-      const [{ data }, waiting] = await Promise.all([
-        ctx.json(`${ctx.base}/v1/api/torrents/mylist?bypass_cache=true`),
-        this.getQueued(ctx),
-      ]);
+      const [{ data }, waiting] = await Promise.all([this.myList(ctx), this.getQueued(ctx)]);
       const rows = Array.isArray(data) ? data : (data ? [data] : []);
       const queue = Array.isArray(waiting.data) ? waiting.data : [];
       return [
@@ -1326,7 +1349,9 @@ const CLOUD_PROVIDERS = {
       const { data } = await ctx.json(`${ctx.base}/v1/api/user/me?settings=false`);
       const who = pick(data || {}, 'email', 'customer', 'id');
       const plan = pick(data || {}, 'plan');
-      return { who: who ? String(who) : '', detail: plan !== undefined ? `plan ${plan}` : '' };
+      // TorBox numbers its plans: 0 Free, 1 Essential, 2 Pro, 3 Standard.
+      const named = ['Free', 'Essential', 'Pro', 'Standard'][plan];
+      return { who: who ? String(who) : '', detail: named ? `${named} plan` : plan !== undefined ? `plan ${plan}` : '' };
     },
 
     // A permalink: the browser follows it by itself, so no CORS and no API call to render the list.
@@ -1462,8 +1487,11 @@ const CLOUD_PROVIDERS = {
         this.owed(raw.id, false);
         return { ...raw, status: 'starting' };
       } catch (err) {
-        if (!err.transient) this.owed(raw.id, false);
-        return raw;
+        if (err.transient) return raw;
+        // Refused for good (a locked account, one no longer premium): it would wait for ever, and
+        // its card ask after it every few seconds. Said once, with the way out.
+        this.owed(raw.id, false);
+        return { ...raw, refused: `Real-Debrid would not start it (${err.message}): choose its files on real-debrid.com` };
       }
     },
 
@@ -1474,7 +1502,7 @@ const CLOUD_PROVIDERS = {
         state,
         progress: Number(raw.progress || 0) / 100,
         ready: state === 'downloaded',
-        failed: ['magnet_error', 'error', 'virus', 'dead'].includes(state),
+        failed: Boolean(raw.refused) || ['magnet_error', 'error', 'virus', 'dead'].includes(state),
         name: raw.filename || raw.original_filename || '',
         size: Number(raw.bytes || raw.original_bytes || 0),
         files: [],
@@ -1484,16 +1512,28 @@ const CLOUD_PROVIDERS = {
     async status(ctx, id) {
       const raw = await this.startIfWaiting(ctx, await ctx.json(`${ctx.base}/rest/1.0/torrents/info/${encodeURIComponent(id)}`));
       if (!raw || !raw.id) throw new Error('Real-Debrid no longer knows this transfer');
+      if (raw.refused) throw new Error(raw.refused);
       const out = this.normalize(raw);
       if (!out.ready) return out;
-      // links[] lines up with the files the torrent selected, in the same order.
       const links = raw.links || [];
-      const selected = (raw.files || []).filter((f) => f.selected).slice(0, links.length);
-      out.files = await withLinks(selected.map((f, i) => ({
-        id: f.id,
-        name: String(f.path || '').replace(/^\//, '') || `file ${i + 1}`,
-        size: Number(f.bytes || 0),
-      })), (i) => this.unrestrict(ctx, links[i]));
+      const selected = (raw.files || []).filter((f) => f.selected);
+      if (links.length === selected.length) {
+        // One link per selected file, in the same order.
+        out.files = await withLinks(selected.map((f, i) => ({
+          id: f.id,
+          name: String(f.path || '').replace(/^\//, '') || `file ${i + 1}`,
+          size: Number(f.bytes || 0),
+        })), (i) => this.unrestrict(ctx, links[i]));
+        return out;
+      }
+      // Not one per file: RD packed the files into an archive (a pack of small files comes as one
+      // .rar), or split one. The files' names would then go to the wrong links and the rest vanish;
+      // each link says what it is once unrestricted.
+      const rows = await withLinks(links.map((l, i) => ({ id: i, name: `file ${i + 1}`, size: 0 })), (i) => this.unrestrict(ctx, links[i]));
+      out.files = rows.map((f, i) => {
+        const known = this.linkMeta.get(links[i]);
+        return known ? { ...f, name: known.filename || f.name, size: Number(known.filesize || 0) } : f;
+      });
       return out;
     },
 
@@ -1502,13 +1542,18 @@ const CLOUD_PROVIDERS = {
     // session — a pack's links on every reload and every look would soon use up the minute.
     pace: pacer(350, 2),
     links: new Map(),
+    // What each unrestricted link names: the file it serves, and its size.
+    linkMeta: new Map(),
     async unrestrict(ctx, link) {
       if (!this.links.has(link)) {
         const unrestricted = await this.pace(() => ctx.json(`${ctx.base}/rest/1.0/unrestrict/link`, {
           method: 'POST',
           body: new URLSearchParams({ link }),
         }));
-        if (unrestricted && unrestricted.download) this.links.set(link, unrestricted.download);
+        if (unrestricted && unrestricted.download) {
+          this.links.set(link, unrestricted.download);
+          this.linkMeta.set(link, { filename: unrestricted.filename, filesize: unrestricted.filesize });
+        }
       }
       return this.links.get(link) || '';
     },
@@ -1525,9 +1570,16 @@ const CLOUD_PROVIDERS = {
         rows.push(...got);
         if (got.length < 100) break;
       }
+      // A torrent added between two pages moves the rest along by one: the same one twice, then.
+      const seen = new Set();
+      const unique = rows.filter((raw) => !seen.has(raw.id) && seen.add(raw.id));
       const started = [];
-      for (const raw of rows) started.push(await this.startIfWaiting(ctx, raw));
-      return started.map((raw) => this.normalize(raw));
+      for (const raw of unique) started.push(await this.startIfWaiting(ctx, raw));
+      return started.map((raw) => ({
+        ...this.normalize(raw),
+        // Waiting for its files to be chosen, by whoever left it so: nothing to poll for.
+        idle: raw.status === 'waiting_files_selection' && !raw.refused && !this.owed(raw.id),
+      }));
     },
 
     async remove(ctx, id) {
@@ -1584,11 +1636,13 @@ const CLOUD_PROVIDERS = {
     normalize(raw) {
       const state = String(raw.status || 'unknown').toLowerCase();
       const size = Number(raw.size || 0);
+      // statusCode 4 is Ready, whatever the words; a ready magnet carries no "downloaded" count.
+      const ready = state === 'ready' || Number(raw.statusCode) === 4;
       return {
         id: raw.id,
         state,
-        progress: size ? Math.min(1, Number(raw.downloaded || 0) / size) : 0,
-        ready: state === 'ready',
+        progress: ready ? 1 : size ? Math.min(1, Number(raw.downloaded || 0) / size) : 0,
+        ready,
         // statusCode 5 and up: an error, or expired. It will not become ready.
         failed: Number(raw.statusCode) >= 5,
         name: raw.filename || '',
@@ -1605,6 +1659,9 @@ const CLOUD_PROVIDERS = {
       if (!out.ready) return out;
       const files = await ctx.json(`${ctx.base}/v4/magnet/files?${this.query(ctx, { 'id[]': id })}`);
       const entry = ((files.data && files.data.magnets) || [])[0] || {};
+      // An answer of "success" carries each magnet's own error (MAGNET_INVALID_ID for one deleted
+      // since): that is no transfer with no files.
+      if (entry.error) throw Object.assign(new Error(entry.error.message || entry.error.code || 'AllDebrid could not list its files'), { code: entry.error.code || '' });
       // Its file tree nests folders; a flat list is what the app shows.
       const flat = [];
       const walk = (nodes, prefix) => {
@@ -1627,6 +1684,9 @@ const CLOUD_PROVIDERS = {
       if (!this.links.has(link)) {
         const unlocked = await this.pace(() => ctx.json(`${ctx.base}/v4/link/unlock?${this.query(ctx, { link })}`));
         if (unlocked.data && unlocked.data.link) this.links.set(link, unlocked.data.link);
+        // A link AllDebrid has still to make comes as "delayed", with no link: said, and asked for
+        // again on the next look, rather than shown as a file with no link for good.
+        else if (unlocked.data && unlocked.data.delayed) throw Object.assign(new Error('AllDebrid is still preparing this file’s link'), { transient: true });
       }
       return this.links.get(link) || '';
     },
@@ -1729,12 +1789,19 @@ const CLOUD_PROVIDERS = {
     },
 
     async remove(ctx, id, item) {
-      await ctx.json(`${ctx.base}/v2/transfers/cancel`, { method: 'POST', body: new URLSearchParams({ transfer_ids: String(id) }) });
-      // Cancelling only drops the transfer; the file it produced is what takes up the account's space.
-      const fileId = item && (item.fileId !== undefined && item.fileId !== null ? item.fileId : (item.files && item.files[0] && item.files[0].id));
-      if (fileId !== undefined && fileId !== null) {
-        await ctx.json(`${ctx.base}/v2/files/delete`, { method: 'POST', body: new URLSearchParams({ file_ids: String(fileId) }) });
+      // The file it produced first: it is what takes up the account's space, and once the transfer
+      // is gone nothing here could reach it. Only the transfer's own: never a file inside its folder,
+      // nor 0, the account's root. One already gone is gone.
+      const fileId = item && Number(item.fileId) > 0 ? item.fileId : null;
+      if (fileId !== null) {
+        await ctx.json(`${ctx.base}/v2/files/delete`, { method: 'POST', body: new URLSearchParams({ file_ids: String(fileId) }) })
+          .catch((err) => { if (err.status !== 404) throw err; });
       }
+      const transfer = new URLSearchParams({ transfer_ids: String(id) });
+      await ctx.json(`${ctx.base}/v2/transfers/cancel`, { method: 'POST', body: transfer });
+      // Cancel removes a transfer still running, but a seeding one only stops seeding and stays
+      // listed (put.io's docs), and came back in the next listing with its files gone: removed as well.
+      await ctx.json(`${ctx.base}/v2/transfers/remove`, { method: 'POST', body: transfer }).catch(() => {});
     },
 
     async account(ctx) {
@@ -1834,7 +1901,9 @@ function scheduleCloudPoll() {
     cloudPollTimer = setTimeout(() => refreshCloudLibrary({ quiet: true }), CLOUD_POLL_MS * Math.min(12, 2 ** (cloudListFailures - 1)));
     return;
   }
-  if (!cloudItems.some((i) => !i.ready && !i.failed)) return;
+  // A transfer waiting on its owner (Real-Debrid's, for files to be chosen on its site) is not
+  // downloading either: polling it every few seconds would only ask the same question.
+  if (!cloudItems.some((i) => !i.ready && !i.failed && !i.idle)) return;
   // An account of hundreds of transfers is asked less often: Real-Debrid lists a hundred a call,
   // and every call counts against the 250 a minute it allows.
   cloudPollTimer = setTimeout(() => refreshCloudLibrary({ quiet: true }), CLOUD_POLL_MS * Math.max(1, Math.ceil(cloudItems.length / 100)));
@@ -1992,7 +2061,13 @@ async function cloudRemoveItem(item) {
   const ctx = cloudCtx({ provider: item.provider, base: item.base });
   if (!askUser(() => confirm(`Delete "${item.name || item.id}" from your ${ctx.api.label} account?\n\nFiles you already saved to this device are not affected.`))) return;
   try {
-    await ctx.api.remove(ctx, item.id, item);
+    try {
+      await ctx.api.remove(ctx, item.id, item);
+    } catch (err) {
+      // Already gone from the account — deleted on the service's own site, or from another device:
+      // what Delete was for. It used to fail, and leave the row on the screen.
+      if (err.status !== 404) throw err;
+    }
     cloudItems = cloudItems.filter((i) => i.id !== item.id);
     renderCloudLibrary();
     // Taken off here without listing again, so the account line (a count, the space used) is asked
@@ -2103,9 +2178,12 @@ function cloudDead(view) {
   return Boolean(view.cloud && (view.cloud.failed || (view.cloudError && !view.cloudRefused)));
 }
 
-/** The service turned the key away (401, 403): a matter for Settings, not for this transfer. */
+/**
+ * The service turned the key away: a matter for Settings, not for this transfer. Most say so with a
+ * 401 or a 403; AllDebrid answers 200 with an AUTH_ code (a bad key, a blocked one, a banned user).
+ */
 function keyRefused(err) {
-  return err.status === 401 || err.status === 403;
+  return err.status === 401 || err.status === 403 || /^AUTH_/.test(err.code || '');
 }
 
 /** The card's transfer is gone from the account: the card lets go of it, for good — a reload does not bring it back. */
@@ -5188,4 +5266,4 @@ async function restoreTorrents(records) {
 started.then(() => startupRestored(), () => startupRestored());
 
 // Expose for debugging and tests.
-window.__phoneTorrent = { get follower() { return follower; }, get settings() { return settings; }, client, views, saver, started, addTorrent, askTrackersNow, seedFiles, torrentReach, unreachableReason, cloudCtx, CLOUD_PROVIDERS, cloudSend, refreshCloudLibrary, effectiveTrackers, refreshTrackerList, fetchMetadataFallback, verifyTorrentBytes, findInfoSpan, runNetworkCheck, cleanOrphanStores, isComplete, get opfsOk() { return opfsOk; } };
+window.__phoneTorrent = { get follower() { return follower; }, get settings() { return settings; }, client, views, saver, started, addTorrent, askTrackersNow, seedFiles, torrentReach, unreachableReason, cloudCtx, CLOUD_PROVIDERS, cloudSend, refreshCloudLibrary, cloudRemoveItem, keyRefused, effectiveTrackers, refreshTrackerList, fetchMetadataFallback, verifyTorrentBytes, findInfoSpan, runNetworkCheck, cleanOrphanStores, isComplete, get opfsOk() { return opfsOk; } };

@@ -347,10 +347,10 @@ function startPutioApi() {
     if (url.pathname === '/v2/files/1235') {
       return send({ status: 'OK', file: { id: 1235, name: 'clip.mp4', file_type: 'VIDEO', size: state.payload.length } });
     }
-    if (url.pathname === '/v2/transfers/cancel' || url.pathname === '/v2/files/delete') {
+    if (url.pathname === '/v2/transfers/cancel' || url.pathname === '/v2/transfers/remove' || url.pathname === '/v2/files/delete') {
       const chunks = [];
       for await (const c of req) chunks.push(c);
-      state[url.pathname === '/v2/files/delete' ? 'deletedFiles' : 'cancelled'] = Buffer.concat(chunks).toString();
+      state[{ '/v2/files/delete': 'deletedFiles', '/v2/transfers/cancel': 'cancelled', '/v2/transfers/remove': 'removed' }[url.pathname]] = Buffer.concat(chunks).toString();
       if (url.pathname === '/v2/files/delete') state.deleted = true;
       return send({ status: 'OK' });
     }
@@ -2142,11 +2142,13 @@ try {
   assert.match(putioApi.state.added, /magnet/, 'the magnet reached transfers/add');
   assert.equal(await ios.evaluate(() => window.__phoneTorrent.client.torrents.length), localBefore, 'nothing was added locally');
 
-  // Delete removes it from the account: the transfer is cancelled and its file dropped.
+  // Delete removes it from the account: its file dropped, the transfer cancelled, and removed — a
+  // seeding one is only stopped by a cancel, and stays listed (put.io's docs).
   await ios.click('.cloud-item-delete');
   await waitFor(() => ios.$$('.cloud-item').then((l) => l.length === 0), { label: 'library entry removed', timeout: 15000 });
   assert.match(putioApi.state.cancelled, /transfer_ids=55/);
   assert.match(putioApi.state.deletedFiles, /file_ids=1234/);
+  assert.match(putioApi.state.removed || '', /transfer_ids=55/, 'and the transfer removed, not only cancelled');
   log('cloud library OK: listed, streamed link, magnet sent, deleted');
 
   // A video playing in the library survives the polls that run while something else is still
@@ -3174,6 +3176,115 @@ try {
   await waitFor(() => own.$eval('#cloud-account', (e) => e.textContent === 'My own server · your server · 5 transfers · 30 GB free'), { label: 'the account line to stop counting the transfer deleted', timeout: 5000 });
   log('a transfer deleted in the library leaves the account line too');
   await ownCtx.close();
+
+  /* ---------- each service's dialect, as its docs write it ---------- */
+  // The stand-ins above answer as the services did when they were written. These are the answers
+  // their current docs give for cases a review found read wrong, asked through the app's own calls
+  // (cloudCtx, cloudJson), one service per path on a server of their own: answers.set('GET
+  // /alldebrid/v4/user', { status, body }), body a value or a function of the URL.
+  const dialects = { answers: new Map(), calls: [] };
+  const dialectServer = http.createServer((req, res) => {
+    const u = new URL(req.url, 'http://dialects.test');
+    const cors = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': '*', 'Access-Control-Allow-Methods': '*' };
+    if (req.method === 'OPTIONS') return res.writeHead(204, cors).end();
+    const at = `${req.method} ${u.pathname}`;
+    dialects.calls.push(at);
+    const { status = 200, body = {} } = dialects.answers.get(at) || {};
+    res.writeHead(status, { ...cors, 'Content-Type': 'application/json' }).end(JSON.stringify(typeof body === 'function' ? body(u) : body));
+  });
+  await new Promise((resolve) => dialectServer.listen(0, '127.0.0.1', resolve));
+  const dialectBase = `http://127.0.0.1:${dialectServer.address().port}`;
+  const answer = (at, body, status = 200) => dialects.answers.set(at, { status, body });
+  const dialectCtx = await browser.newContext({ serviceWorkers: 'block' });
+  const dialect = await dialectCtx.newPage();
+  dialect.on('pageerror', (e) => console.error('dialect page error:', e));
+  await dialect.addInitScript(({ t }) => localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], trackerList: false, metadataSources: [] })), { t: trackerUrl });
+  await dialect.goto(site.url);
+  await dialect.waitForFunction(() => window.__phoneTorrent?.client);
+  // One provider method, with a context of its own: what came back, or what was thrown.
+  const ask = (provider, method, ...args) => dialect.evaluate(async ({ provider, method, args, base }) => {
+    const pt = window.__phoneTorrent;
+    const ctx = pt.cloudCtx({ provider, base: `${base}/${provider}`, key: 'k' });
+    try {
+      return { value: await ctx.api[method](ctx, ...args) };
+    } catch (err) {
+      return { error: err.message, status: err.status, code: err.code, transient: Boolean(err.transient), keyRefused: pt.keyRefused(err) };
+    }
+  }, { provider, method, args, base: dialectBase });
+
+  // AllDebrid turns a key away with an HTTP 200 and an AUTH_ code since it dropped its 401s. Taken for
+  // a transfer gone, a card offered to send the torrent again, and a second one would have started.
+  answer('GET /alldebrid/v4.1/magnet/status', { status: 'error', error: { code: 'AUTH_BAD_APIKEY', message: 'The auth apikey is invalid' } });
+  const adKey = await ask('alldebrid', 'status', 77);
+  assert.deepEqual([adKey.status, adKey.code, adKey.keyRefused], [200, 'AUTH_BAD_APIKEY', true], `AllDebrid's AUTH_BAD_APIKEY is a key refused (${adKey.error})`);
+  // A magnet deleted since: "success", with that magnet's own error inside. Not ready with no files.
+  answer('GET /alldebrid/v4.1/magnet/status', { status: 'success', data: { magnets: [{ id: 78, filename: 'pack', size: 200, status: 'Ready', statusCode: 4 }] } });
+  answer('GET /alldebrid/v4/magnet/files', { status: 'success', data: { magnets: [{ id: '78', error: { code: 'MAGNET_INVALID_ID', message: 'This magnet ID does not exists or is invalid' } }] } });
+  assert.match((await ask('alldebrid', 'status', 78)).error || '', /does not exists or is invalid/, 'a magnet gone between two calls says so');
+  // A link AllDebrid has still to make comes "delayed", with no link: it was a file with no link, for good.
+  answer('GET /alldebrid/v4/magnet/files', { status: 'success', data: { magnets: [{ id: '78', files: [{ n: 'pack', e: [{ n: 'a.mkv', s: 100, l: 'https://alldebrid.com/f/slow' }, { n: 'b.mkv', s: 100, l: 'https://alldebrid.com/f/quick' }] }] }] } });
+  answer('GET /alldebrid/v4/link/unlock', (u) => (/slow/.test(u.searchParams.get('link'))
+    ? { status: 'success', data: { delayed: 4242 } }
+    : { status: 'success', data: { link: 'https://dl.alldebrid.test/b.mkv' } }));
+  const adDelayed = await ask('alldebrid', 'status', 78);
+  assert.equal(adDelayed.value.progress, 1, 'a ready magnet is all there, though it carries no "downloaded"');
+  assert.deepEqual(adDelayed.value.files.map((f) => [f.name, f.url, /preparing/.test(f.error || '')]),
+    [['pack/a.mkv', '', true], ['pack/b.mkv', 'https://dl.alldebrid.test/b.mkv', false]], 'a link still being made is said so, beside the one that is there');
+  answer('GET /alldebrid/v4/link/unlock', { status: 'success', data: { link: 'https://dl.alldebrid.test/a.mkv' } });
+  assert.equal((await ask('alldebrid', 'status', 78)).value.files[0].url, 'https://dl.alldebrid.test/a.mkv', 'and asked for again, it is there once made');
+
+  // put.io: a cancel only stops a seeding transfer, which stays listed (its docs), and came back in the
+  // next listing with its files gone. Its file first, then the transfer cancelled and removed.
+  for (const at of ['POST /putio/v2/files/delete', 'POST /putio/v2/transfers/cancel', 'POST /putio/v2/transfers/remove']) answer(at, { status: 'OK' });
+  dialects.calls.length = 0;
+  await ask('putio', 'remove', 55, { id: 55, fileId: 1234, state: 'seeding' });
+  assert.deepEqual(dialects.calls, ['POST /putio/v2/files/delete', 'POST /putio/v2/transfers/cancel', 'POST /putio/v2/transfers/remove'], 'a seeding transfer: its file, then itself, cancelled and removed');
+  dialects.calls.length = 0;
+  await ask('putio', 'remove', 56, { id: 56, fileId: 0, files: [{ id: 999 }] });
+  assert.deepEqual(dialects.calls, ['POST /putio/v2/transfers/cancel', 'POST /putio/v2/transfers/remove'], 'no file of its own: not the root (0), nor a file inside its folder');
+
+  // Real-Debrid: a choice of files refused for good left the torrent waiting, and its card asking
+  // after it every five seconds for ever.
+  await dialect.evaluate(() => window.__phoneTorrent.CLOUD_PROVIDERS.realdebrid.owed('LOCKED', true));
+  answer('GET /realdebrid/rest/1.0/torrents/info/LOCKED', { id: 'LOCKED', filename: 'locked.mkv', bytes: 10, progress: 0, status: 'waiting_files_selection', files: [{ id: 1, path: '/locked.mkv', bytes: 10, selected: 0 }], links: [] });
+  answer('POST /realdebrid/rest/1.0/torrents/selectFiles/LOCKED', { error: 'permission_denied', error_code: 9 }, 403);
+  const rdLocked = await ask('realdebrid', 'status', 'LOCKED');
+  assert.equal(rdLocked.transient, false, `a choice of files refused for good ends the poll (${rdLocked.error})`);
+  assert.match(rdLocked.error || '', /would not start it .*real-debrid\.com/, 'and says where to choose them');
+  // Three files delivered as one archive: one link. The rows took the files' names, the archive went
+  // by the first one's, and the other two vanished.
+  answer('GET /realdebrid/rest/1.0/torrents/info/PACK', { id: 'PACK', filename: 'pack', bytes: 300, progress: 100, status: 'downloaded', files: [1, 2, 3].map((id) => ({ id, path: `/pack/${id}.txt`, bytes: 100, selected: 1 })), links: ['https://real-debrid.com/d/PACK'] });
+  answer('POST /realdebrid/rest/1.0/unrestrict/link', { download: 'https://dl.realdebrid.test/pack.rar', filename: 'pack.rar', filesize: 290 });
+  assert.deepEqual((await ask('realdebrid', 'status', 'PACK')).value.files.map((f) => [f.name, f.size, f.url]),
+    [['pack.rar', 290, 'https://dl.realdebrid.test/pack.rar']], 'one link for three files: one row, named and sized as the archive it is');
+  // A torrent added between two pages moves the rest along: the same one twice. And one waiting for
+  // whoever left it to choose its files is not something to poll for.
+  answer('GET /realdebrid/rest/1.0/torrents', (u) => (Number(u.searchParams.get('offset')) === 0 ? Array.from({ length: 100 }, (_, i) => i) : [99, 100, 101])
+    .map((i) => ({ id: `T${i}`, filename: `t${i}`, bytes: 1, progress: i === 101 ? 0 : 100, status: i === 101 ? 'waiting_files_selection' : 'downloaded' })));
+  const rdList = (await ask('realdebrid', 'list')).value;
+  assert.equal(rdList.length, 102, 'a torrent seen on two pages is listed once');
+  assert.equal(rdList.find((i) => i.id === 'T101').idle, true, 'one left waiting for its files to be chosen is not polled for');
+  // Deleting one the service no longer has (deleted on its site, or from another device): done all the same.
+  answer('DELETE /realdebrid/rest/1.0/torrents/delete/GONE', { error: 'unknown_ressource', error_code: 7 }, 404);
+  dialect.once('dialog', (d) => d.accept());
+  await dialect.evaluate((base) => window.__phoneTorrent.cloudRemoveItem({ id: 'GONE', name: 'gone', provider: 'realdebrid', base: `${base}/realdebrid` }), dialectBase);
+  await waitFor(() => dialect.$$eval('.toast', (l) => l.some((t) => /Deleted from the cloud/.test(t.textContent))), { label: 'a transfer already gone to count as deleted', timeout: 5000 });
+
+  // TorBox: an account with no torrent at all answers ITEM_NOT_FOUND, as a 404.
+  answer('GET /torbox/v1/api/torrents/mylist', { success: true, error: 'ITEM_NOT_FOUND', detail: 'No torrents found for this user.', data: null }, 404);
+  answer('GET /torbox/v1/api/queued/getqueued', { success: true, data: [] });
+  const tbEmpty = await ask('torbox', 'list');
+  assert.deepEqual(tbEmpty.value, [], `an account with no torrent is an empty library, not an error (${tbEmpty.error})`);
+  // A torrent that has left the queue but is not listed yet was declared lost at once.
+  assert.equal((await ask('torbox', 'status', 'queued:9:abcdef')).transient, true, 'a torrent between the queue and the list is asked after again');
+  // Finished long ago, its stored files expired: "finished", and links that lead to an error page.
+  answer('GET /torbox/v1/api/torrents/mylist', { success: true, data: { id: 5, hash: 'aa', name: 'old', size: 10, progress: 1, download_state: 'completed', download_finished: true, download_present: false, files: [{ id: 0, short_name: 'old.mkv', size: 10 }] } });
+  assert.equal((await ask('torbox', 'status', 5)).value.ready, false, 'a torrent whose files are no longer stored offers no links');
+  answer('GET /torbox/v1/api/user/me', { success: true, data: { email: 'me@example.com', plan: 2 } });
+  assert.deepEqual((await ask('torbox', 'account')).value, { who: 'me@example.com', detail: 'Pro plan' }, 'the plan by its name');
+  await dialectCtx.close();
+  dialectServer.close();
+  log('each service as its docs write it: AllDebrid AUTH_ codes, delayed links and per-magnet errors; put.io seeding deletes; Real-Debrid archives, refusals, pages and waits; a delete of one already gone; TorBox empty accounts, hand-offs, expiry and plans');
   // Anywhere else (GitHub Pages, npm start) that address is a 404, and the default stays.
   const elsewhereCtx = await browser.newContext();
   const elsewhere = await elsewhereCtx.newPage();
