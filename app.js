@@ -7,10 +7,18 @@ const CLOUD_POLL_MS = 5000;
 
 const DEFAULT_TRACKERS = [
   'wss://tracker.openwebtorrent.com',
+  'wss://tracker.webtorrent.dev',
+  'wss://open.ftorrent.com',
+];
+// Defaults that stopped answering: tracker.btorrent.xyz's name now points at 127.0.0.1, and files.fm
+// refuses the WebSocket with a 403. Settings saved before still hold them; see loadSettings.
+const OLD_DEFAULT_TRACKERS = [
+  'wss://tracker.openwebtorrent.com',
   'wss://tracker.btorrent.xyz',
   'wss://tracker.webtorrent.dev',
   'wss://tracker.files.fm:7073/announce',
 ];
+const RETIRED_TRACKERS = ['wss://tracker.btorrent.xyz', 'wss://tracker.files.fm:7073/announce'];
 
 const SETTINGS_KEY = 'phone-torrent:settings';
 const DB_NAME = 'phone-torrent';
@@ -28,9 +36,14 @@ const TRACKER_LIST_MIRRORS = [
 const DEFAULT_DOH = 'https://cloudflare-dns.com/dns-query';
 // Torrent caches that serve a .torrent by info hash. Tried only when peers never deliver the metadata.
 const DEFAULT_METADATA_SOURCES = [
-  'https://itorrents.org/torrent/{INFOHASH}.torrent',
-  'https://torrage.info/torrent.php?h={INFOHASH}',
+  'https://itorrents.net/torrent/{INFOHASH}.torrent',
 ];
+// Where an old default went: itorrents.org redirects to itorrents.net through plain http, which
+// sends the info hash in the clear; torrage.info serves a page now, never a .torrent (null: dropped).
+const RETIRED_METADATA_SOURCES = new Map([
+  ['https://itorrents.org/torrent/{INFOHASH}.torrent', 'https://itorrents.net/torrent/{INFOHASH}.torrent'],
+  ['https://torrage.info/torrent.php?h={INFOHASH}', null],
+]);
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
@@ -157,10 +170,19 @@ function loadSettings() {
     const raw = localStorage.getItem(SETTINGS_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
+      // A save writes every field, so the defaults of the day it was saved stay in it: a list that
+      // was the old defaults becomes today's, and any other loses only the entries that died.
+      let trackers = Array.isArray(parsed.trackers) ? parsed.trackers : [];
+      if (trackers.join('\n') === OLD_DEFAULT_TRACKERS.join('\n')) trackers = defaults.trackers;
+      trackers = trackers.filter((t) => !RETIRED_TRACKERS.includes(t));
+      const sources = Array.isArray(parsed.metadataSources)
+        ? [...new Set(parsed.metadataSources.map((s) => (RETIRED_METADATA_SOURCES.has(s) ? RETIRED_METADATA_SOURCES.get(s) : s)).filter(Boolean))]
+        : defaults.metadataSources;
       return {
         ...defaults,
         ...parsed,
-        trackers: Array.isArray(parsed.trackers) && parsed.trackers.length ? parsed.trackers : defaults.trackers,
+        trackers: trackers.length ? trackers : defaults.trackers,
+        metadataSources: sources,
         cloud: { ...defaults.cloud, ...(parsed.cloud || {}) },
       };
     }
@@ -214,10 +236,29 @@ function usableTracker(url) {
   }
 }
 
+/**
+ * One tracker however its address is written: the public list says wss://tracker.webtorrent.dev:443
+ * where the defaults say wss://tracker.webtorrent.dev, and both were announced to.
+ */
+function trackerKey(url) {
+  try {
+    const u = new URL(url);
+    return `${u.protocol}//${u.host}${u.pathname === '/' ? '' : u.pathname}${u.search}`;
+  } catch {
+    return url;
+  }
+}
+
 /** All trackers to announce to: the user's list plus the fetched public list, deduplicated. */
 function effectiveTrackers() {
   const extra = settings.trackerList ? (loadTrackerListCache()?.trackers || []) : [];
-  return Array.from(new Set([...settings.trackers, ...extra])).filter(usableTracker);
+  const seen = new Set();
+  return [...settings.trackers, ...extra].filter((t) => {
+    const key = trackerKey(t);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return usableTracker(t);
+  });
 }
 
 async function refreshTrackerList({ force = false } = {}) {

@@ -78,7 +78,8 @@ and saved to the device file by file or as one `.zip`.
 - **Automatic trackers**, as qBittorrent does it: your list plus a public list of `wss://` trackers,
   fetched and merged every six hours, an app left open included.
 - **Fallbacks.** No metadata from peers → the `.torrent` is fetched from configurable caches and
-  checked against the info hash; or add the `.torrent` yourself, and it fills in the magnet's card.
+  checked against the info hash — the default one sends no CORS headers, so it answers through your
+  CORS proxy; or add the `.torrent` yourself, and it fills in the magnet's card.
   No peers at all → one tap refreshes the tracker list and
   re‑announces, or adds an HTTP **web seed**.
 - **Survives reloads, and comes back from a freeze.** Pieces live in the Origin Private File System;
@@ -310,8 +311,9 @@ and the torrent must go looking for peers by itself), the share panel (the real 
 the copy button answering on itself), Simple hiding every expert setting while Expert shows them and the choice
 surviving a reload, the details panel, saving the `.torrent`, per‑file save (twice),
 zip save byte‑for‑byte, restore after reload, file‑selection persistence, the delete‑all cycle,
-removal, the Web Share Target, magnets in the URL and in the fragment, the tracker‑list merge, the
-network check, metadata from a fallback source with a tampered file rejected, the no‑peers retry,
+removal, the Web Share Target, magnets in the URL and in the fragment, the tracker‑list merge (a
+tracker written with its default port counted once), dead default trackers and caches leaving
+settings saved before them, the network check, metadata from a fallback source with a tampered file rejected, the no‑peers retry,
 and an iPhone‑emulated context: the unfiltered picker, a non‑torrent file refused, a `.torrent` added
 from a URL, an unreachable URL reported and a web page's address told apart from it, a private torrent
 explained and kept off the public trackers, its share panel offering the `.torrent` and no passkey, the
@@ -459,7 +461,7 @@ The page talks to the trackers and peers BitTorrent needs, and beyond them only 
 - the public list of `wss://` trackers, fetched from GitHub (or its jsDelivr and Statically mirrors)
   every six hours — **Settings → Expert** turns it off or points it somewhere else;
 - for a magnet whose metadata no peer delivers, the torrent caches that serve a `.torrent` by info
-  hash (`itorrents.org` and `torrage.info`), which therefore learn that info hash — the list is in
+  hash (`itorrents.net` by default), which therefore learn that info hash — the list is in
   **Settings → Expert**, and an empty one asks nobody. A `.torrent` you add, private or not, never
   goes there: it already has its metadata;
 - the DNS‑over‑HTTPS resolver you choose, and only when you run the network check;

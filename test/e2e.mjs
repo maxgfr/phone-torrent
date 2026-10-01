@@ -1094,7 +1094,8 @@ try {
   phone.on('dialog', (d) => { dialogs++; d.accept(); });
   // The phone only knows a dead tracker; the real one must come from the fetched tracker list
   // (the qBittorrent-style "automatically add trackers" feature).
-  writeFileSync(path.join(TMP, 'trackers.txt'), `udp://tracker.example.org:1337/announce\n\nhttp://ignored.example/announce\n${trackerUrl}\nwss://also-dead.example\n`);
+  // The public list writes the default port where a user's list does not: the same tracker twice.
+  writeFileSync(path.join(TMP, 'trackers.txt'), `udp://tracker.example.org:1337/announce\n\nhttp://ignored.example/announce\n${trackerUrl}\nwss://also-dead.example\nwss://also-dead.example:443/\n`);
   const listUrl = `${site.url}test/.tmp/trackers.txt`;
   // Merge rather than replace: this context also saves settings through the app's own
   // dialog later on, and a rewrite on every navigation would quietly undo that.
@@ -1116,8 +1117,42 @@ try {
   await phone.waitForFunction(() => window.__phoneTorrent?.client);
   await waitFor(() => phone.evaluate((t) => window.__phoneTorrent.effectiveTrackers().includes(t), trackerUrl), { label: 'tracker list to be fetched and merged', timeout: 15000 });
   const effective = await phone.evaluate(() => window.__phoneTorrent.effectiveTrackers());
-  assert.deepEqual(effective, ['ws://127.0.0.1:2/dead', trackerUrl, 'wss://also-dead.example'], 'only ws(s) trackers are merged, deduplicated, user list first');
+  assert.deepEqual(effective, ['ws://127.0.0.1:2/dead', trackerUrl, 'wss://also-dead.example'], 'only ws(s) trackers are merged, deduplicated (a default port written out included), user list first');
   log('tracker list merged:', effective.length, 'trackers');
+
+  // Defaults that stopped working stay in every settings saved before, since a save writes every
+  // field: a list that was the old defaults becomes today's, any other loses only the dead entries,
+  // and a metadata cache that moved is followed, one that serves no .torrent any more dropped.
+  {
+    const oldCtx = await browser.newContext();
+    const retired = ['wss://tracker.btorrent.xyz', 'wss://tracker.files.fm:7073/announce'];
+    const oldDefaults = ['wss://tracker.openwebtorrent.com', retired[0], 'wss://tracker.webtorrent.dev', retired[1]];
+    const oldSources = ['https://itorrents.org/torrent/{INFOHASH}.torrent', 'https://torrage.info/torrent.php?h={INFOHASH}'];
+    const loaded = async (saved) => {
+      const page = await oldCtx.newPage();
+      await page.addInitScript((s) => localStorage.setItem('phone-torrent:settings', JSON.stringify(s)), { trackerList: false, ...saved });
+      await page.goto(site.url);
+      await page.waitForFunction(() => window.__phoneTorrent?.client);
+      const out = await page.evaluate(() => ({ trackers: window.__phoneTorrent.settings.trackers, sources: window.__phoneTorrent.settings.metadataSources, announce: window.__phoneTorrent.effectiveTrackers() }));
+      await page.close();
+      return out;
+    };
+    const fresh = await loaded({});
+    assert.ok(!fresh.trackers.some((t) => retired.includes(t)), `no dead tracker among the defaults (${fresh.trackers.join(', ')})`);
+    assert.deepEqual(fresh.sources, ['https://itorrents.net/torrent/{INFOHASH}.torrent'], 'the metadata cache at its own address, with no hop over http');
+    const untouched = await loaded({ trackers: oldDefaults, metadataSources: oldSources });
+    assert.deepEqual(untouched.trackers, fresh.trackers, 'the old defaults, saved, become the new ones');
+    assert.deepEqual(untouched.sources, fresh.sources, 'and so do the old caches');
+    assert.deepEqual(untouched.announce, fresh.trackers, 'and nothing announces to the dead ones');
+    const edited = await loaded({ trackers: [trackerUrl, retired[0], 'wss://mine.example'], metadataSources: ['https://my-cache.example/{infohash}.torrent', oldSources[1], oldSources[0]] });
+    assert.deepEqual(edited.trackers, [trackerUrl, 'wss://mine.example'], "a list of the user's own loses only the dead entries");
+    assert.deepEqual(edited.sources, ['https://my-cache.example/{infohash}.torrent', 'https://itorrents.net/torrent/{INFOHASH}.torrent'], 'its own caches kept, in order');
+    const onlyDead = await loaded({ trackers: [retired[1]], metadataSources: [oldSources[1]] });
+    assert.deepEqual(onlyDead.trackers, fresh.trackers, 'a list left empty takes the defaults, as an empty one always has');
+    assert.deepEqual(onlyDead.sources, [], 'a cache list left empty asks nobody, as an empty one always has');
+    await oldCtx.close();
+  }
+  log('dead default trackers and caches leave settings saved before');
 
   // PWA: manifest points at real PNG icons and the service worker precached the app shell.
   const manifest = await phone.evaluate(async () => (await fetch('./manifest.webmanifest')).json());
