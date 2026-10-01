@@ -1201,7 +1201,31 @@ try {
   assert.equal(byUrl['wss://also-dead.example'].level, 'bad', 'non-existent host reported dead');
   assert.equal(byUrl['ws://127.0.0.1:2/dead'].level, 'warn', 'unreachable but existing host reported as possibly blocked');
   assert.equal((await phone.$$('#netcheck-results li')).length, 3);
-  log('network check OK');
+  // A tracker that is gone but whose name still resolves — to 127.0.0.1, as a parked domain's does,
+  // or to a server that answers and refuses the WebSocket — is dead, not blocked: "try DNS 1.1.1.1"
+  // sent people after their network for it. And a resolver that never answers must not hold the
+  // check: it is run on networks that drop things.
+  const checkWith = (overrides) => phone.evaluate(async (o) => {
+    const { settings } = window.__phoneTorrent;
+    const saved = Object.fromEntries(Object.keys(o).map((k) => [k, settings[k]]));
+    Object.assign(settings, o);
+    const started = Date.now();
+    try {
+      return { results: await window.__phoneTorrent.runNetworkCheck(), ms: Date.now() - started, button: document.querySelector('#netcheck-btn').textContent };
+    } finally { Object.assign(settings, saved); }
+  }, overrides);
+  const refusing = `ws://127.0.0.1:${new URL(site.url).port}/not-a-tracker`;
+  const dead = await checkWith({ trackerList: false, trackers: ['wss://tracker.parked.example', refusing, 'ws://127.0.0.1:2/dead'] });
+  const deadBy = Object.fromEntries(dead.results.map((r) => [r.url, r]));
+  assert.equal(deadBy['wss://tracker.parked.example'].level, 'bad', `a name that points at 127.0.0.1 is a dead tracker (${deadBy['wss://tracker.parked.example'].text})`);
+  assert.equal(deadBy[refusing].level, 'bad', `a server that answers and refuses the WebSocket is not the network's doing (${deadBy[refusing].text})`);
+  assert.doesNotMatch(deadBy[refusing].text, /DNS|firewall/, 'and nobody is sent to change their DNS for it');
+  assert.equal(deadBy['ws://127.0.0.1:2/dead'].level, 'warn', 'while one that nothing answers at may still be blocked');
+  const stalled = await checkWith({ trackerList: false, trackers: ['wss://tracker.unknown.example'], dohResolver: `${new URL(listUrl).origin}/__doh?stall=1` });
+  assert.ok(stalled.ms < 15000, `a resolver that never answers does not hold the check (${stalled.ms} ms)`);
+  assert.match(stalled.button, /^Check again/, 'the button comes back');
+  assert.match(stalled.results[0].text, /could not verify/, `and the tracker is said unverified (${stalled.results[0].text})`);
+  log(`network check OK (dead trackers that still resolve named dead; a silent resolver gives up in ${stalled.ms} ms)`);
 
   const waitSaver = (page) => page.evaluate(() => new Promise((resolve) => {
     const started = Date.now();

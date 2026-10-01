@@ -301,21 +301,43 @@ function wsReachable(url, timeoutMs = 6000) {
   });
 }
 
-/** Look a hostname up through a DNS-over-HTTPS JSON resolver: 'exists' | 'nxdomain' | 'unknown'. */
+/**
+ * Look a hostname up through a DNS-over-HTTPS JSON resolver: 'exists' | 'nowhere' | 'nxdomain' |
+ * 'unknown'. 'nowhere' is a name the public DNS points at no machine — 127.0.0.1 or 0.0.0.0, what a
+ * parked domain's name is given. A resolver that does not answer within seconds is 'unknown': the
+ * check is run on networks that drop things, and waited on it for ever.
+ */
 async function dohLookup(host) {
   const resolver = settings.dohResolver || DEFAULT_DOH;
   try {
     const res = await fetch(`${resolver}${resolver.includes('?') ? '&' : '?'}name=${encodeURIComponent(host)}&type=A`, {
       headers: { accept: 'application/dns-json' },
       cache: 'no-store',
+      signal: AbortSignal.timeout(5000),
     });
     if (!res.ok) return 'unknown';
     const data = await res.json();
     if (data.Status === 3) return 'nxdomain';
-    if (data.Status === 0) return Array.isArray(data.Answer) && data.Answer.length ? 'exists' : 'unknown';
-    return 'unknown';
+    if (data.Status !== 0 || !Array.isArray(data.Answer) || !data.Answer.length) return 'unknown';
+    const addresses = data.Answer.filter((a) => a && a.type === 1).map((a) => String(a.data));
+    return addresses.length && addresses.every((ip) => /^(127|0)\./.test(ip)) ? 'nowhere' : 'exists';
   } catch {
     return 'unknown';
+  }
+}
+
+/**
+ * Whether anything answers plain HTTP(S) at a tracker's host and port from this network. If it does,
+ * nothing on the way is blocking that host: a WebSocket it refuses is the tracker's own doing.
+ */
+async function hostAnswers(url) {
+  try {
+    const u = new URL(url);
+    u.protocol = u.protocol === 'wss:' ? 'https:' : 'http:';
+    await fetch(u, { mode: 'no-cors', cache: 'no-store', signal: AbortSignal.timeout(5000) });
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -325,6 +347,8 @@ async function checkTracker(url) {
   const [reachable, dns] = await Promise.all([wsReachable(url), /^[\d.]+$|^\[/.test(host) ? 'exists' : dohLookup(host)]);
   if (reachable) return { url, level: 'ok', text: 'reachable' };
   if (dns === 'nxdomain') return { url, level: 'bad', text: 'does not exist any more (dead tracker)' };
+  if (dns === 'nowhere') return { url, level: 'bad', text: 'its name points at no server any more (dead tracker)' };
+  if (await hostAnswers(url)) return { url, level: 'bad', text: 'its server answers but refuses tracker connections (tracker down or closed)' };
   if (dns === 'exists') return { url, level: 'warn', text: 'exists but unreachable from this network: likely blocked by your DNS or firewall, try DNS 1.1.1.1' };
   return { url, level: 'warn', text: 'unreachable (could not verify its DNS either)' };
 }

@@ -37,11 +37,17 @@ export function startServer(port = 0, host = '127.0.0.1') {
   const server = http.createServer((req, res) => {
     const reqUrl = new URL(req.url, 'http://localhost');
     if (reqUrl.pathname === '/__doh') {
-      // Test double for a DNS-over-HTTPS JSON resolver: *.dead.example does not exist, anything else resolves.
+      // Test double for a DNS-over-HTTPS JSON resolver: *.dead.example does not exist, *.parked.example
+      // points at 127.0.0.1 as a parked domain's name does, anything else resolves. Asked with
+      // ?stall=1, it is a resolver that never answers (in time).
+      if (reqUrl.searchParams.has('stall')) {
+        setTimeout(() => res.writeHead(504).end(), 30000).unref();
+        return;
+      }
       const name = reqUrl.searchParams.get('name') || '';
       const body = /dead\.example$/.test(name)
         ? { Status: 3, Answer: [] }
-        : { Status: 0, Answer: [{ name, type: 1, data: '127.0.0.1' }] };
+        : { Status: 0, Answer: [{ name, type: 1, data: /parked\.example$/.test(name) ? '127.0.0.1' : '192.0.2.1' }] };
       res.writeHead(200, { 'Content-Type': 'application/dns-json', 'Cache-Control': 'no-store' }).end(JSON.stringify(body));
       return;
     }
