@@ -1,6 +1,6 @@
 /* Optional CORS proxy for Phone Torrent, deployable for free on Cloudflare Workers.
  *
- * Torrent caches (itorrents.org, torrage.info, …), most HTTP web seeds and some cloud-fetch APIs
+ * Torrent caches (itorrents.net, …), most HTTP web seeds and some cloud-fetch APIs
  * do not send CORS headers, so a web page cannot read them directly. This worker fetches the URL
  * on the page's behalf and adds the headers. Deploy it, then put
  *   https://<your-worker>.workers.dev/?url={url}
