@@ -1765,6 +1765,9 @@ let cloudPollTimer = null;
 // listed, an empty library is not an empty account: it says why, and asks again.
 let cloudListError = null;
 let cloudListFailures = 0;
+// Which transfers the last listing had, and which were ready. The account line counts them (your own
+// server) or the space they take (put.io), and is asked again when they change, not on every poll.
+let cloudItemsShape = '';
 
 /** Send a magnet, an info hash or a .torrent straight to the account, with no local torrent at all. */
 async function cloudSend({ bytes, name, magnet }) {
@@ -1801,6 +1804,9 @@ async function refreshCloudLibrary({ quiet = false } = {}) {
     cloudListFailures = 0;
     els.cloudError.hidden = true;
     noteServerToken(ctx, null);
+    const shape = `${from}\n${cloudItems.map((i) => `${i.id}:${Boolean(i.ready)}`).sort().join(',')}`;
+    if (cloudItemsShape && shape !== cloudItemsShape) cloudAccountLine();
+    cloudItemsShape = shape;
   } catch (err) {
     if (from !== cloudItemsFrom) return;
     cloudListError = err;
