@@ -15,8 +15,14 @@ import fsp from 'node:fs/promises';
 import net from 'node:net';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import dns from 'node:dns';
 import { fileURLToPath } from 'node:url';
 import WebTorrent from 'webtorrent';
+
+// The DHT's socket is IPv4, and it looks a router's name up with dns.lookup, which since Node 17
+// answers in the resolver's order: IPv6 first on a dual-stack machine. The router was then asked at
+// an address that socket cannot reach, and a server run outside Docker never joined the DHT.
+dns.setDefaultResultOrder('ipv4first');
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 // 0 means "any free port", which is how the tests run it; `|| 8080` would eat that.
@@ -58,6 +64,11 @@ const STATE_FILE = path.join(DOWNLOAD_DIR, 'transfers.json');
 const portFrom = (value, fallback) => (value === undefined || value === '' ? fallback : Number(value));
 const TORRENT_PORT = portFrom(process.env.TORRENT_PORT, 6881);
 const DHT_PORT = portFrom(process.env.DHT_PORT, 6882);
+// Where the DHT starts. bittorrent-dht's own list is router.bittorrent.com, router.utorrent.com and
+// dht.transmissionbt.com, and the first two no longer answer: with one router left, a magnet with only
+// an info hash found no one. dht.libtorrent.org is the one libtorrent (qBittorrent) starts from.
+const DHT_BOOTSTRAP = (process.env.DHT_BOOTSTRAP || 'dht.libtorrent.org:25401,dht.transmissionbt.com:6881,router.bittorrent.com:6881,router.utorrent.com:6881')
+  .split(',').map((s) => s.trim()).filter(Boolean);
 // How long a file link the API hands out keeps working without the token.
 const LINK_TTL_MS = 24 * 3600 * 1000;
 
@@ -73,7 +84,7 @@ try {
   process.exit(1);
 }
 
-const client = new WebTorrent({ dht: true, torrentPort: TORRENT_PORT, dhtPort: DHT_PORT });
+const client = new WebTorrent({ dht: { bootstrap: DHT_BOOTSTRAP }, torrentPort: TORRENT_PORT, dhtPort: DHT_PORT });
 client.on('error', (err) => {
   console.error('client error:', err.message || err);
   // A port that is taken (another client, a second copy of this one) makes WebTorrent tear
@@ -715,6 +726,7 @@ server.listen(PORT, '0.0.0.0', () => {
   // uTP comes from utp-native, a native module that is left out where it has no prebuilt binary
   // and could not be built (WebTorrent then says "uTP not supported"): say what is really on.
   console.log(`BitTorrent on port ${TORRENT_PORT} (${client.utp ? 'TCP and uTP' : 'TCP only: uTP is not available in this build'}), DHT on ${DHT_PORT}/udp`);
+  console.log(`DHT starts from ${DHT_BOOTSTRAP.join(', ') || 'nowhere: DHT_BOOTSTRAP lists no router'}`);
   console.log(TOKEN
     ? 'a token is required'
     : `NO TOKEN SET: anyone who can reach this can drive it, at localhost or an IP address${ALLOWED_HOSTS.length ? ` or ${ALLOWED_HOSTS.join(', ')}` : ''}`);

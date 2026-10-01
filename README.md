@@ -383,7 +383,9 @@ over an http tracker, the server is asked for it through its API, and the file c
 and by `Range` (suffix ranges and ranges past the end included), byte for byte, through the token and
 through a signed link, before being deleted — it, and a transfer that fails, taking what they wrote
 and nothing else, whatever their name says: a single file named like a folder of the user's leaves the
-folder, and a file two transfers share goes with the last of them. A file whose name has an apostrophe
+folder, and a file two transfers share goes with the last of them. A bare info hash, with no tracker,
+is found on a DHT of the test's own, from a router named `localhost` — which resolves to IPv6 first,
+while the DHT speaks IPv4. A file whose name has an apostrophe
 is served under that name; the same DELETE twice at once is answered twice, and the server stays up. On the way it is sent requests it cannot parse and
 torrents that are not torrents, and must answer them; it must not serve its downloads as static files,
 nor answer another origin; it refuses a torrent that would overwrite its list of transfers; and it is

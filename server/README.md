@@ -120,6 +120,7 @@ and the server starts with no transfers.
 | `SEED_AFTER_DONE` | `1` | keep seeding once a download finishes |
 | `TORRENT_PORT` | `6881` | BitTorrent over TCP and uTP (the log says `TCP only` in a build without uTP) |
 | `DHT_PORT` | `6882` | the DHT, over UDP |
+| `DHT_BOOTSTRAP` | `dht.libtorrent.org:25401,dht.transmissionbt.com:6881,router.bittorrent.com:6881,router.utorrent.com:6881` | comma-separated `host:port` routers the DHT starts from (the log says which); the DHT is how a magnet with only an info hash finds anyone, and the library's own list has two routers that no longer answer |
 
 Either port already taken — another client on the machine, a second copy of
 this server, both with `network_mode: host` — and the BitTorrent client cannot

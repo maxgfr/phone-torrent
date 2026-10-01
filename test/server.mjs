@@ -77,6 +77,22 @@ const seeded = await new Promise((resolve) => {
 });
 log('seeding', seeded.name, `${payload.length} B`, seeded.infoHash);
 
+// A DHT of its own, on this machine: a node everyone starts from, and a seeder that announces on it
+// and nowhere else — no tracker, as a magnet with only an info hash is. The server is pointed at the
+// first by name, `localhost`, which resolves to ::1 first here as it does on most machines, while a
+// DHT socket is IPv4: that is how a name in its bootstrap list used to be asked at an address it
+// could not reach.
+const dhtRouter = new WebTorrent({ dht: { bootstrap: false }, tracker: false, lsd: false, utp: false });
+await new Promise((resolve) => (dhtRouter.dht.listening ? resolve() : dhtRouter.dht.once('listening', resolve)));
+const dhtRouterPort = dhtRouter.dht.address().port;
+// With uTP, as a peer the DHT hands out is tried over uTP first: a seeder without it costs four
+// unanswered attempts, some forty seconds on Linux, before the server falls back to TCP.
+const dhtSeeder = new WebTorrent({ dht: { bootstrap: [`127.0.0.1:${dhtRouterPort}`] }, tracker: false, lsd: false });
+const dhtPayload = randomBytes(256 * 1024);
+writeFileSync(path.join(tmp, 'found-on-the-dht.bin'), dhtPayload);
+const dhtSeeded = await new Promise((resolve) => dhtSeeder.seed(path.join(tmp, 'found-on-the-dht.bin'), { announce: [] }, resolve));
+log('seeding on a DHT of its own', dhtSeeded.infoHash);
+
 // The downloads live inside the web root, exactly as they do when the server runs from a
 // checkout with its defaults: the static side must still not hand them out.
 const downloads = path.join(HERE, '.tmp', 'server-downloads');
@@ -115,6 +131,7 @@ function startServer(extraEnv = {}) {
       WEB_DIR: path.join(HERE, '..'),
       TORRENT_PORT: String(torrentPort),
       DHT_PORT: String(dhtPort),
+      DHT_BOOTSTRAP: `localhost:${dhtRouterPort}`,
       ALLOWED_ORIGINS: '',
       ...extraEnv,
     },
@@ -392,6 +409,21 @@ try {
   assert.equal(past.headers.get('content-length'), '10', 'and promises only the bytes there are');
   assert.equal(sha(Buffer.from(await past.arrayBuffer())), sha(payload.subarray(payload.length - 10)));
   log('file served whole and by range, suffix ranges and ranges past the end included');
+
+  // An info hash and nothing else: no tracker to ask, so the metadata and the peer can only come
+  // from the DHT. Two of the three routers bittorrent-dht starts from by default no longer answer,
+  // and with the one left the server found no one; it starts from the routers in DHT_BOOTSTRAP.
+  assert.match(serverLog, new RegExp(`DHT starts from localhost:${dhtRouterPort}`), 'the log says where the DHT starts from');
+  const byHash = await api('/api/transfers', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ magnet: dhtSeeded.infoHash }) });
+  assert.equal(byHash.status, 201);
+  const foundOnDht = await waitFor(async () => {
+    const { transfer: t } = await (await api(`/api/transfers/${dhtSeeded.infoHash}`)).json();
+    return t && t.ready ? t : false;
+  }, { label: 'a transfer found on the DHT alone to finish', timeout: 60000 });
+  const fromDht = Buffer.from(await (await api(`/api/transfers/${dhtSeeded.infoHash}/files/0`)).arrayBuffer());
+  assert.equal(sha(fromDht), sha(dhtPayload), 'what the DHT found is what was seeded');
+  assert.equal((await api(`/api/transfers/${dhtSeeded.infoHash}`, { method: 'DELETE' })).status, 200);
+  log('a bare info hash is found on the DHT, from a router named by a host that resolves to IPv6 first:', foundOnDht.name);
 
   // The downloads are inside the web root here, as they are when the server runs from a
   // checkout. The static side must not serve what /api guards with the token.
@@ -862,6 +894,8 @@ try {
     server.kill('SIGKILL');
   }
   await new Promise((resolve) => seeder.destroy(resolve));
+  await new Promise((resolve) => dhtSeeder.destroy(resolve));
+  await new Promise((resolve) => dhtRouter.destroy(resolve));
   tracker.close();
   rmSync(tmp, { recursive: true, force: true });
   rmSync(downloads, { recursive: true, force: true });
