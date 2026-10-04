@@ -6,14 +6,14 @@
   <meta name="color-scheme" content="light dark" />
   <meta name="theme-color" content="#0f172a" media="(prefers-color-scheme: dark)" />
   <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
-  <meta name="description" content="Download and share torrents straight from your phone's browser and save the files to your device. Runs entirely in the browser." />
+  <meta name="description" content="Download, share and edit torrents in your browser, on a phone or a computer, and save the files to your device. Runs entirely in the browser." />
   <meta name="mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <!-- The page reaches under the status bar, which iOS then always draws in white: styles.css keeps
        something dark under it in light mode too. -->
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-  <meta name="apple-mobile-web-app-title" content="Torrent" />
-  <title>Phone Torrent</title>
+  <meta name="apple-mobile-web-app-title" content="Swarmdeck" />
+  <title>Swarmdeck</title>
   <link rel="manifest" href="./manifest.webmanifest" />
   <link rel="icon" href="./icon.svg" type="image/svg+xml" />
   <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png" />
@@ -23,7 +23,7 @@
   <header class="topbar">
     <div class="brand">
       <img src="./icon.svg" alt="" width="28" height="28" />
-      <h1>Phone Torrent</h1>
+      <h1>Swarmdeck</h1>
     </div>
     <div class="topbar-right">
       <button id="install-btn" class="btn small primary" type="button" hidden>Install</button>
@@ -37,15 +37,19 @@
   <main class="container">
     <noscript><p class="notice error">This app needs JavaScript enabled.</p></noscript>
 
+    <!-- On a computer, two panes: this one, with the ways in and the list, and the torrent open beside
+         it. On a phone, one column, as before: the list stays out, and the cards follow the search,
+         the filter and the order chosen here. -->
+    <div class="list-pane" id="list-pane">
     <section class="card add-card" id="drop-zone">
       <div class="tabs" role="tablist">
-        <button class="tab active" type="button" role="tab" data-tab="download" aria-selected="true">Download</button>
-        <button class="tab" type="button" role="tab" data-tab="seed" aria-selected="false">Seed &amp; share</button>
-        <button class="tab" type="button" role="tab" data-tab="cloud" aria-selected="false">Cloud</button>
-        <button class="tab" type="button" role="tab" data-tab="edit" aria-selected="false">Edit</button>
+        <button class="tab active" type="button" role="tab" id="tab-btn-download" data-tab="download" aria-selected="true" aria-controls="tab-download">Download</button>
+        <button class="tab" type="button" role="tab" id="tab-btn-seed" data-tab="seed" aria-selected="false" aria-controls="tab-seed" tabindex="-1">Seed &amp; share</button>
+        <button class="tab" type="button" role="tab" id="tab-btn-cloud" data-tab="cloud" aria-selected="false" aria-controls="tab-cloud" tabindex="-1">Cloud</button>
+        <button class="tab" type="button" role="tab" id="tab-btn-edit" data-tab="edit" aria-selected="false" aria-controls="tab-edit" tabindex="-1">Edit</button>
       </div>
 
-      <div class="tab-panel" id="tab-download" role="tabpanel">
+      <div class="tab-panel" id="tab-download" role="tabpanel" aria-labelledby="tab-btn-download">
         <p class="notice error insecure-note" hidden></p>
         <div class="add-row">
           <label class="btn primary file-btn">
@@ -68,7 +72,7 @@
         </p>
       </div>
 
-      <div class="tab-panel" id="tab-seed" role="tabpanel" hidden>
+      <div class="tab-panel" id="tab-seed" role="tabpanel" aria-labelledby="tab-btn-seed" hidden>
         <p class="notice error insecure-note" hidden></p>
         <details class="torrent-options" id="seed-options">
           <summary><span class="torrent-options-title">Torrent options</span> <span class="hint" id="seed-options-summary"></span></summary>
@@ -143,6 +147,12 @@
             <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M9 16h6v-6h4l-7-7-7 7h4v6Zm-4 2h14v2H5v-2Z"/></svg>
             Pick files to share
           </label>
+          <!-- A folder is shared as itself, its subfolders and all: the torrent takes its name. -->
+          <label class="btn file-btn folder-pick" id="seed-folder-btn">
+            <input id="seed-folder-input" type="file" webkitdirectory multiple />
+            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M10 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-8l-2-2Z"/></svg>
+            Pick a folder
+          </label>
         </div>
         <form id="seed-url-form" class="add-row" autocomplete="off">
           <input id="seed-url-input" type="url" inputmode="url" placeholder="https://… (CORS-enabled file URL)"
@@ -150,12 +160,12 @@
           <button class="btn" type="submit">Seed</button>
         </form>
         <p class="hint">
-          Turn files on your phone into a torrent and share the link. The files are sent directly from this
+          Turn files on this device into a torrent and share the link. The files are sent directly from this
           browser to whoever opens the link, so keep this page open while sharing. Remote URLs must allow
           cross-origin requests and are fetched into memory first.
         </p>
       </div>
-      <div class="tab-panel" id="tab-cloud" role="tabpanel" hidden>
+      <div class="tab-panel" id="tab-cloud" role="tabpanel" aria-labelledby="tab-btn-cloud" hidden>
         <div class="add-row">
           <label class="btn primary file-btn">
             <input id="cloud-file-input" type="file" multiple />
@@ -178,7 +188,7 @@
         </p>
       </div>
 
-      <div class="tab-panel" id="tab-edit" role="tabpanel" hidden>
+      <div class="tab-panel" id="tab-edit" role="tabpanel" aria-labelledby="tab-btn-edit" hidden>
         <p class="notice error insecure-note" data-secure-only hidden></p>
         <div class="add-row">
           <label class="btn primary file-btn">
@@ -206,11 +216,44 @@
       <p id="cloud-empty" class="empty"></p>
     </section>
 
-    <!-- Not a live region: its speeds and percentages change every 750 ms, and a screen reader would
-         read each change aloud. What deserves announcing (finished, errors) goes to the toasts. -->
-    <section id="torrents" class="torrents" aria-label="Torrents"></section>
+    <section class="list-tools" id="list-tools" aria-label="Find a torrent" hidden>
+      <input id="list-search" class="list-search" type="search" placeholder="Search" aria-label="Search the torrents"
+             spellcheck="false" autocomplete="off" autocapitalize="off" />
+      <select id="list-filter" aria-label="Show"></select>
+      <span class="list-sort">
+        <select id="list-sort" aria-label="Sort by"></select>
+        <button id="list-dir" class="icon-btn" type="button"></button>
+      </span>
+      <span class="list-density" role="group" aria-label="Show the list as">
+        <button id="view-cards" class="tab" type="button" aria-pressed="true">Cards</button>
+        <button id="view-table" class="tab" type="button" aria-pressed="false">Table</button>
+      </span>
+      <button id="keys-btn" class="icon-btn keys-btn" type="button" aria-label="Keyboard shortcuts" title="Keyboard shortcuts (?)">
+        <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M20 5H4a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2Zm-9 3h2v2h-2V8Zm0 3h2v2h-2v-2ZM8 8h2v2H8V8Zm0 3h2v2H8v-2Zm-1 2H5v-2h2v2Zm0-3H5V8h2v2Zm9 7H8v-2h8v2Zm0-4h-2v-2h2v2Zm0-3h-2V8h2v2Zm3 3h-2v-2h2v2Zm0-3h-2V8h2v2Z"/></svg>
+      </button>
+    </section>
 
-    <p id="empty-state" class="empty">No torrents yet. Pick a .torrent file from your phone or paste a magnet link above.</p>
+    <div class="bulk-bar" id="bulk-bar" role="toolbar" aria-label="The torrents selected" hidden>
+      <span id="bulk-count" class="bulk-count" role="status"></span>
+      <button id="bulk-pause" class="btn small" type="button">Pause</button>
+      <button id="bulk-resume" class="btn small" type="button">Resume</button>
+      <button id="bulk-save" class="btn small" type="button">Save .torrent</button>
+      <button id="bulk-remove" class="btn small danger" type="button">Remove</button>
+      <button id="bulk-clear" class="btn small ghost" type="button">Clear</button>
+    </div>
+
+    <!-- The speeds in it change every 750 ms: not a live region, like the cards. -->
+    <div id="torrent-list" class="torrent-list" role="grid" aria-label="Torrent list" aria-multiselectable="true"></div>
+
+    <p id="empty-state" class="empty">No torrents yet. Pick a .torrent file or paste a magnet link above.</p>
+    </div>
+
+    <section class="detail-pane" id="detail-pane" aria-label="The torrent open">
+      <p id="detail-empty" class="empty detail-empty" hidden>Pick a torrent in the list to see its files, its links and its details here.</p>
+      <!-- Not a live region: its speeds and percentages change every 750 ms, and a screen reader would
+           read each change aloud. What deserves announcing (finished, errors) goes to the toasts. -->
+      <section id="torrents" class="torrents" aria-label="Torrents"></section>
+    </section>
   </main>
 
   <template id="torrent-template">
@@ -242,6 +285,7 @@
       </div>
       <div class="actions">
         <button class="btn primary zip-btn" type="button" disabled>Save selected as .zip</button>
+        <button class="btn folder-btn" type="button" disabled hidden>Save to a folder…</button>
         <button class="btn primary share-link-btn" type="button">Share link</button>
         <button class="btn ghost select-all-btn" type="button">All</button>
         <button class="btn ghost select-none-btn" type="button">None</button>
@@ -396,7 +440,7 @@
         </label>
         <button id="netcheck-btn" class="btn small" type="button">Check tracker connectivity</button>
         <ul id="netcheck-results" class="netcheck" hidden></ul>
-        <p class="hint">A web page cannot change which DNS server your phone uses. If trackers show as
+        <p class="hint">A web page cannot change which DNS server this device uses. If trackers show as
           <strong>blocked by your network</strong>, set the DNS on the device: Android → Settings → Network →
           Private DNS → <code>one.one.one.one</code>; iPhone → install the 1.1.1.1 app or Cloudflare's encrypted DNS
           profile; or change the DNS on your router.</p>
@@ -421,7 +465,7 @@
 
       <label class="toggle">
         <input id="seed-after-toggle" type="checkbox" />
-        <span>Keep seeding after a download finishes (helps other phones)</span>
+        <span>Keep seeding after a download finishes (helps the other peers)</span>
       </label>
 
       <label class="field" data-expert>
@@ -448,7 +492,7 @@
         <span>Cloud fetch (TorBox, put.io, Real‑Debrid, AllDebrid, or your own server)</span>
         <p class="hint">A browser cannot reach a private tracker, an <code>http(s)://</code>‑only tracker or a
           swarm without WebRTC peers. With a key for one of these services — or the address of the server in
-          <code>server/</code>, which is the same thing on a machine you own — the torrent is handed to it — a real BitTorrent client in a data centre — and your phone then downloads the
+          <code>server/</code>, which is the same thing on a machine you own — the torrent is handed to it — a real BitTorrent client in a data centre — and this device then downloads the
           finished file over HTTPS, straight from the link, with no size limit. Your key is stored on this
           device only.</p>
         <label class="field">
@@ -490,6 +534,13 @@
         <span class="hint">Custom STUN/TURN servers. Leave empty for the defaults. Takes effect after reload.</span>
       </label>
 
+      <div class="field" id="magnet-handler-field" hidden>
+        <span>Magnet links</span>
+        <p class="hint">Have a magnet link clicked on any web page open here, asking first, as it does from the
+          installed app.</p>
+        <button id="magnet-handler-btn" class="btn small" type="button">Open magnet links with Swarmdeck</button>
+      </div>
+
       <label class="toggle">
         <input id="wakelock-toggle" type="checkbox" />
         <span>Keep the screen awake while downloading or seeding</span>
@@ -509,7 +560,7 @@
       <div class="field" data-expert id="presets-field">
         <span>Presets</span>
         <p class="hint">What a tracker wants in every torrent for it — its announce address, source, private
-          flag and the rest — kept under a name, applied in one tap in the editor and when making a torrent.</p>
+          flag and the rest — kept under a name, applied at once in the editor and when making a torrent.</p>
         <ul id="preset-list" class="preset-list" hidden></ul>
         <button id="preset-add" class="btn small" type="button">Add a preset</button>
         <fieldset id="preset-form" class="preset-form" hidden>
@@ -725,6 +776,30 @@
         </div>
       </details>
     </footer>
+  </dialog>
+
+  <!-- Over the whole window while files are dragged over it: what letting go does, on the tab open. -->
+  <div id="drop-overlay" class="drop-overlay" hidden aria-hidden="true"><p id="drop-overlay-text"></p></div>
+
+  <dialog id="keys-dialog" class="dialog" aria-labelledby="keys-title">
+    <form method="dialog" class="dialog-body">
+      <h2 id="keys-title">Keyboard shortcuts</h2>
+      <dl class="keys">
+        <dt><kbd>/</kbd></dt><dd>Search the torrents</dd>
+        <dt><kbd>↑</kbd> <kbd>↓</kbd> <kbd>Home</kbd> <kbd>End</kbd></dt><dd>Move in the list; with <kbd>Shift</kbd>, select as you go</dd>
+        <dt><kbd>Ctrl</kbd>/<kbd>⌘</kbd> <kbd>A</kbd></dt><dd>Select every torrent listed</dd>
+        <dt><kbd>Space</kbd></dt><dd>Pause or resume the selection, or the torrent open</dd>
+        <dt><kbd>Delete</kbd> or <kbd>⌘</kbd> <kbd>⌫</kbd></dt><dd>Remove them</dd>
+        <dt><kbd>Esc</kbd></dt><dd>Empty the search, then the selection</dd>
+        <dt><kbd>Ctrl</kbd>/<kbd>⌘</kbd> <kbd>V</kbd></dt><dd>Paste a magnet or .torrent files, as if dropped on the tab open</dd>
+        <dt><kbd>?</kbd></dt><dd>This list</dd>
+      </dl>
+      <p class="hint">In the list, a click opens a torrent, <kbd>Shift</kbd>-click selects every row up to it and
+        <kbd>Ctrl</kbd>- or <kbd>⌘</kbd>-click one more or one less. Files and folders can be dropped anywhere on the page.</p>
+      <div class="dialog-actions">
+        <button class="btn primary" value="close">Close</button>
+      </div>
+    </form>
   </dialog>
 
   <div id="toasts" class="toasts" aria-live="assertive"></div>

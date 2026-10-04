@@ -9,24 +9,32 @@ browser, so none of that applies.
 ## Run it
 
 ```sh
-curl -fsSLO https://raw.githubusercontent.com/maxgfr/phone-torrent/main/docker-compose.yml
+curl -fsSLO https://raw.githubusercontent.com/maxgfr/swarmdeck/main/docker-compose.yml
 docker compose up -d          # then open http://localhost:8080
 ```
 
 `docker compose` needs the file first: that line fetches it, or run it from a
-clone of the repository (`git clone https://github.com/maxgfr/phone-torrent`),
+clone of the repository (`git clone https://github.com/maxgfr/swarmdeck`),
 which the tunnel overlay below needs as well. With no file at all, the same in
 one command:
 
 ```sh
-docker run -d --name phone-torrent --restart unless-stopped -v phone-torrent:/data \
+docker run -d --name swarmdeck --restart unless-stopped -v swarmdeck:/data \
   -p 8080:8080 -p 6881:6881 -p 6881:6881/udp -p 6882:6882/udp \
-  ghcr.io/maxgfr/phone-torrent:latest
+  ghcr.io/maxgfr/swarmdeck:latest
 ```
+
+A container started when the project was called Phone Torrent keeps its
+downloads in the `phone-torrent` volume: keep `-v phone-torrent:/data` in the new
+command, or copy that volume into `swarmdeck` first
+(`docker run --rm -v phone-torrent:/from -v swarmdeck:/to alpine cp -a /from/. /to/`).
+With `docker compose` nothing moves, the volume is still `downloads`: run
+`docker compose up -d --remove-orphans` once, which also stops the old
+`phone-torrent` service.
 
 That is the whole thing: the API, the client, and the app on one origin — no
 CORS to configure, nothing else to deploy. Downloads land in the volume mounted
-at `/data` (`downloads` in the compose file, `phone-torrent` with `docker run`)
+at `/data` (`downloads` in the compose file, `swarmdeck` with `docker run`)
 and survive restarts; unfinished transfers resume by themselves. With no
 `ALLOWED_ORIGINS`, no other website open in your browser can call it. With no
 `AUTH_TOKEN` either, it answers only at `localhost` or an IP address: a site that
@@ -38,7 +46,7 @@ Set `AUTH_TOKEN` in `docker-compose.yml`, or add `-e AUTH_TOKEN=…` to the
 `docker run`, the moment the server is reachable from anywhere but your own
 machine, and put the same value in the app as the key.
 
-To reach it from your phone when you are out:
+To reach it from your phone, or any other device, when you are out:
 
 ```sh
 docker compose -f docker-compose.yml -f docker-compose.tunnel.yml up -d

@@ -2,10 +2,13 @@ import WebTorrent from './vendor/webtorrent.min.js';
 import { makeZip, predictLength } from './vendor/client-zip.js';
 import { saver } from './saver.js';
 import { createEditor } from './lib/editor.js';
-import { parseMagnet, createTorrent, ruleFor, ruleProblems } from './lib/torrent-meta.js';
+import { parseMagnet, createTorrent, ruleFor, ruleProblems, relativePath, withPaths, commonFolder } from './lib/torrent-meta.js';
+import { grabEntries, filesFromEntries, droppedText, draggingFiles } from './lib/drop.js';
+import { canPickFolder, pickFolder, existing, writeToFolder } from './lib/folder-save.js';
 import { hashPieces } from './lib/torrent-hash.js';
 import { createOptionsUI, creationOptions, normalizeCreate } from './lib/create-options.js';
 import { createPresetsUI, normalizePresets } from './lib/presets.js';
+import { FILTERS, SORTS, rowMatches, sortRows, rangeKeys, loadListPrefs, saveListPrefs, createTorrentList } from './lib/torrent-list.js';
 
 const DEFAULT_CLOUD_PROVIDER = 'torbox';
 const CLOUD_POLL_MS = 5000;
@@ -25,12 +28,26 @@ const OLD_DEFAULT_TRACKERS = [
 ];
 const RETIRED_TRACKERS = ['wss://tracker.btorrent.xyz', 'wss://tracker.files.fm:7073/announce'];
 
+/*
+ * Where this app keeps things in the browser, under the name it had before Swarmdeck: Phone Torrent.
+ * Kept on purpose. Renamed, the settings, the presets and the list of torrents would start empty, and
+ * cleanOrphanStores, finding no record for the pieces in OPFS, would delete every one of them. The
+ * locks and the channel are shared by every open copy, and a tab still on the old version and one on
+ * this one must keep agreeing on which of them runs the torrents (see LEAD_LOCK). sw.js and saver.js
+ * keep their own the same way, as does window.__phoneTorrent below, which the tests read.
+ */
 const SETTINGS_KEY = 'phone-torrent:settings';
 const DB_NAME = 'phone-torrent';
 const DB_STORE = 'torrents';
 const INBOX_CACHE = 'phone-torrent-inbox';
-const DEBUG_NAMESPACES = 'webtorrent*,bittorrent-tracker*,simple-peer*';
 const TRACKER_LIST_KEY = 'phone-torrent:trackerlist';
+const RD_OWED_KEY = 'phone-torrent:rd-owed';
+const IOS_HINT_KEY = 'phone-torrent:ios-hint';
+const TAB_LOCK = 'phone-torrent:open-tab';
+const LEAD_LOCK = 'phone-torrent:lead';
+const CHANNEL_NAME = 'phone-torrent';
+const streamChannel = (id) => `phone-torrent:stream:${id}`;
+const DEBUG_NAMESPACES = 'webtorrent*,bittorrent-tracker*,simple-peer*';
 const TRACKER_LIST_TTL = 6 * 60 * 60 * 1000;
 const DEFAULT_TRACKER_LIST_URL = 'https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_all_ws.txt';
 // Same list from other hosts, for networks that block GitHub's raw domain.
@@ -85,9 +102,14 @@ const els = {
   magnetForm: $('#magnet-form'),
   magnetInput: $('#magnet-input'),
   seedFileInput: $('#seed-file-input'),
+  seedFolderInput: $('#seed-folder-input'),
+  seedFolderBtn: $('#seed-folder-btn'),
+  keysDialog: $('#keys-dialog'),
+  keysBtn: $('#keys-btn'),
+  magnetHandlerField: $('#magnet-handler-field'),
+  magnetHandlerBtn: $('#magnet-handler-btn'),
   seedUrlForm: $('#seed-url-form'),
   seedUrlInput: $('#seed-url-input'),
-  dropZone: $('#drop-zone'),
   netStatus: $('#net-status'),
   settingsBtn: $('#settings-btn'),
   settingsDialog: $('#settings-dialog'),
@@ -146,6 +168,22 @@ const els = {
   toasts: $('#toasts'),
   torrentTemplate: $('#torrent-template'),
   fileTemplate: $('#file-template'),
+  listTools: $('#list-tools'),
+  listSearch: $('#list-search'),
+  listFilter: $('#list-filter'),
+  listSort: $('#list-sort'),
+  listDir: $('#list-dir'),
+  viewCards: $('#view-cards'),
+  viewTable: $('#view-table'),
+  torrentList: $('#torrent-list'),
+  detailEmpty: $('#detail-empty'),
+  bulkBar: $('#bulk-bar'),
+  bulkCount: $('#bulk-count'),
+  bulkPause: $('#bulk-pause'),
+  bulkResume: $('#bulk-resume'),
+  bulkSave: $('#bulk-save'),
+  bulkRemove: $('#bulk-remove'),
+  bulkClear: $('#bulk-clear'),
 };
 
 /* ---------- settings ---------- */
@@ -471,8 +509,6 @@ async function cleanOrphanStores(records) {
   } catch { /* ignore */ }
 }
 
-const TAB_LOCK = 'phone-torrent:open-tab';
-
 /**
  * A seed is never remembered, so to the housekeeping above the files another open tab is sharing
  * look orphaned. Every tab holds a shared lock for as long as it is open, and the cleanup only runs
@@ -494,16 +530,15 @@ async function cleanOrphanStoresIfAlone(records) {
  * list as it goes and hands it whatever is done there — an add, a pause, a tick, a removal — and a
  * file saved there streams over from it. Settings saved in any copy apply in all of them.
  *
- * Leading goes with a Web Lock. When the leading copy closes, the next one takes over and restores
+ * Leading goes with a Web Lock, LEAD_LOCK. When the leading copy closes, the next one takes over and restores
  * the torrents from storage; one being looked at while the leading copy no longer answers (a phone
  * freezes what it does not show) takes over at once. Without Web Locks every copy runs every
  * torrent, as it always did; with BroadcastChannel a removal or a delete-all is passed on, and
  * settings apply in every copy all the same.
  */
-const LEAD_LOCK = 'phone-torrent:lead';
 /** How long the leading copy may stay silent to a follower being looked at before that one takes over. */
 const LEAD_SILENCE_MS = 6000;
-const otherCopies = typeof BroadcastChannel === 'function' ? new BroadcastChannel('phone-torrent') : null;
+const otherCopies = typeof BroadcastChannel === 'function' ? new BroadcastChannel(CHANNEL_NAME) : null;
 const copyId = `${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
 /** This copy shows the torrents another one runs, instead of running them. */
 let follower = false;
@@ -545,9 +580,9 @@ async function probeOpfs() {
   if (!navigator.storage?.getDirectory) return false;
   try {
     const root = await navigator.storage.getDirectory();
-    const handle = await root.getFileHandle('.phone-torrent-probe', { create: true });
+    const handle = await root.getFileHandle('.swarmdeck-probe', { create: true });
     if (typeof handle.createSyncAccessHandle !== 'function' && typeof handle.createWritable !== 'function') throw new Error('no write API');
-    await root.removeEntry('.phone-torrent-probe').catch(() => {});
+    await root.removeEntry('.swarmdeck-probe').catch(() => {});
     return true;
   } catch {
     return false;
@@ -773,7 +808,7 @@ function confirmExternalAdd(label) {
     toast(IN_BROWSER_BLOCKED, { error: true, timeout: 9000 });
     return false;
   }
-  return askUser(() => confirm(`Add ${label} to Phone Torrent and start downloading it?`));
+  return askUser(() => confirm(`Add ${label} to Swarmdeck and start downloading it?`));
 }
 
 async function copyText(text) {
@@ -935,7 +970,7 @@ function unreachableReason(reach) {
   if (!reach || reach.webrtc) return '';
   let host = '';
   try { host = new URL(reach.trackers[0]).host; } catch { /* no usable tracker at all */ }
-  const cloud = ' Hand it to your cloud account with "Fetch it in the cloud": it downloads there and your phone saves it over HTTPS.';
+  const cloud = ' Hand it to your cloud account with "Fetch it in the cloud": it downloads there and this device saves it over HTTPS.';
   if (reach.private) {
     return `This torrent is marked private${host ? ` (${host})` : ''}: only that tracker may hand out peers, `
       + 'and a browser cannot announce to it, so nothing will download here.' + cloud;
@@ -1485,7 +1520,7 @@ const CLOUD_PROVIDERS = {
      */
     owedIds: null,
     owed(id, on) {
-      const key = 'phone-torrent:rd-owed';
+      const key = RD_OWED_KEY;
       if (!this.owedIds) {
         let saved = [];
         try { saved = JSON.parse(localStorage.getItem(key) || '[]'); } catch { /* none */ }
@@ -1627,7 +1662,7 @@ const CLOUD_PROVIDERS = {
 
     // Its key rides in the query string, and it wants to know who is calling.
     query(ctx, extra = {}) {
-      return new URLSearchParams({ agent: 'phone-torrent', apikey: ctx.key, ...extra }).toString();
+      return new URLSearchParams({ agent: 'swarmdeck', apikey: ctx.key, ...extra }).toString();
     },
 
     async check(ctx) {
@@ -2045,7 +2080,7 @@ function addCloudFiles(item, filesEl) {
           play.hidden = false;
           if (played || media.error?.code === MediaError.MEDIA_ERR_NETWORK) {
             resumeAt = media.currentTime || from;
-            toast(`Lost the connection while playing "${file.name}": tap Play to go on from where it stopped.`, { error: true, timeout: 9000 });
+            toast(`Lost the connection while playing "${file.name}": press Play to go on from where it stopped.`, { error: true, timeout: 9000 });
             return;
           }
           holder.hidden = true;
@@ -2280,7 +2315,7 @@ function startCloudPoll(view) {
         if (!view.cloudAnnounced) {
           view.cloudAnnounced = true;
           logEvent(view, `cloud download ready: ${cloud.files.length} file${cloud.files.length === 1 ? '' : 's'}`);
-          toast(`"${cloud.name || view.torrent.name}" is ready in the cloud: tap a file to download it.`, { timeout: 9000 });
+          toast(`"${cloud.name || view.torrent.name}" is ready in the cloud: pick a file to download it.`, { timeout: 9000 });
         }
       }
     } catch (err) {
@@ -2367,7 +2402,7 @@ function renderCloud(view, note) {
   $('.cloud-state', box).textContent = error
     ? `${ctx.api.label}: ${error}`
     : cloud.ready
-      ? `Ready on ${ctx.api.label} — tap a file to download it to your phone.`
+      ? `Ready on ${ctx.api.label} — pick a file to download it to this device.`
       : cloud.failed
         ? `${ctx.api.label}: failed (${cloud.state}).`
         : `${ctx.api.label}: ${cloud.state}${pct ? ` ${pct}%` : ''}…`;
@@ -2418,6 +2453,7 @@ const views = new Map();
 
 function updateEmptyState() {
   els.empty.hidden = views.size > 0;
+  scheduleList();
 }
 
 const LOG_LIMIT = 60;
@@ -2573,7 +2609,8 @@ function creationFor(options) {
 async function seedFiles(files, { name, options = settings.createOptions, pickedIn = '', handedOver = false } = {}) {
   if (!files.length) return null;
   if (IN_BROWSER_BLOCKED) throw new Error(IN_BROWSER_BLOCKED);
-  const message = { op: 'seed', files: [...files], name, options };
+  // A File crosses to another copy without the folder it was in: its path goes beside it.
+  const message = { op: 'seed', files: [...files], paths: [...files].map((f, i) => relativePath(f, i)), name, options };
   if (!(await leading)) return addThroughLead(message, { share: true });
   await storageReady;
   if (follower) return addThroughLead(message, { share: true });
@@ -2616,7 +2653,7 @@ async function seedFiles(files, { name, options = settings.createOptions, picked
     torrent.destroy();
     if (views.has(existing) && !handedOver) {
       toast(`"${existing.name}" is already being shared.`);
-      shareTorrent(existing);
+      shareTorrent(existing, { here: !pickedIn });
       // Picked in a copy that follows this one: that is where its link is wanted.
       if (pickedIn) {
         postState();
@@ -2634,7 +2671,7 @@ async function seedFiles(files, { name, options = settings.createOptions, picked
   // Sharing is what a seed is for: the link, shown and selected, rather than the details panel.
   torrent.once('ready', () => {
     toast(`Seeding "${torrent.name}". Share the link so others can download it.`);
-    shareTorrent(torrent);
+    shareTorrent(torrent, { here: !pickedIn });
   });
   return torrent;
 }
@@ -2720,7 +2757,7 @@ function attachTorrent(torrent, { record, seeding, reach = null }) {
 
 function createTorrentView(torrent, record, seeding) {
   const el = els.torrentTemplate.content.firstElementChild.cloneNode(true);
-  const view = { torrent, el, fileEls: [], record: record || null, seeding: Boolean(seeding), log: [], startedAt: Date.now(), webSeeds: [...((record && record.webSeeds) || [])] };
+  const view = { torrent, el, fileEls: [], record: record || null, seeding: Boolean(seeding), log: [], startedAt: Date.now(), webSeeds: [...((record && record.webSeeds) || [])], addedAt: (record && record.addedAt) || Date.now(), row: null };
   views.set(torrent, view);
   el.classList.toggle('seeding', view.seeding);
 
@@ -2733,6 +2770,8 @@ function createTorrentView(torrent, record, seeding) {
   $('.share-btn', el).addEventListener('click', () => shareTorrent(torrent));
   $('.share-link-btn', el).addEventListener('click', () => shareTorrent(torrent));
   $('.zip-btn', el).addEventListener('click', () => saveZip(torrent));
+  $('.folder-btn', el).addEventListener('click', () => saveToFolder(torrent));
+  $('.folder-btn', el).hidden = !canPickFolder();
   $('.select-all-btn', el).addEventListener('click', () => setAllSelected(torrent, true));
   $('.select-none-btn', el).addEventListener('click', () => setAllSelected(torrent, false));
   $('.details-btn', el).addEventListener('click', () => openDetails(torrent));
@@ -2924,7 +2963,7 @@ function persistTorrent(view) {
     cloud: view.cloud ? { id: view.cloud.id, provider: view.cloud.provider, base: view.cloud.base } : ((view.record && view.record.cloud) || null),
     reach: view.reach || null,
     webSeeds: view.webSeeds,
-    addedAt: (view.record && view.record.addedAt) || Date.now(),
+    addedAt: (view.record && view.record.addedAt) || view.addedAt,
   };
   view.persisted = dbPut(view.record);
   return view.persisted;
@@ -3028,6 +3067,8 @@ function refreshView(view) {
       ? 'Save all as .zip'
       : `Save ${selected.length} selected as .zip`;
   }
+  $('.folder-btn', el).hidden = !canPickFolder();
+  if (!view.folderSaving) $('.folder-btn', el).disabled = !allSelectedDone;
 
   torrent.files.forEach((file, i) => {
     const li = view.fileEls[i];
@@ -3049,7 +3090,229 @@ function refreshView(view) {
       ? `${torrent.numPeers} connected${torrent._peersLength ? ` · ${torrent._peersLength} known` : ''}`
       : '—';
   }
+
+  // The list says what the card says, in a line.
+  view.row = rowOf(view, { pct, progress, complete, state, stuck: stuck || cannotDownloadHere(view.reach), remaining: selectedBytes - selectedDownloaded });
+  scheduleList();
 }
+
+/* ---------- the list: one row a torrent, searched, filtered and sorted (lib/torrent-list.js) ---------- */
+
+/**
+ * The row that stands for a torrent: the numbers its card shows, and what the filters ask. A row is
+ * known by the torrent's info hash, the one thing that stays when a retry rebuilds the torrent or the
+ * copy running it changes; a seed whose files are still being hashed has none yet, and a stand-in
+ * until then.
+ */
+let pendingKeys = 0;
+function keyOf(view) {
+  const key = view.torrent.infoHash || view.pendingKey || (view.pendingKey = `pending-${++pendingKeys}`);
+  if (view.key && view.key !== key) {
+    if (focusedKey === view.key) focusedKey = key;
+    if (selection.delete(view.key)) selection.add(key);
+  }
+  view.key = key;
+  return key;
+}
+
+function rowOf(view, { pct = 0, progress = 0, complete = false, state = '', stuck = false, remaining = 0 } = {}) {
+  const { torrent } = view;
+  const down = torrent.downloadSpeed || 0;
+  const up = torrent.uploadSpeed || 0;
+  const paused = Boolean(torrent.paused) && !view.autoStopped;
+  const speed = (bytes) => (bytes > 512 ? formatSpeed(bytes) : '');
+  return {
+    key: keyOf(view),
+    name: torrent.name || torrent.infoHash || (view.seeding ? 'Preparing files…' : 'Fetching metadata…'),
+    size: torrent.length || 0,
+    sizeText: torrent.length ? formatBytes(torrent.length) : '—',
+    progress,
+    pct,
+    down,
+    up,
+    downText: speed(down),
+    upText: speed(up),
+    speedText: down > 512 || up > 512 ? `↓ ${formatSpeed(down)} ↑ ${formatSpeed(up)}` : '',
+    peers: torrent.numPeers || 0,
+    etaText: !complete && down > 0 && remaining > 0 ? formatEta((remaining / down) * 1000).replace(/ left$/, '') : '',
+    state: state || (view.seeding ? 'hashing' : 'connecting'),
+    paused,
+    complete,
+    seeding: !torrent.paused && (view.seeding || complete),
+    problem: Boolean(stuck),
+    addedAt: view.addedAt,
+  };
+}
+
+const list = createTorrentList(els.torrentList, {
+  // A click opens the torrent; Ctrl or Cmd adds it to the selection or takes it out, Shift selects
+  // every row from the last one clicked. The boxes do the same as Ctrl and Shift.
+  onActivate: (key, { shift, toggle }) => {
+    if (shift) selectRange(key);
+    else if (toggle) toggleSelected(key);
+    else anchorKey = key;
+    focusKey(key);
+  },
+  onCheck: (key, checked, { shift }) => {
+    if (key === '*') {
+      selection = checked ? new Set(listedKeys) : new Set();
+    } else if (shift) {
+      selectRange(key);
+    } else {
+      toggleSelected(key, checked);
+    }
+    renderList();
+  },
+  onSort: (sort) => {
+    const same = listPrefs.sort === sort;
+    setListPrefs({ sort, dir: same ? (listPrefs.dir === 'asc' ? 'desc' : 'asc') : SORTS.find((s) => s.key === sort).dir });
+  },
+});
+let listPrefs = loadListPrefs();
+let listQuery = '';
+/** The torrent open beside the list on a computer (its card is the one shown there), by its row's key. */
+let focusedKey = null;
+/** The rows as last listed, in order: where the open one goes when it is removed. */
+let listedKeys = [];
+/** The torrents selected, for the bulk bar, by their rows' keys; and the row a Shift-click counts from. */
+let selection = new Set();
+let anchorKey = null;
+let listFrame = 0;
+
+/** Redrawn once a frame at most: refreshView runs for every card at every tick. */
+function scheduleList() {
+  if (listFrame) return;
+  listFrame = requestAnimationFrame(renderList);
+}
+
+function renderList() {
+  cancelAnimationFrame(listFrame);
+  listFrame = 0;
+  const shown = [...views.values()].filter((v) => !v.torrent.destroyed);
+  const all = shown.map((v) => v.row || rowOf(v));
+  const visible = sortRows(all.filter((row) => rowMatches(row, { filter: listPrefs.filter, query: listQuery })), listPrefs);
+  // The open torrent removed: the one after it in the list opens, or the one before, or the first.
+  if (!all.some((row) => row.key === focusedKey)) {
+    const at = listedKeys.indexOf(focusedKey);
+    const near = at < 0 ? [] : [...listedKeys.slice(at + 1), ...listedKeys.slice(0, at).reverse()];
+    focusedKey = near.find((key) => visible.some((row) => row.key === key)) || visible[0]?.key || all[0]?.key || null;
+  }
+  listedKeys = visible.map((row) => row.key);
+  for (const key of selection) if (!all.some((row) => row.key === key)) selection.delete(key);
+  // The cards follow, on a phone: in the order chosen, and only the ones the search and filter keep.
+  // They are never moved in the page, whose order is what the copies of the app tell each other.
+  const order = new Map(sortRows(all, listPrefs).map((row, i) => [row.key, String(i)]));
+  const kept = new Set(listedKeys);
+  for (const view of shown) {
+    if (view.el.style.order !== order.get(view.key)) view.el.style.order = order.get(view.key);
+    view.el.classList.toggle('filtered', !kept.has(view.key));
+    view.el.classList.toggle('focused', view.key === focusedKey);
+  }
+  list.render(visible, {
+    selected: selection,
+    focused: focusedKey,
+    sort: listPrefs.sort,
+    dir: listPrefs.dir,
+    emptyText: all.length ? 'Nothing here matches: change the search or the filter.' : '',
+  });
+  els.listTools.hidden = all.length === 0;
+  els.detailEmpty.hidden = all.length === 0 || Boolean(focusedKey);
+  renderBulkBar();
+  for (const option of els.listFilter.options) {
+    const filter = FILTERS.find((f) => f.key === option.value);
+    const text = `${filter.label} (${all.filter((row) => rowMatches(row, { filter: filter.key })).length})`;
+    if (option.textContent !== text) option.textContent = text;
+  }
+}
+
+function toggleSelected(key, on = !selection.has(key)) {
+  if (on) selection.add(key);
+  else selection.delete(key);
+  anchorKey = key;
+}
+
+/** Shift: every row listed from the last one clicked to this one, added to the selection. */
+function selectRange(key) {
+  for (const k of rangeKeys(listedKeys, anchorKey ?? focusedKey, key)) selection.add(k);
+}
+
+/** The torrents selected, in the order listed. */
+function selectedTorrents() {
+  return listedKeys.filter((key) => selection.has(key)).map(torrentOfKey).filter(Boolean);
+}
+
+function torrentOfKey(key) {
+  return [...views.values()].find((v) => v.key === key)?.torrent || null;
+}
+
+function renderBulkBar() {
+  const picked = selectedTorrents();
+  els.bulkBar.hidden = picked.length === 0;
+  if (!picked.length) return;
+  const text = `${picked.length} selected`;
+  if (els.bulkCount.textContent !== text) els.bulkCount.textContent = text;
+  els.bulkPause.disabled = !picked.some((t) => !t.paused);
+  els.bulkResume.disabled = !picked.some((t) => t.paused);
+  els.bulkSave.disabled = !picked.some((t) => t.metadata);
+}
+
+/** Open this row's torrent beside the list. */
+function focusKey(key) {
+  focusedKey = key;
+  renderList();
+}
+
+/**
+ * Open a torrent beside the list: one just added, or shared. A search or a filter that would hide it
+ * gives way, or the list would not show what was just done.
+ */
+function focusTorrent(torrent) {
+  const view = views.get(torrent);
+  if (!view) return;
+  const row = view.row || rowOf(view);
+  if (!rowMatches(row, { filter: listPrefs.filter, query: listQuery })) {
+    listQuery = '';
+    els.listSearch.value = '';
+    setListPrefs({ filter: 'all' });
+  }
+  focusKey(row.key);
+}
+
+function setListPrefs(change) {
+  listPrefs = { ...listPrefs, ...change };
+  saveListPrefs(listPrefs);
+  syncListTools();
+  renderList();
+}
+
+/** The controls as the preferences say. */
+function syncListTools() {
+  els.listFilter.value = listPrefs.filter;
+  els.listSort.value = listPrefs.sort;
+  const ascending = listPrefs.dir === 'asc';
+  els.listDir.textContent = ascending ? '↑' : '↓';
+  els.listDir.title = ascending ? 'Ascending: click for descending' : 'Descending: click for ascending';
+  els.listDir.setAttribute('aria-label', els.listDir.title);
+  const table = listPrefs.view === 'table';
+  els.torrentList.classList.toggle('table', table);
+  for (const [button, on] of [[els.viewCards, !table], [els.viewTable, table]]) {
+    button.classList.toggle('active', on);
+    button.setAttribute('aria-pressed', String(on));
+  }
+}
+
+els.listFilter.append(...FILTERS.map((f) => new Option(f.label, f.key)));
+els.listSort.append(...SORTS.map((s) => new Option(s.label, s.key)));
+syncListTools();
+els.listSearch.addEventListener('input', () => {
+  listQuery = els.listSearch.value;
+  renderList();
+});
+els.listFilter.addEventListener('change', () => setListPrefs({ filter: els.listFilter.value }));
+els.listSort.addEventListener('change', () => setListPrefs({ sort: els.listSort.value, dir: SORTS.find((s) => s.key === els.listSort.value).dir }));
+els.listDir.addEventListener('click', () => setListPrefs({ dir: listPrefs.dir === 'asc' ? 'desc' : 'asc' }));
+els.viewCards.addEventListener('click', () => setListPrefs({ view: 'cards' }));
+els.viewTable.addEventListener('click', () => setListPrefs({ view: 'table' }));
 
 /** How many of a torrent's pieces are here, of how many; a copy that only shows it is told. */
 function pieceCounts(torrent) {
@@ -3201,6 +3464,7 @@ async function replaceTorrent(torrent, id, why, { source: newSource } = {}) {
     : null;
   const source = newSource || view.source;
   const anchor = view.el.nextElementSibling;
+  const wasOpen = focusedKey === view.key;
   clearTimeout(view.fallbackTimer);
   removeView(torrent);
   await new Promise((resolve) => {
@@ -3222,6 +3486,9 @@ async function replaceTorrent(torrent, id, why, { source: newSource } = {}) {
     else if (source) nextView.source = source;
     nextView.log = [...view.log];
     nextView.picked = view.picked;
+    // Its place in the list, and open if it was: a seed has no record to say when it came.
+    nextView.addedAt = view.addedAt;
+    if (wasOpen) focusedKey = keyOf(nextView);
     $('.log', nextView.el).hidden = view.log.length === 0;
     for (const line of view.log) {
       const li = document.createElement('li');
@@ -3396,13 +3663,16 @@ async function copyFrom(button, text) {
  * only one — and on a desktop, or when the sheet is dismissed, there has to be
  * something to select and copy.
  */
-function shareTorrent(torrent) {
+function shareTorrent(torrent, { here = true } = {}) {
   const view = views.get(torrent);
   if (!view) return;
   if (!torrent.infoHash) {
     toast('Wait until the torrent has an info hash.');
     return;
   }
+  // On a computer, only the torrent open shows its card: this one opens, to show its links. Not when
+  // it was shared from another open copy (`here` false): that window's list and focus are left alone.
+  if (here) focusTorrent(torrent);
   const panel = $('.share-panel', view.el);
   const appLink = $('.share-app-link', view.el);
   const magnet = $('.share-magnet', view.el);
@@ -3418,7 +3688,7 @@ function shareTorrent(torrent) {
   magnet.value = secret ? '' : torrent.magnetURI;
   panel.hidden = false;
   $('.share-native-btn', view.el).hidden = secret || !navigator.share;
-  if (secret) return;
+  if (secret || !here) return;
   // Selected, so one tap on the phone's own "Copy" does the job too.
   appLink.focus();
   appLink.setSelectionRange(0, appLink.value.length);
@@ -3428,7 +3698,7 @@ async function shareNatively(torrent) {
   const url = appLinkFor(torrent);
   const title = torrent.name || 'Torrent';
   try {
-    await navigator.share({ title, text: `Download "${title}" with Phone Torrent`, url });
+    await navigator.share({ title, text: `Download "${title}" with Swarmdeck`, url });
   } catch (err) {
     if (err && err.name !== 'AbortError') toast(`Could not share: ${err.message}`, { error: true });
   }
@@ -3440,18 +3710,80 @@ function removeView(torrent) {
   stopCloudPoll(view);
   view.el.remove();
   views.delete(torrent);
+  scheduleList();
 }
 
-async function removeTorrent(torrent) {
-  const view = views.get(torrent);
-  const name = torrent.name || torrent.infoHash || 'this torrent';
-  const message = view && view.seeding
-    ? `Stop sharing "${name}"?`
-    : `Remove "${name}"?\n\nIts downloaded data will be deleted from the browser. Files you already saved to your phone are not affected.`;
-  if (!askUser(() => confirm(message))) return;
-  if (torrent.remote) await tellLead({ op: 'remove', ...refOf(torrent) });
-  else await dropTorrent(torrent);
+function removeTorrent(torrent) {
+  return removeTorrents([torrent]);
 }
+
+/** Remove these torrents and delete their data, asked once for all of them. */
+async function removeTorrents(torrents) {
+  const list = torrents.filter((t) => views.has(t));
+  if (!list.length) return;
+  const seeds = list.filter((t) => views.get(t).seeding).length;
+  let message;
+  if (list.length === 1) {
+    const name = list[0].name || list[0].infoHash || 'this torrent';
+    message = seeds
+      ? `Stop sharing "${name}"?`
+      : `Remove "${name}"?\n\nIts downloaded data will be deleted from the browser. Files you already saved to this device are not affected.`;
+  } else {
+    message = seeds === list.length
+      ? `Stop sharing these ${list.length} torrents?`
+      : `Remove these ${list.length} torrents?\n\nTheir downloaded data will be deleted from the browser. Files you already saved to this device are not affected.`;
+  }
+  if (!askUser(() => confirm(message))) return;
+  for (const torrent of list) {
+    if (torrent.remote) await tellLead({ op: 'remove', ...refOf(torrent) });
+    else await dropTorrent(torrent);
+  }
+}
+
+/** Pause or resume, whichever it is not already: through togglePause, which a follower hands to the copy running it. */
+function setPaused(torrent, paused) {
+  if (views.has(torrent) && Boolean(torrent.paused) !== paused) togglePause(torrent);
+}
+
+/**
+ * The .torrent of each of these: one is saved as it is, several in one zip. A magnet still waiting
+ * for its metadata has no .torrent yet, and is said to be left out.
+ */
+async function saveTorrentFiles(torrents) {
+  const ready = torrents.filter((t) => t.metadata);
+  const waiting = torrents.length - ready.length;
+  if (waiting) toast(`${waiting} of them ${waiting === 1 ? 'has' : 'have'} no .torrent yet: ${waiting === 1 ? 'it is' : 'they are'} still waiting for metadata.`);
+  if (ready.length === 1) return saveTorrentFile(ready[0]);
+  if (!ready.length) return undefined;
+  const used = new Set();
+  const entries = [];
+  for (const torrent of ready) {
+    const bytes = await torrentBytesOf(torrent).catch(() => null);
+    if (!bytes) continue;
+    const base = `${torrent.name || torrent.infoHash}`.replace(/[\\/:*?"<>|\u0000-\u001f]+/g, '_') || torrent.infoHash;
+    let name = `${base}.torrent`;
+    for (let n = 2; used.has(name.toLowerCase()); n++) name = `${base} (${n}).torrent`;
+    used.add(name.toLowerCase());
+    entries.push({ name, input: bytes, lastModified: new Date() });
+  }
+  const zipName = `${entries.length} torrents.zip`;
+  try {
+    await saver.save({ name: zipName, stream: () => makeZip(entries) });
+    toast(`Saved ${zipName}`);
+  } catch (err) {
+    toast(`Could not save the .torrent files: ${err.message}`, { error: true });
+  }
+  return undefined;
+}
+
+els.bulkPause.addEventListener('click', () => { for (const t of selectedTorrents()) setPaused(t, true); renderList(); });
+els.bulkResume.addEventListener('click', () => { for (const t of selectedTorrents()) setPaused(t, false); renderList(); });
+els.bulkSave.addEventListener('click', () => saveTorrentFiles(selectedTorrents()));
+els.bulkRemove.addEventListener('click', () => removeTorrents(selectedTorrents()));
+els.bulkClear.addEventListener('click', () => {
+  selection.clear();
+  renderList();
+});
 
 /** Remove a torrent and delete its data: asked for here, or in a copy that follows this one. */
 async function dropTorrent(torrent) {
@@ -3667,6 +3999,7 @@ function showRemote(view, card) {
   view.webSeeds = card.webSeeds;
   view.startedAt = card.startedAt;
   view.reconnectingUntil = card.reconnectingUntil;
+  view.addedAt = card.addedAt || view.addedAt;
   if (!torrent.metadata) $('.name', el).textContent = torrent.name || torrent.infoHash || (view.seeding ? 'Preparing files…' : 'Fetching metadata…');
   if (torrent.metadata && !view.fileEls.length && torrent.files.length) {
     view.record = { deselected: card.deselected };
@@ -3793,7 +4126,7 @@ function streamFromLead(torrent, what) {
       // What is asked for and what waits to be read make the window, never more.
       const credit = STREAM_WINDOW - asked - Math.max(0, -controller.desiredSize);
       if (!channel) {
-        channel = new BroadcastChannel(`phone-torrent:stream:${id}`);
+        channel = new BroadcastChannel(streamChannel(id));
         incoming.add(entry);
         channel.onmessage = ({ data }) => {
           if (data.type === 'chunk') {
@@ -3888,6 +4221,7 @@ function torrentState(view) {
       cloudRefused: Boolean(view.cloudRefused),
       cloudNote: view.cloudNote || '',
       log: [...view.log],
+      addedAt: view.addedAt,
     },
   };
 }
@@ -3958,7 +4292,7 @@ async function runCall(message, from = '') {
       if (message.handover && !takesHandOver(message)) return { sid: '' };
       // A seed whose link was never shown (it was still getting ready) shows it here.
       const quiet = message.handover === true && message.ready === true;
-      const seeded = await seedFiles(message.files || [], { name: message.name, options: message.options, pickedIn: message.handover ? '' : from, handedOver: quiet });
+      const seeded = await seedFiles(withPaths(message.files || [], message.paths), { name: message.name, options: message.options, pickedIn: message.handover ? '' : from, handedOver: quiet });
       if (message.handover && seeded && !seeded.remote) keepPaused(seeded, message);
       return { sid: syncId(seeded) };
     }
@@ -4048,7 +4382,7 @@ function keepPaused(torrent, message) {
 
 /** Stream a file to the follower saving it: as many chunks as it has room for, and more as it asks. */
 function sendStream({ id, sid, infoHash, file, torrentFile, credit: first }) {
-  const channel = new BroadcastChannel(`phone-torrent:stream:${id}`);
+  const channel = new BroadcastChannel(streamChannel(id));
   let reader = null;
   let closed = false;
   let idle = null;
@@ -4207,7 +4541,7 @@ function seedsToHandOver() {
   return [...views.values()].filter((v) => v.seeding && !v.torrent.remote && !v.torrent.destroyed).map((v) => {
     const { torrent } = v;
     const about = { handover: true, infoHash: torrent.infoHash || '', paused: Boolean(torrent.paused), ready: Boolean(torrent.ready) };
-    if (v.picked) return { op: 'seed', files: v.picked.files, name: v.picked.name, options: v.picked.options, ...about };
+    if (v.picked) return { op: 'seed', files: v.picked.files, paths: v.picked.files.map((f, i) => relativePath(f, i)), name: v.picked.name, options: v.picked.options, ...about };
     if (opfsOk && torrent.metadata && torrent.torrentFile) return { op: 'add', id: new Uint8Array(torrent.torrentFile), seeding: true, ...about };
     return null;
   }).filter(Boolean);
@@ -4416,6 +4750,49 @@ async function saveZip(torrent) {
   }
 }
 
+/**
+ * The files selected, written into a folder of the computer as they are in the torrent, its folders
+ * and all (lib/folder-save.js), each as it is read: nothing is held in memory whole. Asked first when
+ * that would replace files already there.
+ */
+async function saveToFolder(torrent) {
+  const view = views.get(torrent);
+  if (!view || view.folderSaving) return;
+  let dir;
+  try {
+    // First, before anything is awaited: the browser shows its picker only while the click still counts.
+    dir = await pickFolder();
+  } catch (err) {
+    if (err?.name !== 'AbortError') toast(`Could not open that folder: ${err.message}`, { error: true });
+    return;
+  }
+  const files = selectedFiles(view).filter((f) => f.done || f.progress >= 1);
+  if (!files.length || !views.has(torrent)) return;
+  // As in the zip: a torrent of several files keeps its folder, one file is the file.
+  const items = files.map((file) => ({
+    path: torrent.files.length > 1 ? file.path.split('/') : [file.name],
+    size: file.length,
+    stream: () => file.stream(),
+  }));
+  const btn = $('.folder-btn', view.el);
+  view.folderSaving = true;
+  btn.disabled = true;
+  try {
+    const there = await existing(dir, items);
+    const n = there.length;
+    if (n && !askUser(() => confirm(`Replace ${n} file${n === 1 ? '' : 's'} already in "${dir.name}"?`))) return;
+    btn.textContent = 'Saving…';
+    await writeToFolder(dir, items, { onFile: (item, i) => { btn.textContent = `Saving ${i + 1} of ${items.length}…`; } });
+    toast(`Saved ${items.length === 1 ? `"${files[0].name}"` : `${items.length} files`} in "${dir.name}".`);
+  } catch (err) {
+    toast(`Could not save it in that folder: ${err.message}`, { error: true, timeout: 9000 });
+  } finally {
+    view.folderSaving = false;
+    btn.textContent = 'Save to a folder…';
+    refreshView(view);
+  }
+}
+
 async function saveTorrentFile(torrent) {
   const size = torrent.remote ? torrent.torrentFileSize : torrent.torrentFile?.byteLength;
   if (!torrent.metadata || !size) {
@@ -4466,8 +4843,16 @@ async function readTorrentFile(f) {
  * tab: with a few transfers in it, a new card landed screens below, and nothing on screen said it came.
  */
 function showCard(torrent) {
-  views.get(torrent)?.el.scrollIntoView({ block: 'nearest' });
+  const view = views.get(torrent);
+  if (!view) return;
+  // On a computer it opens beside the list, and its row comes into view.
+  focusTorrent(torrent);
+  const row = desktop.matches && els.torrentList.querySelector(`.tl-row[data-key="${CSS.escape(view.key)}"]`);
+  (row || view.el).scrollIntoView({ block: 'nearest' });
 }
+
+/** Wide enough for the list beside the torrent open: styles.css says the same. */
+const desktop = window.matchMedia('(min-width: 1024px)');
 
 async function addTorrentFiles(fileList) {
   for (const f of fileList) {
@@ -4514,38 +4899,36 @@ els.magnetForm.addEventListener('submit', async (event) => {
   }
 });
 
-els.cloudForm.addEventListener('submit', async (event) => {
-  event.preventDefault();
-  const id = parseTorrentText(els.cloudInput.value);
+/** A magnet, an info hash or a .torrent link, sent to the cloud account: typed, pasted or dropped. Says what went wrong, and whether it went. */
+async function sendTextToCloud(text) {
+  const id = parseTorrentText(text);
   if (!id) {
     toast('Paste a magnet link, a 40-character info hash, or a .torrent URL.', { error: true });
-    return;
+    return false;
   }
   const problem = /^magnet:/.test(id) ? magnetProblem(id) : '';
   if (problem) {
     toast(problem, { error: true, timeout: 9000 });
-    return;
+    return false;
   }
   if (!cloudReady()) {
     toast('Add your cloud API key first: Settings → Cloud fetch.', { error: true });
     els.settingsBtn.click();
-    return;
+    return false;
   }
-  const value = els.cloudInput.value;
-  els.cloudInput.value = '';
   try {
     // A .torrent URL is fetched here so the cloud gets the file itself, exactly as the picker does.
     if (/^https?:\/\//i.test(id)) await cloudSend({ bytes: await fetchTorrentUrl(id), name: 'torrent' });
     else await cloudSend({ magnet: id });
+    return true;
   } catch (err) {
-    els.cloudInput.value = value;
     toast(`Could not send it: ${err.message}`, { error: true, timeout: 9000 });
+    return false;
   }
-});
+}
 
-els.cloudFileInput.addEventListener('change', async () => {
-  const files = Array.from(els.cloudFileInput.files || []);
-  els.cloudFileInput.value = '';
+/** .torrent files sent to the cloud account: picked, pasted or dropped. Anything else is not sent, and why is said. */
+async function sendFilesToCloud(files) {
   if (!cloudReady() && files.length) {
     toast('Add your cloud API key first: Settings → Cloud fetch.', { error: true });
     els.settingsBtn.click();
@@ -4555,7 +4938,7 @@ els.cloudFileInput.addEventListener('change', async () => {
     try {
       const bytes = await readTorrentFile(f);
       if (!bytes) {
-        toast(`"${f.name}" is not a .torrent file.`, { error: true });
+        toast(`"${f.name}" is not a .torrent file: the cloud fetches torrents, it does not keep your files. To share it, use the "Seed & share" tab.`, { error: true, timeout: 9000 });
         continue;
       }
       await cloudSend({ bytes, name: f.name.replace(/\.torrent$/i, '') });
@@ -4563,6 +4946,20 @@ els.cloudFileInput.addEventListener('change', async () => {
       toast(`Could not send ${f.name}: ${err.message}`, { error: true, timeout: 9000 });
     }
   }
+}
+
+els.cloudForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  // What could not be sent comes back, to be fixed rather than pasted again.
+  const value = els.cloudInput.value;
+  els.cloudInput.value = '';
+  if (!(await sendTextToCloud(value)) && !els.cloudInput.value) els.cloudInput.value = value;
+});
+
+els.cloudFileInput.addEventListener('change', () => {
+  const files = Array.from(els.cloudFileInput.files || []);
+  els.cloudFileInput.value = '';
+  sendFilesToCloud(files);
 });
 
 els.cloudRefreshBtn.addEventListener('click', () => {
@@ -4570,20 +4967,31 @@ els.cloudRefreshBtn.addEventListener('click', () => {
   refreshCloudLibrary();
 });
 
-els.seedFileInput.addEventListener('change', () => {
-  const files = Array.from(els.seedFileInput.files || []);
-  els.seedFileInput.value = '';
-  if (!files.length) return;
+/**
+ * Files to share, picked, dropped or pasted. A folder is named after itself. Several loose files are
+ * asked a name: Cancel means not now, and a collection with no name would be called after its first
+ * file — "a.jpg" for two photos, and "a.jpg.zip" for whoever saves them — so an empty one is "Shared files".
+ */
+function seedPicked(files) {
+  if (!files.length) return undefined;
   let name;
-  if (files.length > 1) {
-    // Cancel means not now. A collection with no name would be called after its first file — "a.jpg"
-    // for two photos, and "a.jpg.zip" for whoever saves them — so an empty one is "Shared files".
+  if (files.length > 1 && !commonFolder(files)) {
     name = askUser(() => prompt('Name for this collection of files:', 'Shared files'));
-    if (name === null) return;
+    if (name === null) return undefined;
     name = name.trim() || 'Shared files';
   }
-  shareOrMake(files, { name }).catch((err) => toast(err.message, { error: true, timeout: 9000 }));
-});
+  return shareOrMake(files, { name }).catch((err) => toast(err.message, { error: true, timeout: 9000 }));
+}
+
+for (const input of [els.seedFileInput, els.seedFolderInput]) {
+  input.addEventListener('change', () => {
+    const files = Array.from(input.files || []);
+    input.value = '';
+    seedPicked(files);
+  });
+}
+// A browser that cannot pick a folder (an iPhone) is offered files alone.
+els.seedFolderBtn.hidden = !('webkitdirectory' in els.seedFolderInput);
 
 els.seedUrlForm.addEventListener('submit', async (event) => {
   event.preventDefault();
@@ -4738,8 +5146,10 @@ const seedOptions = createOptionsUI($('#tab-seed'), {
 
 // Only the add card's tabs: the Simple / Expert switch in Settings looks like one (class "tab") but
 // has no panel, and matching it too hid every panel the moment the mode was changed.
-$$('.tabs .tab').forEach((tab) => tab.addEventListener('click', () => {
-  if (tab.dataset.tab === 'cloud') {
+function selectTab(name) {
+  const tab = $(`.tabs .tab[data-tab="${name}"]`);
+  if (!tab) return;
+  if (name === 'cloud') {
     cloudAccountLine();
     refreshCloudLibrary({ quiet: true });
   }
@@ -4747,38 +5157,233 @@ $$('.tabs .tab').forEach((tab) => tab.addEventListener('click', () => {
     const active = t === tab;
     t.classList.toggle('active', active);
     t.setAttribute('aria-selected', String(active));
+    // One tab in the Tab key's way, the one chosen; the arrows go from it to the others.
+    t.tabIndex = active ? 0 : -1;
   });
-  $$('.tab-panel').forEach((p) => { p.hidden = p.id !== `tab-${tab.dataset.tab}`; });
-}));
+  $$('.tab-panel').forEach((p) => { p.hidden = p.id !== `tab-${name}`; });
+}
 
-['dragenter', 'dragover'].forEach((type) => els.dropZone.addEventListener(type, (e) => {
+$$('.tabs .tab').forEach((tab) => tab.addEventListener('click', () => selectTab(tab.dataset.tab)));
+$('.tabs').addEventListener('keydown', (e) => {
+  const tabs = $$('.tabs .tab');
+  const at = tabs.indexOf(e.target);
+  const to = { ArrowRight: at + 1, ArrowLeft: at - 1, Home: 0, End: tabs.length - 1 }[e.key];
+  if (at < 0 || to === undefined) return;
   e.preventDefault();
-  els.dropZone.classList.add('dragover');
-}));
-['dragleave', 'drop'].forEach((type) => els.dropZone.addEventListener(type, (e) => {
-  e.preventDefault();
-  els.dropZone.classList.remove('dragover');
-}));
-els.dropZone.addEventListener('drop', async (e) => {
-  const files = Array.from(e.dataTransfer?.files || []);
-  // On the Edit tab, what is dropped is opened in the editor, whatever it is: a file that is not a
-  // .torrent is said to be one, rather than shared.
-  if (activeTab() === 'edit') {
+  const tab = tabs[(to + tabs.length) % tabs.length];
+  selectTab(tab.dataset.tab);
+  tab.focus();
+});
+selectTab(activeTab());
+
+/* ---------- dropped, pasted, typed: the page as a computer uses it ---------- */
+
+/** A modal dialog is open (Settings, the editor, the shortcuts): what is dropped or typed is its own. */
+const modalOpen = () => Boolean(document.querySelector('dialog[open]:modal'));
+
+/** Somewhere text is typed, where a key, a paste or text dropped belongs to the field. */
+const typing = (target) => Boolean(target?.closest?.('input:not([type="checkbox"], [type="radio"], [type="button"], [type="submit"], [type="reset"], [type="file"]), textarea, select, [contenteditable]:not([contenteditable="false"])'));
+
+/**
+ * What was dropped or pasted, where it is meant to go: the tab open says what for. Text is read as a
+ * shared link is, a magnet, an info hash or a link to a .torrent; files are .torrent files to add on
+ * Download, files to share on Seed & share, and anything to open on Edit. A file that is not a
+ * .torrent, dropped on Download, is shared only once that is said yes to: never by surprise.
+ */
+async function routeDrop({ files = [], text = '' }) {
+  const tab = activeTab();
+  if (tab === 'edit') {
     if (files.length) return editTorrentFiles(files);
-    const text = e.dataTransfer?.getData('text');
     if (text) return editFromText(text).catch((err) => toast(err.message, { error: true, timeout: 9000 }));
     return undefined;
   }
-  const torrents = files.filter((f) => /\.torrent$/i.test(f.name));
-  if (torrents.length) return addTorrentFiles(torrents);
-  if (files.length) {
-    return shareOrMake(files, { name: files.length > 1 ? 'Shared files' : undefined })
-      .catch((err) => toast(err.message, { error: true, timeout: 9000 }));
+  if (!files.length) {
+    const id = parseSharedText(text);
+    if (!id) {
+      toast('Nothing to add in that: drop or paste a magnet, an info hash, a .torrent file, or a link to one.', { error: true, timeout: 7000 });
+      return undefined;
+    }
+    if (tab === 'cloud') return sendTextToCloud(id);
+    const torrent = await tryAddTorrent(id);
+    if (torrent) showCard(torrent);
+    return torrent;
   }
-  const text = e.dataTransfer?.getData('text');
-  const id = text && parseTorrentText(text);
-  if (id) await tryAddTorrent(id);
+  if (tab === 'cloud') return sendFilesToCloud(files);
+  if (tab === 'seed') return seedPicked(files);
+  const torrents = [];
+  const others = [];
+  for (const f of files) (await readTorrentFile(f).catch(() => null) ? torrents : others).push(f);
+  if (torrents.length) await addTorrentFiles(torrents);
+  if (!others.length) return undefined;
+  if (IN_BROWSER_BLOCKED) {
+    toast(IN_BROWSER_BLOCKED, { error: true, timeout: 9000 });
+    return undefined;
+  }
+  const what = others.length === 1 ? `"${others[0].name}" is not a .torrent file` : `${others.length} of these files are not .torrent files`;
+  if (!askUser(() => confirm(`${what}. Share ${others.length === 1 ? 'it' : 'them'} as a new torrent, from the Seed & share tab?`))) return undefined;
+  selectTab('seed');
+  return seedPicked(others);
+}
+
+// Dropped anywhere on the page, not only on the card at the top: a file let go of a little off it
+// was opened by the browser instead, and the app was gone.
+const dropOverlay = $('#drop-overlay');
+const DROP_WORDS = {
+  download: 'Drop to download: .torrent files, or a magnet',
+  seed: 'Drop files or a folder to share them',
+  cloud: 'Drop .torrent files or a magnet to send to the cloud',
+  edit: 'Drop .torrent files to edit them',
+};
+let dropOverlayTimer = 0;
+
+function showDropOverlay() {
+  $('#drop-overlay-text').textContent = DROP_WORDS[activeTab()] || DROP_WORDS.download;
+  dropOverlay.hidden = false;
+  // A drag that leaves the window, or is called off, does not always say so: no word for a moment is that.
+  clearTimeout(dropOverlayTimer);
+  dropOverlayTimer = setTimeout(hideDropOverlay, 400);
+}
+
+function hideDropOverlay() {
+  clearTimeout(dropOverlayTimer);
+  dropOverlay.hidden = true;
+}
+
+/** Whether this drag is the page's to take; and if not, whether it is still to be kept from the browser. */
+function dropFor(event) {
+  const dt = event.dataTransfer;
+  const files = draggingFiles(dt);
+  const text = !files && [...(dt?.types || [])].some((t) => t === 'text/plain' || t === 'text/uri-list');
+  if (!files && !text) return 'none';
+  // Under a dialog nothing is added; a file picker in it takes the file as it always does, and
+  // anything else is kept from opening in place of the app.
+  if (modalOpen()) return files && event.target.closest?.('input[type="file"]') ? 'none' : 'block';
+  // Text dropped into a field is the field's.
+  if (text && typing(event.target)) return 'none';
+  return 'take';
+}
+
+for (const type of ['dragenter', 'dragover']) {
+  window.addEventListener(type, (event) => {
+    const what = dropFor(event);
+    if (what === 'none') return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = what === 'take' ? 'copy' : 'none';
+    if (what === 'take') showDropOverlay();
+  });
+}
+window.addEventListener('dragleave', (event) => {
+  if (!event.relatedTarget) hideDropOverlay();
 });
+window.addEventListener('drop', (event) => {
+  const what = dropFor(event);
+  if (what === 'none') return;
+  event.preventDefault();
+  hideDropOverlay();
+  if (what !== 'take') return;
+  // Read now: once anything has been awaited, the browser has emptied what was dropped.
+  const { entries, files } = grabEntries(event.dataTransfer);
+  const text = files.length ? '' : droppedText(event.dataTransfer);
+  // A folder is only seen as an entry; without one among them, the files as the browser gave them.
+  const folders = entries?.some((entry) => entry.isDirectory);
+  (async () => routeDrop({ files: folders ? await filesFromEntries(entries) : files, text }))()
+    .catch((err) => toast(err.message || String(err), { error: true, timeout: 9000 }));
+});
+
+// Ctrl+V or Cmd+V on the page, not in a field: a magnet copied from elsewhere, or files copied in the
+// file manager, go where a drop would. Pasted by hand, nothing is asked first.
+document.addEventListener('paste', (event) => {
+  if (modalOpen() || typing(event.target)) return;
+  const data = event.clipboardData;
+  const files = [...(data?.files || [])];
+  const text = files.length ? '' : (data?.getData('text/plain') || '').trim();
+  if (!files.length && !text) return;
+  event.preventDefault();
+  routeDrop({ files, text }).catch((err) => toast(err.message || String(err), { error: true, timeout: 9000 }));
+});
+
+/**
+ * The keyboard, on a computer. Not in a field, nor under a dialog, which have keys of their own:
+ *   /            the search            ?          these keys, listed
+ *   ↑ ↓ Home End the list (Shift selects as it goes)
+ *   Ctrl/Cmd+A   every torrent listed  Space      pause or resume the selection, or the one open
+ *   Delete, ⌘⌫   remove them           Escape     the search emptied, then the selection
+ */
+document.addEventListener('keydown', (event) => {
+  if (event.defaultPrevented || event.isComposing || modalOpen()) return;
+  const { key, target } = event;
+  const mod = event.ctrlKey || event.metaKey;
+  if (key === 'Escape') {
+    if (listQuery || (target === els.listSearch && els.listSearch.value)) {
+      event.preventDefault();
+      listQuery = '';
+      els.listSearch.value = '';
+      renderList();
+    } else if (selection.size) {
+      event.preventDefault();
+      selection.clear();
+      renderList();
+    }
+    return;
+  }
+  if (typing(target) || event.altKey) return;
+  if (key === '?') {
+    event.preventDefault();
+    els.keysDialog.showModal();
+    return;
+  }
+  if (key === '/' && !mod && !els.listTools.hidden) {
+    event.preventDefault();
+    els.listSearch.focus();
+    els.listSearch.select();
+    return;
+  }
+  // The rest is the list's, which only a computer shows; and only from the list itself, or from the
+  // page with nothing else focused. A button, a column's header, a player has keys of its own.
+  if (!desktop.matches || !listedKeys.length) return;
+  const row = target.closest?.('.tl-row');
+  const onPage = target === document.body || target === document.documentElement;
+  if (!row && !onPage) return;
+  if (mod && key.toLowerCase() === 'a') {
+    event.preventDefault();
+    selection = new Set(listedKeys);
+    renderList();
+    return;
+  }
+  if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(key) && !mod) {
+    event.preventDefault();
+    const at = listedKeys.indexOf(focusedKey);
+    const last = listedKeys.length - 1;
+    const to = key === 'Home' ? 0 : key === 'End' ? last
+      : at < 0 ? 0 : Math.max(0, Math.min(last, at + (key === 'ArrowDown' ? 1 : -1)));
+    const next = listedKeys[to];
+    if (event.shiftKey) {
+      anchorKey ??= focusedKey ?? next;
+      selection = new Set(rangeKeys(listedKeys, anchorKey, next));
+    } else {
+      anchorKey = next;
+    }
+    focusKey(next);
+    list.focusRow(next);
+    return;
+  }
+  // The selection; or, from a row, the torrent open. Space on the page with nothing selected scrolls it.
+  const targets = selection.size ? selectedTorrents() : row ? [torrentOfKey(focusedKey)].filter(Boolean) : [];
+  // Space on a row's box ticks it, as a box does.
+  if ((key === ' ' || key === 'Spacebar') && !mod && (onPage || target === row) && targets.length) {
+    event.preventDefault();
+    const pause = targets.some((t) => !t.paused);
+    for (const torrent of targets) setPaused(torrent, pause);
+    renderList();
+    return;
+  }
+  if ((key === 'Delete' || (event.metaKey && key === 'Backspace')) && targets.length) {
+    event.preventDefault();
+    removeTorrents(targets);
+  }
+});
+
+els.keysBtn.addEventListener('click', () => els.keysDialog.showModal());
 
 // Where torrents cannot run in the page (see IN_BROWSER_BLOCKED), the Download and Seed tabs say
 // so, instead of offering pickers that could only fail.
@@ -5265,7 +5870,7 @@ els.copyDiagBtn.addEventListener('click', async () => {
   ].filter((secret) => typeof secret === 'string' && secret.length >= 4);
   const scrub = (line) => secrets.reduce((text, secret) => text.split(secret).join('<hidden>'), line);
   const diag = {
-    app: 'phone-torrent',
+    app: 'swarmdeck',
     time: new Date().toISOString(),
     userAgent: navigator.userAgent,
     secureContext: window.isSecureContext,
@@ -5314,6 +5919,8 @@ function refreshAll() {
     : down > 512 || up > 512
       ? `↓ ${formatSpeed(down)} ↑ ${formatSpeed(up)}`
       : count ? `${peers} peer${peers === 1 ? '' : 's'}` : 'idle';
+  renderList();
+  updateLeaveWarning();
 }
 
 setInterval(refreshAll, 750);
@@ -5325,7 +5932,7 @@ window.addEventListener('offline', () => {
   refreshAll();
 });
 
-/* ---------- share target inbox (Android "Share to Phone Torrent") ---------- */
+/* ---------- share target inbox (Android "Share to Swarmdeck") ---------- */
 
 /**
  * A share hands over the page's title, its address and whatever text came with them, one per line:
@@ -5389,7 +5996,7 @@ window.addEventListener('beforeinstallprompt', (event) => {
 window.addEventListener('appinstalled', () => {
   installPrompt = null;
   els.installBtn.hidden = true;
-  toast('Installed. Open Phone Torrent from your home screen.');
+  toast('Installed. Open Swarmdeck from your home screen, dock or apps list.');
 });
 
 els.installBtn.addEventListener('click', async () => {
@@ -5402,12 +6009,60 @@ els.installBtn.addEventListener('click', async () => {
   installPrompt = null;
 });
 
+/*
+ * Opened by the system. A .torrent double-clicked, or opened with the installed app, arrives here
+ * (manifest file_handlers); a magnet link clicked on another page arrives as ?magnet= (protocol_handlers,
+ * or registerProtocolHandler below for a browser tab). Either is asked about first, as a share is.
+ */
+// A browser tab, not the installed app (whose manifest already says so), can still be the one magnet
+// links open in: the browser asks the user before it agrees.
+if (typeof navigator.registerProtocolHandler === 'function' && !isStandalone()) {
+  els.magnetHandlerField.hidden = false;
+  els.magnetHandlerBtn.addEventListener('click', () => {
+    try {
+      navigator.registerProtocolHandler('magnet', `${location.origin}${location.pathname}?magnet=%s`);
+      toast('Your browser asks to confirm: once it is said yes to, magnet links open here.');
+    } catch (err) {
+      toast(`This browser would not take it: ${err.message}`, { error: true });
+    }
+  });
+}
+
+/*
+ * Closing the tab, or reloading it, stops what it runs: a seed stops being shared, a download stops.
+ * The browser asks first — only while that is so here. Not in a copy that only shows another one's
+ * torrents, nor when another open copy is waiting to take them over, nor once all is paused; and the
+ * question is taken back the moment it no longer applies, since a page that asks is never kept in the
+ * browser's back/forward cache.
+ */
+let askingBeforeLeaving = false;
+function beforeLeaving(event) {
+  event.preventDefault();
+  event.returnValue = '';
+}
+
+async function updateLeaveWarning() {
+  const running = decided && !follower && [...views.keys()].some((t) => !t.remote && !t.destroyed && !t.paused);
+  let handedOn = false;
+  if (running && navigator.locks?.query) {
+    try {
+      const { pending = [] } = await navigator.locks.query();
+      handedOn = pending.some((lock) => lock.name === LEAD_LOCK);
+    } catch { /* ask, then */ }
+  }
+  const ask = running && !handedOn;
+  if (ask === askingBeforeLeaving) return;
+  askingBeforeLeaving = ask;
+  if (ask) window.addEventListener('beforeunload', beforeLeaving);
+  else window.removeEventListener('beforeunload', beforeLeaving);
+}
+
 function maybeShowIosInstallHint() {
   const isIos = /iP(hone|ad|od)/.test(navigator.userAgent) && !window.MSStream;
   if (!isIos || isStandalone()) return;
   try {
-    if (localStorage.getItem('phone-torrent:ios-hint')) return;
-    localStorage.setItem('phone-torrent:ios-hint', '1');
+    if (localStorage.getItem(IOS_HINT_KEY)) return;
+    localStorage.setItem(IOS_HINT_KEY, '1');
   } catch { /* ignore */ }
   toast('Tip: tap Share, then "Add to Home Screen" to install this app.', { timeout: 9000 });
 }
@@ -5507,5 +6162,21 @@ async function restoreTorrents(records) {
 // Whatever became of the start, another copy's requests are not held up for ever.
 started.then(() => startupRestored(), () => startupRestored());
 
-// Expose for debugging and tests.
-window.__phoneTorrent = { editor, seedOptions, createTorrent, hashPieces, get follower() { return follower; }, get settings() { return settings; }, client, views, saver, started, addTorrent, askTrackersNow, seedFiles, torrentReach, unreachableReason, cloudCtx, CLOUD_PROVIDERS, cloudSend, refreshCloudLibrary, cloudRemoveItem, keyRefused, effectiveTrackers, refreshTrackerList, fetchMetadataFallback, verifyTorrentBytes, findInfoSpan, runNetworkCheck, cleanOrphanStores, isComplete, get opfsOk() { return opfsOk; } };
+// Registered once the start is under way: a browser may hand over the files at once.
+if ('launchQueue' in window && typeof window.launchQueue?.setConsumer === 'function') {
+  window.launchQueue.setConsumer(async (params) => {
+    const handles = [...(params?.files || [])];
+    if (!handles.length) return;
+    const files = [];
+    for (const handle of handles) {
+      try { files.push(await handle.getFile()); } catch { /* gone meanwhile */ }
+    }
+    if (!files.length) return;
+    await started.catch(() => {});
+    const label = files.length === 1 ? `the file "${files[0].name}"` : `these ${files.length} .torrent files`;
+    if (confirmExternalAdd(label)) await addTorrentFiles(files);
+  });
+}
+
+// Expose for debugging and tests, under the name the tests have always used (see SETTINGS_KEY).
+window.__phoneTorrent = { editor, seedOptions, routeDrop, createTorrent, hashPieces, get follower() { return follower; }, get settings() { return settings; }, client, views, saver, started, addTorrent, askTrackersNow, seedFiles, torrentReach, unreachableReason, cloudCtx, CLOUD_PROVIDERS, cloudSend, refreshCloudLibrary, cloudRemoveItem, keyRefused, effectiveTrackers, refreshTrackerList, fetchMetadataFallback, verifyTorrentBytes, findInfoSpan, runNetworkCheck, cleanOrphanStores, isComplete, get opfsOk() { return opfsOk; } };

@@ -83,6 +83,7 @@ function waitForActive(reg) {
 
 function onWorkerMessage(event) {
   const data = event.data;
+  // The app's old name, as sw.js asks it: kept, so a worker and a page of different versions still agree.
   if (!data || data.type !== 'phone-torrent:request') return;
   const port = event.ports[0];
   const job = pending.get(data.id);
@@ -172,7 +173,7 @@ function saveViaWorker(item) {
 }
 
 /** What a save that came up short says: never a file cut off, handed over as if it were whole. */
-function endedEarly() {
+export function endedEarly() {
   return new Error('it ended early: the torrent was removed, or another open copy of the app took it over. Save it again');
 }
 

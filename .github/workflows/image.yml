@@ -60,11 +60,11 @@ jobs:
           context: .
           file: server/Dockerfile
           load: true
-          tags: phone-torrent:smoke
+          tags: swarmdeck:smoke
           cache-from: type=gha
       - name: Start it on a root-owned /data, as Fly and Render do
         run: |
-          docker run -d --name smoke --tmpfs /data:mode=0755 -p 8080:8080 phone-torrent:smoke
+          docker run -d --name smoke --tmpfs /data:mode=0755 -p 8080:8080 swarmdeck:smoke
           up=
           for i in $(seq 1 30); do
             if curl -fsS http://127.0.0.1:8080/api/health; then up=1; break; fi
@@ -82,7 +82,7 @@ jobs:
         run: |
           mkdir -p host-media && echo keep > host-media/film.mkv
           before=$(stat -c %u:%g host-media host-media/film.mkv)
-          docker run -d --name bound -v "$PWD/host-media:/data/downloads" phone-torrent:smoke
+          docker run -d --name bound -v "$PWD/host-media:/data/downloads" swarmdeck:smoke
           timeout 30 docker wait bound || true
           docker logs bound > bound.log 2>&1 || true
           cat bound.log
@@ -105,11 +105,11 @@ jobs:
           file: server/Dockerfile
           platforms: linux/arm64
           load: true
-          tags: phone-torrent:arm64
+          tags: swarmdeck:arm64
           cache-from: type=gha
       - name: uTP is in the arm64 image
         run: |
-          docker run --rm --platform linux/arm64 --entrypoint node phone-torrent:arm64 \
+          docker run --rm --platform linux/arm64 --entrypoint node swarmdeck:arm64 \
             -e "require('/app/server/node_modules/utp-native'); console.log('utp-native loads on', process.arch)"
 
   publish:
@@ -135,8 +135,11 @@ jobs:
           file: server/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
+          # The project was called phone-torrent, and a docker-compose.yml fetched then still pulls
+          # that image: it gets each new one too, for a while, rather than stopping where it was.
           tags: |
             ghcr.io/${{ github.repository }}:latest
             ghcr.io/${{ github.repository }}:${{ github.sha }}
+            ghcr.io/${{ github.repository_owner }}/phone-torrent:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max

@@ -1,6 +1,6 @@
 # Optional CORS proxy
 
-Phone Torrent is a static site, so it can only read HTTP resources that allow cross‑origin
+Swarmdeck is a static site, so it can only read HTTP resources that allow cross‑origin
 requests. These need that and usually don't get it from the origin server:
 
 - **Metadata fallback sources** (torrent caches queried by info hash when peers never send the
@@ -29,7 +29,7 @@ The origin check keeps browsers on other sites from using your worker; a scripte
 forge the header, which is why the size cap exists. Keep the worker URL to yourself.
 
 Then in the app open **Settings → Expert → CORS proxy** and enter
-`https://phone-torrent-proxy.<you>.workers.dev/?url={url}`.
+`https://phone-torrent-proxy.<you>.workers.dev/?url={url}` (the Worker keeps the project's old name, so a proxy deployed before still answers at its address).
 
 The proxy only relays what the app asks for. GET and HEAD go anywhere; POST, PUT, DELETE and the
 `Authorization` header — which carries your cloud API key — are accepted only for the hosts in `API_HOSTS`, so a

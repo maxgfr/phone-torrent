@@ -1,4 +1,4 @@
-/* Phone Torrent server: the BitTorrent half a browser cannot do.
+/* Swarmdeck server: the BitTorrent half a browser cannot do.
  *
  * A web page has no TCP, no UDP and no DHT, so a private tracker, an http(s)
  * tracker or a swarm without a WebRTC peer is out of its reach. This is a real
@@ -33,7 +33,7 @@ const WEB_DIR = path.resolve(process.env.WEB_DIR || path.join(HERE, '..'));
 // Unset means same-origin only: the page this server serves needs no CORS at all, and
 // any other site the browser has open gets nothing. Name the origins that may call it.
 // A browser sends only the origin, so an entry pasted as the page's address
-// ("https://<user>.github.io/phone-torrent/") is taken as the origin it names. An entry with
+// ("https://<user>.github.io/swarmdeck/") is taken as the origin it names. An entry with
 // no origin of its own (a file: address has "null") is kept as written, and matches nothing.
 function asOrigin(entry) {
   if (entry === '*') return entry;
@@ -722,7 +722,7 @@ const server = http.createServer((req, res) => {
 await loadState();
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`phone-torrent server on http://0.0.0.0:${server.address().port}`);
+  console.log(`swarmdeck server on http://0.0.0.0:${server.address().port}`);
   // uTP comes from utp-native, a native module that is left out where it has no prebuilt binary
   // and could not be built (WebTorrent then says "uTP not supported"): say what is really on.
   console.log(`BitTorrent on port ${TORRENT_PORT} (${client.utp ? 'TCP and uTP' : 'TCP only: uTP is not available in this build'}), DHT on ${DHT_PORT}/udp`);

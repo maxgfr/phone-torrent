@@ -21,6 +21,8 @@ import { startServer } from './serve.mjs';
 import proxyWorker from '../proxy/cloudflare-worker.js';
 import { bencode, makeTorrent } from './torrents.mjs';
 import { decode as decodeBencode } from '../lib/bencode.js';
+import { createTorrent as makeInfo } from '../lib/torrent-meta.js';
+import { hashInline } from '../lib/torrent-hash.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const TMP = path.join(HERE, '.tmp');
@@ -701,6 +703,96 @@ const browser = BROWSER === 'webkit'
   : await chromium.launch({ executablePath: findChromium(), args: ['--allow-insecure-localhost'] });
 log('browser:', BROWSER);
 
+/**
+ * A context for a test: 900px wide unless it says otherwise. Playwright's own default, 1280px, is the
+ * computer's layout now — the list beside one open torrent — and these tests were written for the one
+ * column, with every card on the page. Its pages also say yes when asked to leave (beforeunload, while
+ * a torrent runs): a reload would otherwise wait on that question for ever. A page's own dialog handler
+ * leaves those to this one; a page without one has every other dialog dismissed, as with no handler.
+ */
+async function context(options = {}) {
+  const ctx = await browser.newContext({ viewport: { width: 900, height: 800 }, ...options });
+  ctx.on('page', (page) => page.on('dialog', (d) => {
+    if (d.type() === 'beforeunload') d.accept().catch(() => {});
+    else if (page.listenerCount('dialog') === 1) d.dismiss().catch(() => {});
+  }));
+  return ctx;
+}
+
+/**
+ * A folder to save into, for showDirectoryPicker to hand over: in memory, with just what the app asks
+ * of one (folders and files made on demand, a writable stream, removal), so the files written can be
+ * read back in any engine. `window.__folderDigests()` gives each file's path and SHA-256.
+ */
+function installMemoryFolder() {
+  const missing = () => new DOMException('not there', 'NotFoundError');
+  const make = (name) => {
+    const dirs = new Map();
+    const files = new Map();
+    return {
+      kind: 'directory',
+      name,
+      async getDirectoryHandle(n, { create = false } = {}) {
+        if (!dirs.has(n)) {
+          if (!create) throw missing();
+          dirs.set(n, make(n));
+        }
+        return dirs.get(n);
+      },
+      async getFileHandle(n, { create = false } = {}) {
+        if (!files.has(n)) {
+          if (!create) throw missing();
+          files.set(n, new Blob([]));
+        }
+        return {
+          kind: 'file',
+          name: n,
+          async getFile() { return new File([files.get(n)], n); },
+          async createWritable() {
+            const chunks = [];
+            return { async write(chunk) { chunks.push(chunk.slice(0)); }, async close() { files.set(n, new Blob(chunks)); }, async abort() {} };
+          },
+        };
+      },
+      async removeEntry(n) { files.delete(n); dirs.delete(n); },
+      async *walk(prefix = '') {
+        for (const [n, blob] of files) yield [`${prefix}${n}`, blob];
+        for (const [n, dir] of dirs) yield* dir.walk(`${prefix}${n}/`);
+      },
+    };
+  };
+  const root = make('Downloads');
+  window.showDirectoryPicker = async () => root;
+  window.__folderDigests = async () => {
+    const out = {};
+    for await (const [p, blob] of root.walk()) {
+      const digest = await crypto.subtle.digest('SHA-256', await blob.arrayBuffer());
+      out[p] = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+    }
+    return out;
+  };
+}
+
+/** The same with a real folder handle, the origin's private file system, where the engine writes there (Chromium). */
+function installOpfsFolder() {
+  const folder = async () => (await navigator.storage.getDirectory()).getDirectoryHandle('saved-in-a-folder', { create: true });
+  window.showDirectoryPicker = folder;
+  window.__folderDigests = async () => {
+    const out = {};
+    const walk = async (dir, prefix) => {
+      for await (const [n, handle] of dir.entries()) {
+        if (handle.kind === 'directory') await walk(handle, `${prefix}${n}/`);
+        else {
+          const digest = await crypto.subtle.digest('SHA-256', await (await handle.getFile()).arrayBuffer());
+          out[`${prefix}${n}`] = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+        }
+      }
+    };
+    await walk(await folder(), '');
+    return out;
+  };
+}
+
 let failed = false;
 try {
   /* ---------- npm start: this machine only, unless asked; and then the app, not the checkout ---------- */
@@ -731,7 +823,7 @@ try {
   /* ---------- the page on a small screen, in both colour schemes, and as the installed iPhone app ---------- */
   {
     const open = async (options, init) => {
-      const ctx = await browser.newContext(options);
+      const ctx = await context(options);
       const page = await ctx.newPage();
       page.on('pageerror', (e) => console.error('layout page error:', e));
       await page.addInitScript(({ t, rtc }) => localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], trackerList: false, rtcConfig: rtc })), { t: trackerUrl, rtc: rtcConfig });
@@ -910,6 +1002,519 @@ try {
     log('the installed iPhone app: Cancel on the save bar in reach, and its status bar legible, light and dark');
   }
 
+  /* ---------- a computer: the list beside the torrent open ---------- */
+  {
+    const settingsFor = ({ t, rtc }) => { if (window === window.top) localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], trackerList: false, rtcConfig: rtc })); };
+    const deskCtx = await context({ viewport: { width: 1280, height: 800 } });
+    const desk = await deskCtx.newPage();
+    desk.on('pageerror', (e) => console.error('desktop page error:', e));
+    desk.on('dialog', (d) => { if (d.type() === 'beforeunload') return; d.accept(d.type() === 'prompt' ? 'Holiday photos' : undefined); });
+    await desk.addInitScript(settingsFor, { t: trackerUrl, rtc: rtcConfig });
+    await desk.goto(site.url);
+    await desk.waitForFunction(() => window.__phoneTorrent?.client);
+    await desk.evaluate(() => window.__phoneTorrent.started);
+    assert.equal(await desk.isVisible('#list-tools'), false, 'no torrents: nothing to search');
+    await desk.click('.tab[data-tab="seed"]');
+    const seeds = [
+      [{ name: 'The.Show.S01E01.mkv', mimeType: 'video/x-matroska', buffer: Buffer.alloc(30000, 1) }],
+      [{ name: 'notes.txt', mimeType: 'text/plain', buffer: Buffer.from('a few words') }],
+      [{ name: 'a.jpg', mimeType: 'image/jpeg', buffer: Buffer.alloc(9000, 2) }, { name: 'b.jpg', mimeType: 'image/jpeg', buffer: Buffer.alloc(9000, 3) }],
+    ];
+    for (const [i, files] of seeds.entries()) {
+      await desk.setInputFiles('#seed-file-input', files);
+      await waitFor(() => desk.$$eval('.tl-row', (rows) => rows.length).then((n) => n === i + 1), { label: `seed ${i + 1} listed`, timeout: 15000 });
+    }
+    const titles = () => desk.$$eval('.tl-row .tl-title', (els) => els.map((e) => e.textContent));
+    await waitFor(async () => (await titles()).join() === 'Holiday photos,notes.txt,The.Show.S01E01.mkv', { label: 'the three seeds named, newest first', timeout: 15000 });
+    // Each seed opened on its link as it was made: the last one is open, and the only card shown.
+    const openCards = () => desk.$$eval('.torrents .torrent', (els) => els.filter((e) => getComputedStyle(e).display !== 'none').map((e) => e.querySelector('.name').textContent));
+    await waitFor(async () => (await openCards()).join() === 'Holiday photos', { label: 'the last seed open beside the list', timeout: 15000 });
+    assert.equal(await desk.$eval('.tl-row.focused .tl-title', (e) => e.textContent), 'Holiday photos', 'and marked in the list');
+    await desk.click('.tl-row:has-text("notes.txt")');
+    assert.deepEqual(await openCards(), ['notes.txt'], 'a row clicked opens its torrent');
+    log('a computer: the list beside one open torrent, the newest on top, a click to open another');
+
+    // The two panes side by side at every common width, nothing scrolling sideways; under 1024px, one
+    // column again, with every card and no list.
+    for (const width of [1024, 1280, 1440, 1920]) {
+      await desk.setViewportSize({ width, height: 800 });
+      const fit = await desk.evaluate(() => {
+        const box = (sel) => document.querySelector(sel).getBoundingClientRect();
+        return {
+          overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+          list: box('#list-pane').right,
+          detail: box('#detail-pane').left,
+          detailRight: box('#detail-pane').right,
+          screen: document.documentElement.clientWidth,
+          rows: [...document.querySelectorAll('.tl-row')].map((r) => r.scrollWidth - r.clientWidth),
+        };
+      });
+      assert.equal(fit.overflow, 0, `${width}px: the page scrolls sideways by ${fit.overflow}px`);
+      assert.ok(fit.list <= fit.detail && fit.detailRight <= fit.screen, `${width}px: the list (to ${fit.list}) and the torrent (${fit.detail}–${fit.detailRight}) side by side on a ${fit.screen}px screen`);
+      for (const view of ['table', 'cards']) {
+        await desk.click(`#view-${view}`);
+        const rows = await desk.$$eval('.tl-row', (els) => els.map((r) => r.scrollWidth - r.clientWidth));
+        assert.ok(rows.every((n) => n <= 0), `${width}px, ${view}: a row wider than the list (${rows})`);
+      }
+    }
+    await desk.setViewportSize({ width: 900, height: 800 });
+    assert.equal(await desk.isVisible('#torrent-list'), false, '900px: no list');
+    assert.equal((await openCards()).length, 3, 'and every card, one under the other');
+    await desk.setViewportSize({ width: 1280, height: 800 });
+    log('the panes fit 1024 to 1920px without scrolling sideways, in cards and in table; one column at 900px');
+
+    // Read at 4.5:1 or more, light and dark: a row's second line, a selected row's, the table's headers.
+    for (const colorScheme of ['light', 'dark']) {
+      await desk.emulateMedia({ colorScheme });
+      await desk.click('#view-cards');
+      const pairs = await desk.evaluate(() => {
+        const style = (el) => getComputedStyle(el);
+        const row = document.querySelector('.tl-row:not(.focused)');
+        const open = document.querySelector('.tl-row.focused');
+        return {
+          'a row\'s second line': [style(row.querySelector('.tl-sub')).color, style(row).backgroundColor === 'rgba(0, 0, 0, 0)' ? style(document.querySelector('.torrent-list')).backgroundColor : style(row).backgroundColor],
+          'the open row\'s second line': [style(open.querySelector('.tl-sub')).color, style(open).backgroundColor],
+        };
+      });
+      await desk.click('#view-table');
+      const head = await desk.evaluate(() => [getComputedStyle(document.querySelector('.tl-head')).color, getComputedStyle(document.querySelector('.tl-head')).backgroundColor]);
+      for (const [what, [text, background]] of Object.entries({ ...pairs, 'the table\'s headers': head })) {
+        const ratio = contrast(text, background);
+        assert.ok(ratio >= 4.5, `${colorScheme}: ${what} is ${text} on ${background}, ${ratio.toFixed(2)}:1`);
+      }
+    }
+    await desk.emulateMedia({ colorScheme: 'light' });
+    log('the list reads at 4.5:1 or more, light and dark, cards and table');
+
+    // Search, filter and order: the list, and the cards on a phone, both follow.
+    await desk.fill('#list-search', 'NOTES');
+    assert.deepEqual(await titles(), ['notes.txt'], 'searched, case ignored');
+    await desk.setViewportSize({ width: 900, height: 800 });
+    assert.deepEqual(await openCards(), ['notes.txt'], 'and the cards on one column too');
+    await desk.setViewportSize({ width: 1280, height: 800 });
+    await desk.fill('#list-search', '');
+    await desk.selectOption('#list-filter', 'paused');
+    assert.deepEqual(await titles(), [], 'nothing paused');
+    assert.match(await desk.textContent('.tl-empty'), /Nothing here matches/, 'and the list says so');
+    await desk.selectOption('#list-filter', 'all');
+    await desk.click('.tl-row:has-text("notes.txt")');
+    await desk.click('.torrent.focused .pause-btn');
+    await desk.selectOption('#list-filter', 'paused');
+    await waitFor(async () => (await titles()).join() === 'notes.txt', { label: 'the paused filter', timeout: 5000 });
+    assert.match(await desk.$eval('#list-filter option[value="paused"]', (o) => o.textContent), /\(1\)/, 'its count');
+    await desk.selectOption('#list-filter', 'seeding');
+    assert.deepEqual((await titles()).sort(), ['Holiday photos', 'The.Show.S01E01.mkv'], 'the others still seeding');
+    await desk.selectOption('#list-filter', 'all');
+    await desk.click('.torrent.focused .pause-btn');
+    await desk.selectOption('#list-sort', 'name');
+    assert.deepEqual(await titles(), ['Holiday photos', 'notes.txt', 'The.Show.S01E01.mkv'], 'by name, A to Z, case ignored');
+    await desk.click('#list-dir');
+    assert.deepEqual(await titles(), ['The.Show.S01E01.mkv', 'notes.txt', 'Holiday photos'], 'and Z to A');
+    await desk.click('#view-table');
+    await desk.click('.tl-head .tl-size .tl-sort');
+    assert.equal(await desk.getAttribute('.tl-head .tl-size', 'aria-sort'), 'descending', 'a header clicked sorts by it, biggest first');
+    assert.equal(await desk.getAttribute('.tl-head .tl-name', 'aria-sort'), 'none', 'and the others say they do not');
+    assert.deepEqual(await titles(), ['The.Show.S01E01.mkv', 'Holiday photos', 'notes.txt'], 'biggest first');
+    await desk.click('.tl-head .tl-size .tl-sort');
+    assert.equal(await desk.getAttribute('.tl-head .tl-size', 'aria-sort'), 'ascending', 'clicked again, the other way');
+    assert.deepEqual(await titles(), ['notes.txt', 'Holiday photos', 'The.Show.S01E01.mkv']);
+    const cardOrder = await desk.evaluate(() => [...document.querySelectorAll('.torrents .torrent')].sort((a, b) => Number(a.style.order) - Number(b.style.order)).map((e) => e.querySelector('.name').textContent));
+    assert.deepEqual(cardOrder, ['notes.txt', 'Holiday photos', 'The.Show.S01E01.mkv'], 'the cards in the same order');
+    log('search, filters with their counts, order and its direction, and sortable headers that say so');
+
+    // Selected, several at once: a click opens one, Shift-click takes every row up to it, Ctrl-click
+    // one more or one less, the boxes the same; the bar acts on all of them.
+    const selected = () => desk.$$eval('.tl-row.selected .tl-title', (els) => els.map((e) => e.textContent));
+    await desk.click('.tl-row:has-text("notes.txt")');
+    await desk.click('.tl-row:has-text("The.Show")', { modifiers: ['Shift'] });
+    assert.deepEqual(await selected(), ['notes.txt', 'Holiday photos', 'The.Show.S01E01.mkv'], 'Shift-click: every row from the one clicked before');
+    assert.equal(await desk.textContent('#bulk-count'), '3 selected');
+    await desk.click('.tl-row:has-text("Holiday")', { modifiers: ['ControlOrMeta'] });
+    assert.deepEqual(await selected(), ['notes.txt', 'The.Show.S01E01.mkv'], 'Ctrl-click: one less');
+    assert.equal(await desk.$eval('.tl-row:has-text("Holiday") input', (e) => e.checked), false, 'its box unticked with it');
+    await desk.click('#bulk-pause');
+    await waitFor(() => desk.evaluate(() => [...window.__phoneTorrent.views.values()].filter((v) => v.torrent.paused).map((v) => v.torrent.name).sort().join()).then((n) => n === 'The.Show.S01E01.mkv,notes.txt'), { label: 'the two selected paused', timeout: 5000 });
+    assert.equal(await desk.isDisabled('#bulk-pause'), true, 'nothing left to pause among them');
+    await desk.click('#bulk-resume');
+    await waitFor(() => desk.evaluate(() => [...window.__phoneTorrent.views.values()].every((v) => !v.torrent.paused)), { label: 'and resumed', timeout: 5000 });
+    await desk.click('.tl-row:has-text("Holiday") input');
+    const [bundle] = await Promise.all([desk.waitForEvent('download'), desk.click('#bulk-save')]);
+    assert.equal(bundle.suggestedFilename(), '3 torrents.zip', 'their .torrent files, in one zip');
+    const zipped = readFileSync(await bundle.path());
+    assert.equal(zipped.subarray(0, 2).toString(), 'PK');
+    for (const name of ['notes.txt.torrent', 'Holiday photos.torrent', 'The.Show.S01E01.mkv.torrent']) assert.ok(zipped.includes(Buffer.from(name)), `${name} in it`);
+    await desk.click('.tl-head .tl-check input');
+    assert.deepEqual(await selected(), [], 'the box in the header: none, as all were');
+    assert.equal(await desk.isVisible('#bulk-bar'), false, 'and the bar goes');
+    log('selection: Shift- and Ctrl-click, the boxes, bulk pause, resume and .torrent files in one zip');
+
+    // Another open copy follows this one: the same rows, and what it does to several is done here.
+    const follower = await deskCtx.newPage();
+    follower.on('pageerror', (e) => console.error('desktop follower page error:', e));
+    await follower.goto(site.url);
+    await follower.waitForFunction(() => window.__phoneTorrent?.follower === true, null, { timeout: 15000 });
+    const followerTitles = () => follower.$$eval('.tl-row .tl-title', (els) => els.map((e) => e.textContent));
+    await waitFor(async () => (await followerTitles()).join() === (await titles()).join(), { label: 'the follower to list the same rows', timeout: 15000 });
+    await follower.click('.tl-row:has-text("notes.txt") input');
+    await follower.click('.tl-row:has-text("Holiday") input');
+    await follower.click('#bulk-pause');
+    await waitFor(() => desk.evaluate(() => [...window.__phoneTorrent.views.values()].filter((v) => v.torrent.paused).map((v) => v.torrent.name).sort().join()).then((n) => n === 'Holiday photos,notes.txt'), { label: 'the follower\'s bulk pause run here', timeout: 10000 });
+    await follower.click('#bulk-resume');
+    await waitFor(() => desk.evaluate(() => [...window.__phoneTorrent.views.values()].every((v) => !v.torrent.paused)), { label: 'and its resume', timeout: 10000 });
+    await follower.close();
+    log('a follower lists the same rows, and its bulk pause and resume run in the copy that leads');
+
+    // Two downloads removed at once: one question for both, and both gone from storage.
+    let asked = 0;
+    desk.on('dialog', (d) => { if (d.type() === 'confirm') asked += 1; });
+    await desk.click('.tab[data-tab="download"]');
+    for (const hash of ['1111111111111111111111111111111111111111', '2222222222222222222222222222222222222222']) {
+      await desk.fill('#magnet-input', `magnet:?xt=urn:btih:${hash}&dn=pending-${hash[0]}`);
+      await desk.click('#magnet-form button[type="submit"]');
+    }
+    const stored = () => desk.evaluate(() => new Promise((resolve, reject) => {
+      const open = indexedDB.open('phone-torrent');
+      open.onerror = () => reject(open.error);
+      open.onsuccess = () => {
+        const all = open.result.transaction('torrents', 'readonly').objectStore('torrents').getAll();
+        all.onsuccess = () => { resolve(all.result.map((r) => r.infoHash).sort()); open.result.close(); };
+      };
+    }));
+    await waitFor(async () => (await stored()).length === 2, { label: 'the two magnets remembered', timeout: 10000 });
+    await desk.click('.tl-row:has-text("pending-1") input');
+    await desk.click('.tl-row:has-text("pending-2") input');
+    await desk.click('#bulk-remove');
+    await waitFor(async () => (await stored()).length === 0, { label: 'both forgotten', timeout: 10000 });
+    assert.equal(asked, 1, 'asked once for the two');
+    await waitFor(() => desk.$$eval('.tl-row', (rows) => rows.length).then((n) => n === 3), { label: 'only they gone from the list', timeout: 5000 });
+    log('two removed at once: one question, both gone from storage');
+
+    // Cards or table, as left: after a reload too. At phone width there is no list to show either way.
+    assert.equal(await desk.$eval('#torrent-list', (e) => e.classList.contains('table')), true);
+    await desk.reload();
+    await desk.waitForFunction(() => window.__phoneTorrent?.client);
+    assert.equal(await desk.$eval('#torrent-list', (e) => e.classList.contains('table')), true, 'the table, after a reload');
+    assert.equal(await desk.getAttribute('#view-table', 'aria-pressed'), 'true');
+    assert.equal(await desk.$eval('#list-sort', (e) => e.value), 'size', 'and the order');
+    await desk.setViewportSize({ width: 390, height: 844 });
+    assert.equal(await desk.$eval('#torrent-list', (e) => getComputedStyle(e).display), 'none', 'at 390px, cards only');
+    await desk.evaluate(() => localStorage.removeItem('phone-torrent:list'));
+    await deskCtx.close();
+    log('cards or table, and the order, kept across a reload; cards at phone width');
+  }
+
+  /* ---------- a computer: dropped anywhere, a folder, pasted, the keyboard, the system ---------- */
+  {
+    const settingsFor = ({ t, rtc, base }) => {
+      if (window !== window.top) return;
+      localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], trackerList: false, rtcConfig: rtc, metadataSources: [], cloud: { provider: 'torbox', apiKey: 'test-api-key', apiBase: base } }));
+    };
+    const waysCtx = await context({ viewport: { width: 1280, height: 800 } });
+    // What the system would hand over: an installed app's file handler, and the magnet registration.
+    await waysCtx.addInitScript(() => {
+      Object.defineProperty(window, 'launchQueue', { configurable: true, value: { setConsumer(fn) { window.__launch = fn; } } });
+      navigator.registerProtocolHandler = (scheme, url) => { window.__registered = [scheme, url]; };
+    });
+    const ways = await waysCtx.newPage();
+    ways.on('pageerror', (e) => console.error('ways page error:', e));
+    const asked = [];
+    let answer = true;
+    ways.on('dialog', (d) => {
+      if (d.type() === 'beforeunload') return;
+      asked.push(d.message());
+      if (answer) d.accept(d.type() === 'prompt' ? 'Loose files' : undefined);
+      else d.dismiss();
+    });
+    await ways.addInitScript(settingsFor, { t: trackerUrl, rtc: rtcConfig, base: cloudApi.url });
+    await ways.goto(site.url);
+    await ways.waitForFunction(() => window.__phoneTorrent?.client);
+    await ways.evaluate(() => window.__phoneTorrent.started);
+    const rows = () => ways.$$eval('.tl-row .tl-title', (els) => els.map((e) => e.textContent));
+    const url = ways.url();
+
+    // A drag over any part of the page shows what letting go will do on the tab open; a .torrent let
+    // go of beside the card at the top, where the browser opened it before, is added.
+    const dropped = makeTorrent(Buffer.alloc(3000, 7), { name: 'dropped beside.bin', trackers: [trackerUrl] });
+    const drag = (type, files, at = '#detail-pane') => ways.evaluate(({ type, files, at }) => {
+      const dt = new DataTransfer();
+      for (const f of files) dt.items.add(new File([new Uint8Array(f.bytes)], f.name));
+      return document.querySelector(at).dispatchEvent(new DragEvent(type, { dataTransfer: dt, bubbles: true, cancelable: true }));
+    }, { type, files: files.map((f) => ({ name: f.name, bytes: [...f.bytes] })), at });
+    assert.equal(await drag('dragover', [{ name: 'x.torrent', bytes: dropped.buf }]), false, 'a drag of files over the page is taken');
+    assert.equal(await ways.isVisible('#drop-overlay'), true, 'and the window says so');
+    assert.match(await ways.textContent('#drop-overlay'), /download/i, 'what for, on the Download tab');
+    await ways.click('.tab[data-tab="seed"]');
+    await drag('dragover', [{ name: 'x.torrent', bytes: dropped.buf }]);
+    assert.match(await ways.textContent('#drop-overlay'), /share/i, 'and on Seed & share');
+    await ways.click('.tab[data-tab="download"]');
+    await drag('drop', [{ name: 'dropped beside.torrent', bytes: dropped.buf }]);
+    await waitFor(async () => (await rows()).includes('dropped beside.bin'), { label: 'a .torrent dropped outside the card added', timeout: 10000 });
+    assert.equal(ways.url(), url, 'and the app is still there');
+    assert.equal(await ways.isVisible('#drop-overlay'), false, 'the overlay gone with the drop');
+    log('a drag shows what a drop does on the tab open; a .torrent dropped off the card is added, the app still there');
+
+    // A file that is not a .torrent, dropped on Download, is shared only once that is said yes to.
+    answer = false;
+    await drag('drop', [{ name: 'holiday.jpg', bytes: Buffer.alloc(2000, 4) }]);
+    await waitFor(() => asked.length === 1, { label: 'the question about a file that is not a .torrent', timeout: 5000 });
+    assert.match(asked[0], /"holiday\.jpg" is not a \.torrent file\. Share it/);
+    await ways.waitForTimeout(500);
+    assert.equal((await rows()).includes('holiday.jpg'), false, 'said no: not shared');
+    answer = true;
+    await drag('drop', [{ name: 'holiday.jpg', bytes: Buffer.alloc(2000, 4) }]);
+    await waitFor(async () => (await rows()).includes('holiday.jpg'), { label: 'said yes: shared', timeout: 10000 });
+    assert.equal(await ways.$eval('.tab.active', (t) => t.dataset.tab), 'seed', 'from the Seed & share tab');
+    log('a file that is not a .torrent, dropped on Download: asked first, shared only on yes');
+
+    // On the Cloud tab a .torrent goes to the cloud account; anything else is refused, and why is said.
+    const polls = cloudApi.state.polls;
+    cloudApi.state.submitted = null;
+    await ways.click('.tab[data-tab="cloud"]');
+    await drag('drop', [{ name: 'for the cloud.torrent', bytes: makeTorrent(Buffer.alloc(1000, 9), { name: 'dropped for the cloud' }).buf }]);
+    await waitFor(() => Boolean(cloudApi.state.submitted?.includes('dropped for the cloud')), { label: 'a .torrent dropped on Cloud sent to TorBox', timeout: 10000 });
+    await drag('drop', [{ name: 'notes.txt', bytes: Buffer.from('not a torrent') }]);
+    await waitFor(() => ways.$$eval('.toast', (els) => els.some((e) => /"notes\.txt" is not a \.torrent file: the cloud fetches torrents/.test(e.textContent))), { label: 'a file refused by the cloud, and why', timeout: 5000 });
+    cloudApi.state.polls = polls;
+    log('dropped on Cloud: a .torrent sent to the account, any other file refused with the reason');
+
+    // A folder, shared as itself: the torrent made here is the one Node makes of the same files, and so
+    // is the one a follower hands over, the paths crossing with the files.
+    const tree = [['Photos/a.jpg', 1, 4000], ['Photos/b.jpg', 2, 7000], ['Photos/2024/c.jpg', 3, 50000]];
+    const nodeFiles = tree.map(([p, fill, n]) => Object.defineProperty(new File([Buffer.alloc(n, fill)], p.split('/').pop()), 'fullPath', { value: p }));
+    const expected = (await makeInfo(nodeFiles, { hash: hashInline })).infoHash;
+    const seedFolder = (page) => page.evaluate(async (tree) => {
+      const files = tree.map(([p, fill, n]) => Object.defineProperty(new File([new Uint8Array(n).fill(fill)], p.split('/').pop()), 'fullPath', { value: p }));
+      document.querySelector('.tab[data-tab="seed"]').click();
+      await window.__phoneTorrent.routeDrop({ files });
+    }, tree);
+    const infoHashOf = (name) => ways.evaluate((name) => [...window.__phoneTorrent.views.keys()].find((t) => t.name === name && t.infoHash)?.infoHash || '', name);
+    const before = asked.length;
+    await seedFolder(ways);
+    await waitFor(async () => (await infoHashOf('Photos')) === expected, { label: 'the folder seeded with the info hash Node makes', timeout: 15000 });
+    assert.equal(asked.length, before, 'a folder is named after itself: nothing asked');
+    const removeFolderSeed = async () => {
+      await ways.evaluate(() => { for (const [t, v] of window.__phoneTorrent.views) if (t.name === 'Photos') v.el.querySelector('.remove-btn').click(); });
+      await waitFor(async () => !(await infoHashOf('Photos')), { label: 'the folder seed removed', timeout: 10000 });
+    };
+    await removeFolderSeed();
+    if (BROWSER === 'chromium') {
+      // The folder picker itself, where Playwright can hand it a folder. The browser lists the folder in
+      // an order of its own, which is the order in the torrent: Node is given the same.
+      const dir = path.join(TMP, 'picked-folder');
+      for (const [p, fill, n] of tree) {
+        mkdirSync(path.dirname(path.join(dir, p)), { recursive: true });
+        writeFileSync(path.join(dir, p), Buffer.alloc(n, fill));
+      }
+      await ways.click('.tab[data-tab="seed"]');
+      assert.equal(await ways.isVisible('#seed-folder-btn'), true, 'Pick a folder, where the browser can');
+      await ways.evaluate(() => document.querySelector('#seed-folder-input').addEventListener('change', (e) => {
+        window.__picked = [...e.target.files].map((f) => f.webkitRelativePath);
+      }, { capture: true, once: true }));
+      const asksBefore = asked.length;
+      await ways.setInputFiles('#seed-folder-input', path.join(dir, 'Photos'));
+      const order = await ways.evaluate(() => window.__picked);
+      const inOrder = order.map((p) => nodeFiles.find((f) => f.fullPath === p));
+      assert.equal(inOrder.every(Boolean), true, `the picked files are the folder's (${order})`);
+      const pickedHash = (await makeInfo(inOrder, { hash: hashInline })).infoHash;
+      await waitFor(async () => (await infoHashOf('Photos')) === pickedHash, { label: 'the folder picked, seeded with the info hash Node makes', timeout: 15000 });
+      assert.equal(asked.length, asksBefore, 'and named after itself');
+      await removeFolderSeed();
+    }
+    const helper = await waysCtx.newPage();
+    helper.on('pageerror', (e) => console.error('ways follower page error:', e));
+    await helper.goto(site.url);
+    await helper.waitForFunction(() => window.__phoneTorrent?.follower === true, null, { timeout: 15000 });
+    // What this window shows is its own: a seed started in the other one does not change its filter.
+    await ways.selectOption('#list-filter', 'paused');
+    await seedFolder(helper);
+    await waitFor(async () => (await infoHashOf('Photos')) === expected, { label: 'the folder from a follower seeded, the same info hash', timeout: 15000 });
+    await waitFor(() => helper.$$eval('.torrent .share-panel:not([hidden])', (els) => els.length > 0), { label: 'its link shown in the follower that picked it', timeout: 15000 });
+    assert.equal(await ways.$eval('#list-filter', (e) => e.value), 'paused', 'the leading window keeps its filter');
+    await ways.selectOption('#list-filter', 'all');
+    await helper.close();
+    log('a folder shared as itself, from the page and from a follower: the info hash Node makes of the same files');
+
+    // Ctrl+V or Cmd+V on the page, out of any field: what was copied goes where a drop would, unasked.
+    await ways.click('.tab[data-tab="download"]');
+    const pasted = await ways.evaluate(() => {
+      const dt = new DataTransfer();
+      dt.setData('text/plain', 'Have a look: magnet:?xt=urn:btih:4444444444444444444444444444444444444444&dn=pasted');
+      const event = new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true });
+      document.body.dispatchEvent(event);
+      return Boolean(event.clipboardData);
+    });
+    if (pasted) {
+      await waitFor(async () => (await rows()).includes('pasted'), { label: 'a magnet pasted on the page added', timeout: 5000 });
+      log('a magnet pasted on the page, out of any field, added without a question');
+    } else {
+      log('paste: skipped, this engine makes no clipboard event with data');
+    }
+    const typedInField = await ways.evaluate(() => {
+      const dt = new DataTransfer();
+      dt.setData('text/plain', 'magnet:?xt=urn:btih:5555555555555555555555555555555555555555&dn=into-field');
+      const field = document.querySelector('#magnet-input');
+      const event = new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true });
+      field.dispatchEvent(event);
+      return event.defaultPrevented;
+    });
+    assert.equal(typedInField, false, 'pasted into a field, it is the field\'s');
+
+    // The keyboard.
+    await ways.click('.tl-row:has-text("dropped beside")');
+    await ways.keyboard.press('/');
+    assert.equal(await ways.evaluate(() => document.activeElement.id), 'list-search', '/ goes to the search');
+    await ways.keyboard.type('holi');
+    assert.deepEqual(await rows(), ['holiday.jpg']);
+    await ways.keyboard.press('Escape');
+    assert.equal(await ways.$eval('#list-search', (e) => e.value), '', 'Escape empties it');
+    assert.ok((await rows()).length > 1);
+    const listed = await rows();
+    await ways.click('.tl-row >> nth=0');
+    await ways.keyboard.press('ArrowDown');
+    const openTitle = () => ways.$eval('.tl-row.focused .tl-title', (e) => e.textContent);
+    assert.equal(await openTitle(), listed[1], '↓ opens the next one');
+    assert.equal(await ways.evaluate(() => document.activeElement.classList.contains('tl-row')), true, 'with the focus on its row');
+    await ways.keyboard.press('Shift+ArrowUp');
+    assert.equal(await ways.$$eval('.tl-row.selected', (r) => r.length), 2, 'Shift+↑ selects as it goes');
+    await ways.keyboard.press('Home');
+    assert.equal(await openTitle(), listed[0], 'Home: the first');
+    await ways.keyboard.press('End');
+    assert.equal(await openTitle(), listed[listed.length - 1], 'End: the last');
+    await ways.keyboard.press('ControlOrMeta+a');
+    assert.equal(await ways.$$eval('.tl-row.selected', (r) => r.length), listed.length, 'Ctrl+A or Cmd+A: every torrent listed');
+    await ways.keyboard.press('Space');
+    await waitFor(() => ways.evaluate(() => [...window.__phoneTorrent.views.keys()].every((t) => t.paused)), { label: 'Space pausing the selection', timeout: 5000 });
+    await ways.keyboard.press('Space');
+    await waitFor(() => ways.evaluate(() => [...window.__phoneTorrent.views.keys()].every((t) => !t.paused)), { label: 'and resuming it', timeout: 5000 });
+    await ways.keyboard.press('Escape');
+    assert.equal(await ways.$$eval('.tl-row.selected', (r) => r.length), 0, 'Escape: the selection emptied');
+    await ways.click('.tl-row:has-text("holiday.jpg")');
+    const asks = asked.length;
+    await ways.keyboard.press('Delete');
+    await waitFor(async () => !(await rows()).includes('holiday.jpg'), { label: 'Delete removing the one open', timeout: 5000 });
+    assert.equal(asked.length, asks + 1, 'asked first');
+    await ways.keyboard.press('?');
+    assert.equal(await ways.isVisible('#keys-dialog'), true, '? lists the keys');
+    await ways.keyboard.press('/');
+    assert.equal(await ways.evaluate(() => document.activeElement.id === 'list-search'), false, 'and the keys stay the dialog\'s meanwhile');
+    await ways.keyboard.press('Escape');
+    assert.equal(await ways.isVisible('#keys-dialog'), false);
+    // The list's keys are the list's: not a control's that has the focus, nor the page's own scrolling.
+    const pausedNow = () => ways.evaluate(() => [...window.__phoneTorrent.views.keys()].filter((t) => t.paused).length);
+    await ways.click('.tl-row >> nth=0');
+    await ways.click('.tl-row >> nth=0 >> input');
+    await ways.keyboard.press('ArrowDown');
+    assert.equal(await openTitle(), (await rows())[1], 'a row\'s box clicked, ↓ still moves in the list');
+    await ways.keyboard.press('Escape');
+    await ways.evaluate(() => document.activeElement.blur());
+    await ways.keyboard.press('Space');
+    assert.equal(await pausedNow(), 0, 'Space on the page, nothing selected: the page scrolls, nothing is paused');
+    await ways.click('#view-table');
+    await ways.focus('.tl-head .tl-name .tl-sort');
+    await ways.keyboard.press('Space');
+    assert.equal(await ways.$eval('#list-sort', (e) => e.value), 'name', 'Space on a column header sorts by it');
+    assert.equal(await pausedNow(), 0, 'and pauses nothing');
+    await ways.click('#view-cards');
+    const player = await ways.evaluate(() => {
+      const video = Object.assign(document.createElement('video'), { controls: true, tabIndex: 0, id: 'a-player' });
+      document.querySelector('#cloud-library').before(video);
+      video.focus();
+      return document.activeElement === video;
+    });
+    if (player) {
+      for (const key of ['Space', 'ArrowDown', 'End']) {
+        const taken = await ways.evaluate((key) => {
+          const event = new KeyboardEvent('keydown', { key: key === 'Space' ? ' ' : key, bubbles: true, cancelable: true });
+          document.querySelector('#a-player').dispatchEvent(event);
+          return event.defaultPrevented;
+        }, key);
+        assert.equal(taken, false, `${key} on a video player is the player's`);
+      }
+      assert.equal(await pausedNow(), 0);
+    }
+    await ways.evaluate(() => document.querySelector('#a-player')?.remove());
+
+    // The tabs: one in the way of the Tab key, the arrows for the rest.
+    await ways.focus('.tab.active');
+    await ways.keyboard.press('ArrowRight');
+    assert.equal(await ways.evaluate(() => document.activeElement.dataset.tab), 'seed', '→ on the tabs: the next one');
+    assert.equal(await ways.$eval('#tab-seed', (p) => p.hidden), false, 'and its panel');
+    assert.deepEqual(await ways.$$eval('.tabs .tab', (tabs) => tabs.map((t) => t.tabIndex)), [-1, 0, -1, -1]);
+    assert.equal(await ways.getAttribute('.tab[data-tab="seed"]', 'aria-controls'), 'tab-seed');
+    log('keys: / and Escape for the search, ↑ ↓ Home End and Shift in the list, Ctrl+A, Space, Delete, ?, and the arrows on the tabs');
+
+    // The editor's ⋯ menu closes as a menu does: Escape closes it and not the editor; so does a click away.
+    await ways.evaluate(() => { for (const [t, v] of window.__phoneTorrent.views) if (t.name === 'dropped beside.bin') v.el.querySelector('.share-edit-btn').click(); });
+    await ways.waitForSelector('#editor-dialog[open]');
+    await ways.click('#ed-menu summary');
+    assert.equal(await ways.$eval('#ed-menu', (m) => m.open), true);
+    await ways.keyboard.press('Escape');
+    assert.equal(await ways.$eval('#ed-menu', (m) => m.open), false, 'Escape closes the menu');
+    assert.equal(await ways.isVisible('#editor-dialog'), true, 'and leaves the editor open');
+    await ways.click('#ed-menu summary');
+    await ways.click('#editor-title');
+    assert.equal(await ways.$eval('#ed-menu', (m) => m.open), false, 'a click elsewhere closes it too');
+    await ways.keyboard.press('Escape');
+    assert.equal(await ways.isVisible('#editor-dialog'), false, 'and Escape then closes the editor');
+    log('the editor\'s ⋯ menu: Escape closes it alone, a click away closes it');
+
+    // Leaving: asked while this copy runs something unpaused, and only then.
+    const leaving = (page) => page.evaluate(() => !window.dispatchEvent(new Event('beforeunload', { cancelable: true })));
+    await ways.waitForTimeout(1000);
+    assert.equal(await leaving(ways), true, 'seeding here: the browser asks before closing');
+    await ways.evaluate(() => { for (const t of window.__phoneTorrent.views.keys()) if (!t.paused) t.pause(); });
+    await ways.waitForTimeout(1000);
+    assert.equal(await leaving(ways), false, 'everything paused: nothing to ask');
+    await ways.evaluate(() => { for (const t of window.__phoneTorrent.views.keys()) t.resume(); });
+    await ways.waitForTimeout(1000);
+    assert.equal(await leaving(ways), true, 'running again: asked again');
+    const second = await waysCtx.newPage();
+    await second.goto(site.url);
+    await second.waitForFunction(() => window.__phoneTorrent?.follower === true, null, { timeout: 15000 });
+    await second.waitForTimeout(1000);
+    assert.equal(await leaving(second), false, 'a copy that follows runs nothing: it does not ask');
+    await waitFor(() => leaving(ways).then((asks) => !asks), { label: 'the leading copy, with another waiting to take over, no longer asking', timeout: 5000 });
+    await second.close();
+    log('closing asks only while this copy runs something unpaused and no other copy waits to take over');
+
+    // Opened by the system: a .torrent from the file handler, asked first; and magnet links registered.
+    const launched = makeTorrent(Buffer.alloc(2500, 5), { name: 'opened from the desktop.bin', trackers: [trackerUrl] });
+    const asksBefore = asked.length;
+    await ways.evaluate((bytes) => window.__launch({ files: [{ getFile: async () => new File([new Uint8Array(bytes)], 'opened.torrent') }] }), [...launched.buf]);
+    await waitFor(async () => (await rows()).includes('opened from the desktop.bin'), { label: 'a .torrent opened from the system added', timeout: 10000 });
+    assert.match(asked[asksBefore], /Add the file "opened\.torrent" to Swarmdeck/, 'once it was said yes to');
+    await ways.click('#settings-btn');
+    await ways.waitForSelector('#magnet-handler-btn', { state: 'visible', timeout: 5000 }); // Settings offers to open magnet links here
+    await ways.click('#magnet-handler-btn');
+    const registered = await ways.evaluate(() => window.__registered);
+    assert.equal(registered[0], 'magnet');
+    assert.equal(registered[1], `${site.url}?magnet=%s`, 'to this page, which takes ?magnet=');
+    await ways.click('#settings-dialog button[value="cancel"]');
+    log('a .torrent opened from the system asked about then added; magnet links registered from Settings');
+
+    // The manifest names the app, opens .torrent files and leaves the orientation free; the offline shell
+    // has every module the app imports.
+    const manifest = JSON.parse(readFileSync(path.join(HERE, '..', 'manifest.webmanifest'), 'utf8'));
+    assert.equal(manifest.name, 'Swarmdeck');
+    assert.equal('orientation' in manifest, false, 'no orientation: a computer is landscape');
+    assert.deepEqual(manifest.file_handlers?.[0]?.accept, { 'application/x-bittorrent': ['.torrent'] }, '.torrent files open with it');
+    const shell = readFileSync(path.join(HERE, '..', 'sw.js'), 'utf8').match(/const SHELL_FILES = \[([\s\S]*?)\];/)[1];
+    const cached = new Set([...shell.matchAll(/'\.\/([^']+)'/g)].map((m) => m[1]));
+    const seen = new Set();
+    const walk = (file) => {
+      if (seen.has(file)) return;
+      seen.add(file);
+      assert.ok(cached.has(file), `sw.js caches ${file} for the app offline`);
+      const source = readFileSync(path.join(HERE, '..', file), 'utf8');
+      for (const [, spec] of source.matchAll(/^\s*import\s[^'"]*['"](\.{1,2}\/[^'"]+)['"]/gm)) walk(path.posix.normalize(path.posix.join(path.posix.dirname(file), spec)));
+      for (const [, spec] of source.matchAll(/new Worker\(new URL\(['"](\.{1,2}\/[^'"]+)['"]/g)) walk(path.posix.normalize(path.posix.join(path.posix.dirname(file), spec)));
+    };
+    walk('app.js');
+    assert.ok(seen.has('lib/drop.js') && seen.has('lib/torrent-list.js'));
+    log(`the manifest: Swarmdeck, .torrent files, any orientation; the offline shell has all ${seen.size} modules`);
+    await waysCtx.close();
+  }
+
   /* ---------- the .torrent editor ---------- */
   // Its own page, no service worker (route() must see every request, in WebKit too), so saves are
   // ordinary downloads: what the editor saved is read back here, and its info hash worked out again.
@@ -925,7 +1530,7 @@ try {
       const [start, end] = spans.get('info');
       return createHash('sha1').update(buf.subarray(start, end)).digest('hex');
     };
-    const edCtx = await browser.newContext({ acceptDownloads: true, serviceWorkers: 'block', viewport: { width: 320, height: 640 }, isMobile: true, hasTouch: true });
+    const edCtx = await context({ acceptDownloads: true, serviceWorkers: 'block', viewport: { width: 320, height: 640 }, isMobile: true, hasTouch: true });
     let publicFetches = 0;
     await edCtx.route('https://newtrackon.com/api/stable', (route) => {
       publicFetches += 1;
@@ -1269,7 +1874,7 @@ try {
     // The top frame only: an init script runs in every frame, the saver's download frame included, and
     // writing the settings from there is another copy saving them — which this page now follows.
     const settingsFor = ({ t, rtc }) => { if (window === window.top) localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], trackerList: false, rtcConfig: rtc })); };
-    const makerCtx = await browser.newContext({ acceptDownloads: true });
+    const makerCtx = await context({ acceptDownloads: true });
     const maker = await makerCtx.newPage();
     maker.on('pageerror', (e) => console.error('maker page error:', e));
     await maker.addInitScript(settingsFor, { t: trackerUrl, rtc: rtcConfig });
@@ -1312,7 +1917,7 @@ try {
     assert.equal(await maker.evaluate(() => JSON.parse(localStorage.getItem('phone-torrent:settings')).createOptions.source), 'MADE-HERE', 'the options kept for next time');
 
     // A second page downloads it from the .torrent saved.
-    const takerCtx = await browser.newContext();
+    const takerCtx = await context();
     const taker = await takerCtx.newPage();
     taker.on('pageerror', (e) => console.error('taker page error:', e));
     await taker.addInitScript(settingsFor, { t: trackerUrl, rtc: rtcConfig });
@@ -1334,10 +1939,10 @@ try {
 
     // A seed removed while its files are being hashed stops being hashed: on a phone, gigabytes of it
     // were minutes of battery for nothing. Hashed on the page here, and held, so the test sees it.
-    const stopCtx = await browser.newContext();
+    const stopCtx = await context();
     const stopper = await stopCtx.newPage();
     stopper.on('pageerror', (e) => console.error('stopper page error:', e));
-    stopper.on('dialog', (d) => d.accept());
+    stopper.on('dialog', (d) => { if (d.type() === 'beforeunload') return; d.accept(); });
     await stopper.addInitScript(({ t }) => {
       if (window !== window.top) return;
       localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], trackerList: false }));
@@ -1374,7 +1979,7 @@ try {
   }
 
   /* ---------- seeder ---------- */
-  const seederCtx = await browser.newContext();
+  const seederCtx = await context();
   const seeder = await seederCtx.newPage();
   seeder.on('pageerror', (e) => console.error('seeder page error:', e));
   // trackerList off, as for every page here: the suite's content is fixed, so is its info hash, and
@@ -1409,12 +2014,12 @@ try {
   // Seed through the real UI: "Seed & share" tab, pick files, name the collection. Cancel on the
   // name is a cancel: it used to seed all the same, named after the first file.
   await seeder.click('.tab[data-tab="seed"]');
-  seeder.once('dialog', (d) => d.dismiss());
+  seeder.once('dialog', (d) => { if (d.type() === 'beforeunload') return; d.dismiss(); });
   await seeder.setInputFiles('#seed-file-input', files.map((f, i) => ({ name: f.name, mimeType: 'application/octet-stream', buffer: seedBuffers[i] })));
   await new Promise((r) => setTimeout(r, 1000));
   assert.equal(await seeder.evaluate(() => window.__phoneTorrent.client.torrents.length), 0, 'a cancelled name seeds nothing');
   assert.equal((await seeder.$$('.torrent')).length, 0);
-  seeder.once('dialog', (d) => d.accept('Phone Torrent Test'));
+  seeder.once('dialog', (d) => { if (d.type() === 'beforeunload') return; d.accept('Swarmdeck Test'); });
   await seeder.setInputFiles('#seed-file-input', files.map((f, i) => ({ name: f.name, mimeType: 'application/octet-stream', buffer: seedBuffers[i] })));
   await seeder.waitForSelector('.torrent.seeding .file', { timeout: 30000 });
   await waitFor(() => seeder.evaluate(() => window.__phoneTorrent.client.torrents[0]?.ready), { label: 'seeder ready' });
@@ -1464,7 +2069,7 @@ try {
 
   const torrentFile = await seeder.evaluate(() => Array.from(window.__phoneTorrent.client.torrents[0].torrentFile));
   assert.deepEqual(await seeder.evaluate(() => window.__phoneTorrent.client.torrents[0].announce), [trackerUrl], 'the seeded torrent names only the local tracker: the suite stays on this machine');
-  assert.equal(await seeder.$eval('.torrent .name', (e) => e.textContent), 'Phone Torrent Test');
+  assert.equal(await seeder.$eval('.torrent .name', (e) => e.textContent), 'Swarmdeck Test');
   // A seed is there to be shared: once it is ready, its card shows the link, selected, not the details.
   await seeder.waitForSelector('.torrent .share-panel:not([hidden])', { timeout: 10000 });
   assert.ok(await seeder.evaluate(() => document.activeElement?.classList.contains('share-app-link')), 'the seed opens on its link, selected');
@@ -1519,7 +2124,7 @@ try {
   log('seeding', files.map((f) => `${f.name} (${f.size} B)`).join(', '));
 
   /* ---------- downloader ("the phone") ---------- */
-  const phoneCtx = await browser.newContext({
+  const phoneCtx = await context({
     acceptDownloads: true,
     viewport: { width: 390, height: 844 },
     isMobile: true,
@@ -1528,7 +2133,7 @@ try {
   const phone = await phoneCtx.newPage();
   phone.on('pageerror', (e) => console.error('phone page error:', e));
   let dialogs = 0;
-  phone.on('dialog', (d) => { dialogs++; d.accept(); });
+  phone.on('dialog', (d) => { if (d.type() === 'beforeunload') return; dialogs++; d.accept(); });
   // The phone only knows a dead tracker; the real one must come from the fetched tracker list
   // (the qBittorrent-style "automatically add trackers" feature).
   // The public list writes the default port where a user's list does not: the same tracker twice.
@@ -1561,7 +2166,7 @@ try {
   // field: a list that was the old defaults becomes today's, any other loses only the dead entries,
   // and a metadata cache that moved is followed, one that serves no .torrent any more dropped.
   {
-    const oldCtx = await browser.newContext();
+    const oldCtx = await context();
     const retired = ['wss://tracker.btorrent.xyz', 'wss://tracker.files.fm:7073/announce'];
     const oldDefaults = ['wss://tracker.openwebtorrent.com', retired[0], 'wss://tracker.webtorrent.dev', retired[1]];
     const oldSources = ['https://itorrents.org/torrent/{INFOHASH}.torrent', 'https://torrage.info/torrent.php?h={INFOHASH}'];
@@ -1780,7 +2385,7 @@ try {
     phone.waitForEvent('download', { timeout: 30000 }),
     phone.click('.torrent .save-torrent-btn'),
   ]);
-  assert.equal(torrentDl.suggestedFilename(), 'Phone Torrent Test.torrent');
+  assert.equal(torrentDl.suggestedFilename(), 'Swarmdeck Test.torrent');
   const torrentDlPath = path.join(TMP, 'saved.torrent');
   await torrentDl.saveAs(torrentDlPath);
   const phoneTorrentFile = await phone.evaluate(() => Array.from(window.__phoneTorrent.client.torrents[0].torrentFile));
@@ -1818,14 +2423,37 @@ try {
   ]);
   const zipPath = path.join(TMP, 'all.zip');
   await zipDownload.saveAs(zipPath);
-  assert.equal(zipDownload.suggestedFilename(), 'Phone Torrent Test.zip');
+  assert.equal(zipDownload.suggestedFilename(), 'Swarmdeck Test.zip');
   const extractDir = path.join(TMP, 'unzipped');
   execFileSync('unzip', ['-q', zipPath, '-d', extractDir]);
   for (const f of files) {
-    const buf = readFileSync(path.join(extractDir, 'Phone Torrent Test', f.name));
+    const buf = readFileSync(path.join(extractDir, 'Swarmdeck Test', f.name));
     assert.equal(sha(buf), f.sha, `zip entry ${f.name} matches`);
   }
   log('zip save OK:', zipDownload.suggestedFilename());
+
+  // Or straight into a folder, as in the torrent, where the browser can write into one (Chrome and
+  // Edge on a computer); no button where it cannot.
+  assert.equal(await phone.$eval('.torrent .folder-btn', (b) => b.hidden), BROWSER === 'webkit', `Save to a folder ${BROWSER === 'webkit' ? 'hidden: this engine cannot write into a folder' : 'offered'}`);
+  const savedInFolder = async (label) => {
+    const before = await phone.$$eval('.toast', (els) => els.filter((e) => /in "(Downloads|saved-in-a-folder)"/.test(e.textContent)).length);
+    await phone.click('.torrent .folder-btn');
+    await waitFor(() => phone.$$eval('.toast', (els) => els.filter((e) => /Saved 2 files in "(Downloads|saved-in-a-folder)"/.test(e.textContent)).length).then((n) => n > before), { label, timeout: 30000 });
+    const digests = await phone.evaluate(() => window.__folderDigests());
+    assert.deepEqual(Object.keys(digests).sort(), files.map((f) => `Swarmdeck Test/${f.name}`).sort(), `${label}: the torrent's folder, and its files in it`);
+    for (const f of files) assert.equal(digests[`Swarmdeck Test/${f.name}`], f.sha, `${label}: ${f.name} matches`);
+  };
+  await phone.evaluate(installMemoryFolder);
+  await phone.waitForSelector('.torrent .folder-btn:not([hidden]):not([disabled])', { timeout: 5000 });
+  await savedInFolder('saved into a folder');
+  const dialogsBeforeAgain = dialogs;
+  await savedInFolder('saved into it again');
+  assert.equal(dialogs, dialogsBeforeAgain + 1, 'asked first, files being there already');
+  if (BROWSER === 'chromium') {
+    await phone.evaluate(installOpfsFolder);
+    await savedInFolder('saved into a real folder handle');
+  }
+  log(`save to a folder: the torrent's tree and every byte, asked before replacing${BROWSER === 'chromium' ? ', through a real handle too' : ''}`);
 
   // A save lasts as long as the file takes to hand over — seconds to minutes on a phone — and the
   // list is redrawn every 750 ms meanwhile. Neither button may be offered again before its save is
@@ -1954,14 +2582,14 @@ try {
 
   /* ---------- Web Share Target: a .torrent shared to the installed app ---------- */
   await phone.setContent(`<form id="f" method="POST" enctype="multipart/form-data" action="${site.url}share">
-    <input type="file" name="torrents" id="file"><input name="title" value="Phone Torrent Test"></form>`);
+    <input type="file" name="torrents" id="file"><input name="title" value="Swarmdeck Test"></form>`);
   await phone.setInputFiles('#file', { name: 'shared.torrent', mimeType: 'application/x-bittorrent', buffer: Buffer.from(torrentFile) });
   const dialogsBeforeShare = dialogs;
   await Promise.all([phone.waitForNavigation(), phone.evaluate(() => document.getElementById('f').submit())]);
   assert.equal(new URL(phone.url()).pathname, new URL(site.url).pathname, 'share target redirects back to the app');
   await phone.waitForSelector('.torrent .file', { timeout: 15000 });
   assert.ok(dialogs > dialogsBeforeShare, 'shared torrent asked for confirmation before being added');
-  assert.equal(await phone.$eval('.torrent .name', (e) => e.textContent), 'Phone Torrent Test');
+  assert.equal(await phone.$eval('.torrent .name', (e) => e.textContent), 'Swarmdeck Test');
   await waitForFromSeeder(() => phone.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 'shared torrent download', timeout: 180000 });
   log('share target OK');
 
@@ -2096,7 +2724,7 @@ try {
     return { hasMetadata: Boolean(t.metadata), name: t.name, sourceType: r?.source?.type, peers: t.numPeers };
   });
   assert.deepEqual({ hasMetadata: magnetRestore.hasMetadata, name: magnetRestore.name, sourceType: magnetRestore.sourceType },
-    { hasMetadata: true, name: 'Phone Torrent Test', sourceType: 'magnet' }, 'magnet torrent restored from its stored metadata without peers');
+    { hasMetadata: true, name: 'Swarmdeck Test', sourceType: 'magnet' }, 'magnet torrent restored from its stored metadata without peers');
   if (opfs) {
     await waitFor(() => phone.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 'magnet torrent verified from disk', timeout: 30000 });
     assert.ok(await phone.evaluate(() => window.__phoneTorrent.client.torrents[0].received) < BLOCK, 'magnet torrent data came from OPFS');
@@ -2105,7 +2733,7 @@ try {
   await phone.click('.torrent .retry-btn');
   await waitFor(() => phone.$$eval('.torrent .log li', (els) => els.some((e) => /re-announced/.test(e.textContent))), { label: 'retry on magnet torrent', timeout: 15000 });
   assert.equal(await phone.evaluate(() => Boolean(window.__phoneTorrent.client.torrents[0].metadata)), true, 'retry keeps metadata on a magnet torrent');
-  assert.equal(await phone.$eval('.torrent .name', (e) => e.textContent), 'Phone Torrent Test');
+  assert.equal(await phone.$eval('.torrent .name', (e) => e.textContent), 'Swarmdeck Test');
   await seederPause(); // resume seeder
   log('magnet torrent restore + retry OK');
 
@@ -2116,7 +2744,7 @@ try {
   // the context drops the WebSocket, and the tracker forgets the peer there and then.
   // Its bytes are random per run, so two CI jobs never share this info hash either.
   log('creating orphan torrent');
-  const orphanCtx = await browser.newContext();
+  const orphanCtx = await context();
   const orphanPage = await orphanCtx.newPage();
   orphanPage.on('pageerror', (e) => console.error('orphan page error:', e));
   await orphanPage.addInitScript(({ t, rtc }) => localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], trackerList: false, rtcConfig: rtc })), { t: trackerUrl, rtc: rtcConfig });
@@ -2252,10 +2880,10 @@ try {
 
   /* ---------- iOS (Safari / Brave / Chrome on iPhone all report a WebKit iPhone UA) ---------- */
   const iphone = devices['iPhone 13'];
-  const iosCtx = await browser.newContext({ ...iphone, acceptDownloads: true });
+  const iosCtx = await context({ ...iphone, acceptDownloads: true });
   const ios = await iosCtx.newPage();
   ios.on('pageerror', (e) => console.error('ios page error:', e));
-  ios.on('dialog', (d) => d.accept());
+  ios.on('dialog', (d) => { if (d.type() === 'beforeunload') return; d.accept(); });
   // This context saves settings from the app's own dialog later on, so the init script merges its
   // tracker choice into whatever is stored instead of replacing it on every navigation.
   await ios.addInitScript(({ t, rtc }) => {
@@ -2286,7 +2914,7 @@ try {
     ios.waitForEvent('download', { timeout: 30000 }),
     ios.click('.torrent .zip-btn'),
   ]);
-  assert.equal(iosZip.suggestedFilename(), 'Phone Torrent Test.zip');
+  assert.equal(iosZip.suggestedFilename(), 'Swarmdeck Test.zip');
   await ios.screenshot({ path: path.join(TMP, 'ios.png'), fullPage: true });
   log('iOS-emulated save + zip OK');
 
@@ -2315,7 +2943,7 @@ try {
   await ios.fill('#magnet-input', `${site.url}test/.tmp/hosted.torrent`);
   await ios.click('#magnet-form button[type="submit"]');
   await ios.waitForSelector('.torrent .file', { timeout: 20000 });
-  assert.equal(await ios.$eval('.torrent .name', (e) => e.textContent), 'Phone Torrent Test');
+  assert.equal(await ios.$eval('.torrent .name', (e) => e.textContent), 'Swarmdeck Test');
   // Stored as bytes, so a reload restores it without fetching the URL again.
   assert.equal(await ios.evaluate(() => window.__phoneTorrent.views.values().next().value.source?.type), 'torrent');
   log('.torrent URL fetched and added');
@@ -2775,10 +3403,10 @@ try {
     const ready = state === 'completed';
     return { id, hash, name, size: 1000, progress: ready ? 1 : progress, download_state: state, download_present: ready, download_finished: ready, files };
   };
-  const troubleCtx = await browser.newContext();
+  const troubleCtx = await context();
   const trouble = await troubleCtx.newPage();
   trouble.on('pageerror', (e) => console.error('trouble page error:', e));
-  trouble.on('dialog', (d) => d.accept());
+  trouble.on('dialog', (d) => { if (d.type() === 'beforeunload') return; d.accept(); });
   await trouble.addInitScript(({ t, rtc, base, key, putio }) => localStorage.setItem('phone-torrent:settings', JSON.stringify({
     trackers: [t], trackerList: false, rtcConfig: rtc, metadataSources: [],
     cloud: { provider: 'torbox', apiKey: key, apiBase: base, viaProxy: false, accounts: { putio: { apiKey: 'putio-token', apiBase: putio } } },
@@ -2930,7 +3558,7 @@ try {
 
   /* Real-Debrid: a choice of files that did not go through, a pack of files, an account of more
    * torrents than one page holds. */
-  const rdCtx = await browser.newContext();
+  const rdCtx = await context();
   const rd = await rdCtx.newPage();
   rd.on('pageerror', (e) => console.error('rd page error:', e));
   await rd.addInitScript(({ t, rtc, base }) => localStorage.setItem('phone-torrent:settings', JSON.stringify({
@@ -2992,7 +3620,7 @@ try {
   // Before a torrent is ready, WebTorrent selects every piece it does not have yet. With the pieces on
   // disk that check runs after the file list is shown, and used to undo a file unticked in the
   // meantime: its box stayed empty while it downloaded anyway.
-  const untickCtx = await browser.newContext();
+  const untickCtx = await context();
   const untick = await untickCtx.newPage();
   untick.on('pageerror', (e) => console.error('untick page error:', e));
   await untick.addInitScript(({ t, rtc }) => localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], trackerList: false, rtcConfig: rtc, downloadLimit: 1000 })), { t: trackerUrl, rtc: rtcConfig });
@@ -3030,10 +3658,10 @@ try {
       },
     });
   };
-  const lifeCtx = await browser.newContext();
+  const lifeCtx = await context();
   const life = await lifeCtx.newPage();
   life.on('pageerror', (e) => console.error('life page error:', e));
-  life.on('dialog', (d) => d.accept());
+  life.on('dialog', (d) => { if (d.type() === 'beforeunload') return; d.accept(); });
   await life.addInitScript(stubWakeLock);
   await life.addInitScript(({ t, rtc }) => {
     // No metadata caches: a magnet here waits for peers, and only for peers.
@@ -3130,8 +3758,8 @@ try {
   await life.fill('#magnet-input', `magnet:?xt=urn:btih:${nobodyHasIt}&dn=nobody%20has%20it`);
   await life.click('#magnet-form button[type="submit"]');
   await lifeAdd('test.torrent', Buffer.from(torrentFile));
-  await waitForFromSeeder(() => lifeCard('Phone Torrent Test').locator('.pct').textContent().then((t) => t === '100%').catch(() => false), { label: 'the life page download', timeout: 180000 });
-  await waitFor(() => life.evaluate(() => window.__toasts.some((t) => /"Phone Torrent Test" finished downloading/.test(t))), { label: 'the finished toast for a download seen through', timeout: 5000 });
+  await waitForFromSeeder(() => lifeCard('Swarmdeck Test').locator('.pct').textContent().then((t) => t === '100%').catch(() => false), { label: 'the life page download', timeout: 180000 });
+  await waitFor(() => life.evaluate(() => window.__toasts.some((t) => /"Swarmdeck Test" finished downloading/.test(t))), { label: 'the finished toast for a download seen through', timeout: 5000 });
   await life.evaluate(() => Promise.all([...window.__phoneTorrent.views.values()].map((v) => v.persisted)));
   // On the next launch the pieces on disk are checked, and the check waits until the hashes are released.
   await life.evaluate(() => sessionStorage.setItem('hold-hashes', '1'));
@@ -3141,12 +3769,12 @@ try {
   await lifeCard('late metadata.bin').locator('.file').waitFor({ timeout: 10000 });
   if (opfs) {
     await waitFor(() => life.evaluate(() => {
-      const t = window.__phoneTorrent.client.torrents.find((x) => x.name === 'Phone Torrent Test');
+      const t = window.__phoneTorrent.client.torrents.find((x) => x.name === 'Swarmdeck Test');
       return Boolean(t?.metadata && !t.ready);
     }), { label: 'the restored download checking its pieces', timeout: 10000 });
     // A retry by hand would start the check over just the same: it waits for it instead.
-    await lifeCard('Phone Torrent Test').locator('.details-btn').click();
-    await lifeCard('Phone Torrent Test').locator('.retry-btn').click();
+    await lifeCard('Swarmdeck Test').locator('.details-btn').click();
+    await lifeCard('Swarmdeck Test').locator('.retry-btn').click();
     await waitFor(() => life.evaluate(() => window.__toasts.some((t) => /still being checked/.test(t))), { label: 'a retry during the check to wait for it', timeout: 5000 });
   }
   await life.click('.tab[data-tab="seed"]');
@@ -3171,7 +3799,7 @@ try {
       return Boolean(was && !was.destroyed && client.torrents.includes(was));
     };
     const byName = (name) => client.torrents.find((t) => t.name === name)?.infoHash;
-    return { seed: kept('seed'), checking: kept(byName('Phone Torrent Test')), nothingSelected: kept(byName('unwanted.bin')) };
+    return { seed: kept('seed'), checking: kept(byName('Swarmdeck Test')), nothingSelected: kept(byName('unwanted.bin')) };
   });
   assert.equal(afterReturn.seed, true, 'a seed still hashing is left to finish');
   if (opfs) assert.equal(afterReturn.checking, true, 'a restored torrent still checking its pieces is left to finish');
@@ -3180,9 +3808,9 @@ try {
   await life.evaluate(() => window.__releaseHashes());
   await waitFor(() => life.$$eval('.torrent.seeding .state', (els) => els.some((e) => /^seeding/.test(e.textContent))), { label: 'the seed to finish hashing', timeout: 20000 });
   // Without OPFS the pieces were in memory, and come from the seeder again.
-  await waitForFromSeeder(() => lifeCard('Phone Torrent Test').locator('.pct').textContent().then((t) => t === '100%'), { label: 'the restored download checked', timeout: 180000 });
+  await waitForFromSeeder(() => lifeCard('Swarmdeck Test').locator('.pct').textContent().then((t) => t === '100%'), { label: 'the restored download checked', timeout: 180000 });
   if (opfs) {
-    assert.ok(await life.evaluate(() => window.__phoneTorrent.client.torrents.find((t) => t.name === 'Phone Torrent Test').received) < BLOCK, 'restored from disk');
+    assert.ok(await life.evaluate(() => window.__phoneTorrent.client.torrents.find((t) => t.name === 'Swarmdeck Test').received) < BLOCK, 'restored from disk');
     // Finished before this launch: a check that finds it complete is no news.
     assert.deepEqual(await life.evaluate(() => window.__toasts.filter((t) => /finished downloading/.test(t))), [], 'no "finished downloading" for what finished before');
   }
@@ -3195,7 +3823,7 @@ try {
    * either does not come back. */
   const secondCopy = await lifeCtx.newPage();
   secondCopy.on('pageerror', (e) => console.error('second copy page error:', e));
-  secondCopy.on('dialog', (d) => d.accept());
+  secondCopy.on('dialog', (d) => { if (d.type() === 'beforeunload') return; d.accept(); });
   await secondCopy.goto(site.url);
   await secondCopy.waitForFunction(() => window.__phoneTorrent?.client);
   const secondCard = (name) => secondCopy.locator('.torrent', { has: secondCopy.locator('.name', { hasText: name }) }).first();
@@ -3212,17 +3840,17 @@ try {
   await secondCard('nobody has it').locator('.pause-btn').click();
   await waitFor(() => pausedInFirst(nobodyHasIt).then((paused) => paused === false), { label: 'a resume in the second copy to resume it', timeout: 5000 });
 
-  const ticksInFirst = () => lifeCard('Phone Torrent Test').locator('.file input[type="checkbox"]').evaluateAll((boxes) => boxes.map((b) => b.checked));
-  await secondCard('Phone Torrent Test').locator('.file input[type="checkbox"]').first().uncheck();
+  const ticksInFirst = () => lifeCard('Swarmdeck Test').locator('.file input[type="checkbox"]').evaluateAll((boxes) => boxes.map((b) => b.checked));
+  await secondCard('Swarmdeck Test').locator('.file input[type="checkbox"]').first().uncheck();
   await waitFor(() => ticksInFirst().then((t) => t[0] === false && t.slice(1).every(Boolean)), { label: 'a file unticked in the second copy to be unticked in the first', timeout: 5000 });
-  assert.deepEqual(await life.evaluate(() => [...window.__phoneTorrent.views.values()].find((v) => v.torrent.name === 'Phone Torrent Test').record.deselected), [0], 'and remembered there');
-  await secondCard('Phone Torrent Test').locator('.file input[type="checkbox"]').first().check();
+  assert.deepEqual(await life.evaluate(() => [...window.__phoneTorrent.views.values()].find((v) => v.torrent.name === 'Swarmdeck Test').record.deselected), [0], 'and remembered there');
+  await secondCard('Swarmdeck Test').locator('.file input[type="checkbox"]').first().check();
   await waitFor(() => ticksInFirst().then((t) => t.every(Boolean)), { label: 'a file ticked again in the second copy to be ticked in the first', timeout: 5000 });
 
   // Saved in the second copy, a file streams over from the first, whole.
   const [fromSecond] = await Promise.all([
     secondCopy.waitForEvent('download', { timeout: 30000 }),
-    secondCard('Phone Torrent Test').locator('.file .save-btn').nth(saveIndex).click(),
+    secondCard('Swarmdeck Test').locator('.file .save-btn').nth(saveIndex).click(),
   ]);
   const fromSecondPath = path.join(TMP, 'saved-in-second-copy.bin');
   await fromSecond.saveAs(fromSecondPath);
@@ -3230,7 +3858,7 @@ try {
   assert.equal(sha(readFileSync(fromSecondPath)), files[0].sha, 'and its bytes');
   const [zipFromSecond] = await Promise.all([
     secondCopy.waitForEvent('download', { timeout: 60000 }),
-    secondCard('Phone Torrent Test').locator('.zip-btn').click(),
+    secondCard('Swarmdeck Test').locator('.zip-btn').click(),
   ]).catch(async (err) => {
     console.error('zip in the second copy:', await secondCopy.evaluate(() => JSON.stringify({
       button: document.querySelector('.torrent:not(.seeding) .zip-btn')?.outerHTML,
@@ -3242,7 +3870,14 @@ try {
   await zipFromSecond.saveAs(zipFromSecondPath);
   const unzippedFromSecond = path.join(TMP, 'unzipped-from-second-copy');
   execFileSync('unzip', ['-q', '-o', zipFromSecondPath, '-d', unzippedFromSecond]);
-  for (const f of files) assert.equal(sha(readFileSync(path.join(unzippedFromSecond, 'Phone Torrent Test', f.name))), f.sha, `zip entry ${f.name} from the second copy matches`);
+  for (const f of files) assert.equal(sha(readFileSync(path.join(unzippedFromSecond, 'Swarmdeck Test', f.name))), f.sha, `zip entry ${f.name} from the second copy matches`);
+  // Into a folder from the second copy too: the files stream over from the copy that runs them.
+  await secondCopy.evaluate(installMemoryFolder);
+  await secondCard('Swarmdeck Test').locator('.folder-btn:not([hidden]):not([disabled])').click({ timeout: 10000 });
+  await waitFor(() => secondCopy.$$eval('.toast', (els) => els.some((e) => /Saved 2 files in "Downloads"/.test(e.textContent))), { label: 'saved into a folder from the second copy', timeout: 60000 });
+  const folderFromSecond = await secondCopy.evaluate(() => window.__folderDigests());
+  for (const f of files) assert.equal(folderFromSecond[`Swarmdeck Test/${f.name}`], f.sha, `${f.name} saved into a folder from the second copy matches`);
+  log('a copy that follows saves into a folder too, every byte streamed over from the one that leads');
 
   const addedThere = createHash('sha1').update(`added in the second copy ${Math.random()}`).digest('hex');
   await secondCopy.fill('#magnet-input', `magnet:?xt=urn:btih:${addedThere}&dn=added%20in%20the%20second%20copy`);
@@ -3326,7 +3961,7 @@ try {
   await lifeCtx.close();
 
   // Handed to a cloud service and ready there, a torrent needs the screen on no more than a private one.
-  const handedCtx = await browser.newContext();
+  const handedCtx = await context();
   const handed = await handedCtx.newPage();
   handed.on('pageerror', (e) => console.error('handed page error:', e));
   await handed.addInitScript(stubWakeLock);
@@ -3347,11 +3982,11 @@ try {
   /* ---------- web seeds: a pause drops the connection, never the seed ---------- */
   // Nobody seeds these but an HTTP mirror: the torrent's own url-list, or one added by hand. "Keep
   // seeding" is off in this context, for the last of them.
-  const webCtx = await browser.newContext();
+  const webCtx = await context();
   const web = await webCtx.newPage();
   web.on('pageerror', (e) => console.error('web seed page error:', e));
   let webSeedUrl = '';
-  web.on('dialog', (d) => d.accept(d.type() === 'prompt' ? webSeedUrl : undefined));
+  web.on('dialog', (d) => { if (d.type() === 'beforeunload') return; d.accept(d.type() === 'prompt' ? webSeedUrl : undefined); });
   await web.addInitScript(stubWakeLock);
   await web.addInitScript(({ t, rtc }) => localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], trackerList: false, rtcConfig: rtc, metadataSources: [], seedAfterDone: false })), { t: trackerUrl, rtc: rtcConfig });
   await web.goto(site.url);
@@ -3441,7 +4076,7 @@ try {
   // there, which WebTorrent hashes with, and a torrent failed with "Invalid torrent identifier" or
   // hashed for ever. The Cloud tab works there; the other two say why they do not. Playwright serves
   // the app at a name that is not localhost, which is all it takes.
-  const lanCtx = await browser.newContext();
+  const lanCtx = await context();
   const REPO = path.join(HERE, '..');
   await lanCtx.route('http://phone.lan/**', (route) => {
     const { pathname } = new URL(route.request().url());
@@ -3451,7 +4086,7 @@ try {
   const lan = await lanCtx.newPage();
   lan.on('pageerror', (e) => console.error('lan page error:', e));
   const lanDialogs = [];
-  lan.on('dialog', (d) => { lanDialogs.push(d.message()); d.accept(); });
+  lan.on('dialog', (d) => { if (d.type() === 'beforeunload') return; lanDialogs.push(d.message()); d.accept(); });
   await lan.goto(`http://phone.lan/#magnet:?xt=urn:btih:${'6'.repeat(40)}&dn=from%20a%20link`);
   await lan.waitForFunction(() => window.__phoneTorrent?.client);
   assert.equal(await lan.evaluate(() => window.isSecureContext), false, 'plain http at a name that is not localhost');
@@ -3488,7 +4123,7 @@ try {
   // fresh page asks its own origin and makes it the service, where it used to say "No API key yet".
   // No service worker: once one controls the page, WebKit sends its requests past context.route(),
   // so the account and the list would reach the static test server instead of these answers.
-  const ownCtx = await browser.newContext({ serviceWorkers: 'block' });
+  const ownCtx = await context({ serviceWorkers: 'block' });
   const ownCalls = [];
   // What the server lists: nothing, until the test puts a transfer there.
   const ownTransfers = [];
@@ -3571,7 +4206,7 @@ try {
   // browser would say.
   await ownCtx.route((url) => url.pathname.endsWith('/files/1'), () => { /* never answers */ });
   const secondEpisode = seasonRow.locator('.cloud-file', { has: own.locator('.cloud-file-name', { hasText: 'Show.S01E02.mkv' }) });
-  const lostToasts = () => own.$$eval('.toast', (els) => els.filter((e) => /Lost the connection while playing "Show\.S01E02\.mkv": tap Play/.test(e.textContent)).length);
+  const lostToasts = () => own.$$eval('.toast', (els) => els.filter((e) => /Lost the connection while playing "Show\.S01E02\.mkv": press Play/.test(e.textContent)).length);
   await secondEpisode.locator('.cloud-play').click();
   await secondEpisode.locator('.cloud-player video').evaluate((v) => {
     Object.defineProperty(v, 'currentTime', { configurable: true, get: () => 42 });
@@ -3622,7 +4257,7 @@ try {
   // Delete in the library takes the transfer off the list without listing again, and the account line
   // went on counting it: nothing was downloading, so no poll came to put it right.
   await waitFor(() => own.$eval('#cloud-account', (e) => e.textContent === 'My own server · your server · 6 transfers · 30 GB free'), { label: 'the account line to count six transfers', timeout: 5000 });
-  own.once('dialog', (d) => d.accept());
+  own.once('dialog', (d) => { if (d.type() === 'beforeunload') return; d.accept(); });
   await own.locator('.cloud-item', { has: own.locator('.cloud-item-name', { hasText: 'Older 5' }) }).locator('.cloud-item-delete').click();
   await waitFor(() => ownCalls.includes(`DELETE /api/transfers/${'5'.repeat(40)}`), { label: 'the delete to reach the server', timeout: 5000 });
   await waitFor(() => own.$eval('#cloud-account', (e) => e.textContent === 'My own server · your server · 5 transfers · 30 GB free'), { label: 'the account line to stop counting the transfer deleted', timeout: 5000 });
@@ -3647,7 +4282,7 @@ try {
   await new Promise((resolve) => dialectServer.listen(0, '127.0.0.1', resolve));
   const dialectBase = `http://127.0.0.1:${dialectServer.address().port}`;
   const answer = (at, body, status = 200) => dialects.answers.set(at, { status, body });
-  const dialectCtx = await browser.newContext({ serviceWorkers: 'block' });
+  const dialectCtx = await context({ serviceWorkers: 'block' });
   const dialect = await dialectCtx.newPage();
   dialect.on('pageerror', (e) => console.error('dialect page error:', e));
   await dialect.addInitScript(({ t }) => localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], trackerList: false, metadataSources: [] })), { t: trackerUrl });
@@ -3718,7 +4353,7 @@ try {
   assert.equal(rdList.find((i) => i.id === 'T101').idle, true, 'one left waiting for its files to be chosen is not polled for');
   // Deleting one the service no longer has (deleted on its site, or from another device): done all the same.
   answer('DELETE /realdebrid/rest/1.0/torrents/delete/GONE', { error: 'unknown_ressource', error_code: 7 }, 404);
-  dialect.once('dialog', (d) => d.accept());
+  dialect.once('dialog', (d) => { if (d.type() === 'beforeunload') return; d.accept(); });
   await dialect.evaluate((base) => window.__phoneTorrent.cloudRemoveItem({ id: 'GONE', name: 'gone', provider: 'realdebrid', base: `${base}/realdebrid` }), dialectBase);
   await waitFor(() => dialect.$$eval('.toast', (l) => l.some((t) => /Deleted from the cloud/.test(t.textContent))), { label: 'a transfer already gone to count as deleted', timeout: 5000 });
 
@@ -3738,7 +4373,7 @@ try {
   dialectServer.close();
   log('each service as its docs write it: AllDebrid AUTH_ codes, delayed links and per-magnet errors; put.io seeding deletes; Real-Debrid archives, refusals, pages and waits; a delete of one already gone; TorBox empty accounts, hand-offs, expiry and plans');
   // Anywhere else (GitHub Pages, npm start) that address is a 404, and the default stays.
-  const elsewhereCtx = await browser.newContext();
+  const elsewhereCtx = await context();
   const elsewhere = await elsewhereCtx.newPage();
   await elsewhere.goto(site.url);
   await elsewhere.waitForFunction(() => window.__phoneTorrent?.client);
@@ -3748,7 +4383,7 @@ try {
   // A server deployed on Render, Fly or behind a tunnel has an AUTH_TOKEN; its health answers all
   // the same, and the page takes it as the service. Settings then asks for that token, rather than
   // saying a server alone on your machine needs none.
-  const tokenCtx = await browser.newContext({ serviceWorkers: 'block' });
+  const tokenCtx = await context({ serviceWorkers: 'block' });
   await tokenCtx.route(`${site.url}api/**`, (route) => {
     const { pathname } = new URL(route.request().url());
     const [status, body] = pathname === '/api/health' ? [200, { ok: true, torrents: 0 }] : [401, { error: 'bad or missing token' }];
@@ -3776,7 +4411,7 @@ try {
   // Stopped, or out of reach, while its page is still open (or served by the service worker): only its
   // API is gone here. The library said the account was empty, the Cloud tab said to set a CORS proxy —
   // wrong for the server's own page, where there is no CORS at all — and nothing asked again once it was back.
-  const downCtx = await browser.newContext({ serviceWorkers: 'block' });
+  const downCtx = await context({ serviceWorkers: 'block' });
   let downServerUp = false;
   await downCtx.route(`${site.url}api/**`, (route) => {
     const { pathname } = new URL(route.request().url());
@@ -3817,7 +4452,7 @@ try {
   /* ---------- the installed app, on https, pointed at a server's http:// address ---------- */
   // The browser refuses the call outright (mixed content), before anything is sent: ALLOWED_ORIGINS,
   // which is what the app said, cannot change that.
-  const httpsCtx = await browser.newContext({ serviceWorkers: 'block' });
+  const httpsCtx = await context({ serviceWorkers: 'block' });
   const httpsCalls = [];
   httpsCtx.on('request', (req) => { if (req.url().startsWith('http://192.0.2.1')) httpsCalls.push(req.url()); });
   const servePhoneTest = (route) => {
@@ -3858,7 +4493,7 @@ try {
   // With a CORS proxy set, the proxy is asked instead: it fetches the address itself, and reaches a
   // server on the internet. The page used to refuse before asking anyone, and the proxy that had
   // relayed these calls was never asked again.
-  const relayedCtx = await browser.newContext({ serviceWorkers: 'block' });
+  const relayedCtx = await context({ serviceWorkers: 'block' });
   const relayedDirect = [];
   const relayedProxied = [];
   relayedCtx.on('request', (req) => { if (req.url().startsWith('http://192.0.2.1')) relayedDirect.push(req.url()); });
@@ -3884,7 +4519,7 @@ try {
   log('an https page pointed at an http:// server goes through the CORS proxy when one is set');
 
   /* ---------- offline: the card says so, and nothing blames CORS ---------- */
-  const offCtx = await browser.newContext();
+  const offCtx = await context();
   const off = await offCtx.newPage();
   off.on('pageerror', (e) => console.error('offline page error:', e));
   await off.addInitScript(({ t, rtc, meta }) => localStorage.setItem('phone-torrent:settings', JSON.stringify({
@@ -3911,10 +4546,10 @@ try {
   log('offline: said on the card and the top bar, the caches wait, and the network coming back wakes it');
 
   /* ---------- Settings: diagnostics without the keys, and fields mended rather than dropped ---------- */
-  const diagCtx = await browser.newContext();
+  const diagCtx = await context();
   const diag = await diagCtx.newPage();
   diag.on('pageerror', (e) => console.error('diagnostics page error:', e));
-  diag.on('dialog', (d) => d.accept());
+  diag.on('dialog', (d) => { if (d.type() === 'beforeunload') return; d.accept(); });
   const secrets = ['TORBOX-SECRET-KEY', 'PUTIO-SECRET-TOKEN', 'myproxy-secret', 'turn-user-secret', 'turn-pass-secret', 'PASSKEY-SECRET'];
   await diag.addInitScript(({ t, rtc }) => {
     localStorage.setItem('phone-torrent:settings', JSON.stringify({
@@ -4009,7 +4644,7 @@ try {
   // Tor Browser, Mullvad Browser, Firefox with media.peerconnection.enabled off. WebTorrent then skips
   // every ws(s):// tracker with a warning the app dropped, and the card said it was waiting on four
   // trackers it talked to none of. A web seed would still work, so nothing is switched off.
-  const noRtcCtx = await browser.newContext();
+  const noRtcCtx = await context();
   const noRtc = await noRtcCtx.newPage();
   noRtc.on('pageerror', (e) => console.error('no WebRTC page error:', e));
   await noRtc.addInitScript(({ t }) => {
@@ -4034,7 +4669,7 @@ try {
   /* ---------- the CORS proxy refusing a call: its reason, not the service's address ---------- */
   // The proxy forwards a write only to the hosts in its API_HOSTS, which was set for the metadata
   // caches and not for this service. The refusal came through, and the app said to check the address.
-  const relayCtx = await browser.newContext();
+  const relayCtx = await context();
   const relay = await relayCtx.newPage();
   relay.on('pageerror', (e) => console.error('relay page error:', e));
   await relay.addInitScript(({ t, api, proxy }) => localStorage.setItem('phone-torrent:settings', JSON.stringify({
@@ -4057,7 +4692,7 @@ try {
   // desktop, a phone on its charger — where the README says every six hours. On a clock of its own here.
   // No service worker, as for the other contexts that answer with route(): in WebKit a page it
   // controls sends its requests past route(), and the list would never be counted.
-  const clockCtx = await browser.newContext({ serviceWorkers: 'block' });
+  const clockCtx = await context({ serviceWorkers: 'block' });
   let listFetches = 0;
   await clockCtx.route('https://lists.invalid/trackers.txt', (route) => {
     listFetches += 1;
@@ -4083,7 +4718,7 @@ try {
   // What a browser that offers neither gets (private browsing in some): saves go through memory, and
   // so do the pieces. "Keep seeding" is off here, and the download is throttled so that a file can be
   // unticked before it arrives.
-  const legacyCtx = await browser.newContext({ acceptDownloads: true, serviceWorkers: 'block' });
+  const legacyCtx = await context({ acceptDownloads: true, serviceWorkers: 'block' });
   const legacy = await legacyCtx.newPage();
   legacy.on('pageerror', (e) => console.error('legacy page error:', e));
   await legacy.addInitScript(({ t, rtc }) => {

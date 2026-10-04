@@ -8,6 +8,8 @@
   // disk is ephemeral, and a container with no inbound port reaches fewer peers
   // than a machine at home. It is the quickest remote start, not a seedbox.
   "$schema": "node_modules/wrangler/config-schema.json",
+  // The project's old name, on purpose: a Worker deployed under another name is a new Worker, at a
+  // new workers.dev address, with a Durable Object of its own that knows none of the transfers.
   "name": "phone-torrent",
   "main": "worker.js",
   "compatibility_date": "2026-01-01",

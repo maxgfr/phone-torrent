@@ -1,5 +1,5 @@
 {
-  "name": "phone-torrent-cloudflare",
+  "name": "swarmdeck-cloudflare",
   "private": true,
   "type": "module",
   "scripts": {

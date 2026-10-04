@@ -9,12 +9,15 @@ import { createHash } from 'node:crypto';
 import { decode, encode, infoHashOf, Raw, text } from '../lib/bencode.js';
 import {
   readTorrent, applyEdits, applyBatch, identityChanges, parseTiers, formatTiers, parseMagnet, toMagnet,
-  autoPieceLength, ruleFor, describeRule, ruleProblems, createTorrent, excludeTest,
+  autoPieceLength, ruleFor, describeRule, ruleProblems, createTorrent, excludeTest, relativePath, withPaths, commonFolder,
 } from '../lib/torrent-meta.js';
 import { normalizePreset, normalizePresets, presetSummary } from '../lib/presets.js';
 import { hashInline } from '../lib/torrent-hash.js';
 import { matchFiles, checkTorrent, describeCheck } from '../lib/torrent-check.js';
 import { createSummary, creationOptions, creationProblems, normalizeCreate } from '../lib/create-options.js';
+import { FILTERS, SORTS, rowMatches, sortRows, rangeKeys, loadListPrefs, saveListPrefs } from '../lib/torrent-list.js';
+import { grabEntries, filesFromEntries, droppedText, draggingFiles } from '../lib/drop.js';
+import { safeSegment, existing, writeToFolder } from '../lib/folder-save.js';
 import createTorrentPackage from 'create-torrent';
 import { bencode, makeTorrent } from './torrents.mjs';
 
@@ -411,6 +414,155 @@ const u8 = (b) => new Uint8Array(b.buffer, b.byteOffset, b.byteLength);
   assert.deepEqual(creationProblems({ pieceMode: 'fixed', pieceSize: 8 * 2 ** 20, maxPiece: 4 * 2 ** 20 }), ['The piece size, 8 MiB, is over the largest set, 4 MiB.']);
   assert.deepEqual(creationProblems({ trackers: ptp }), [], 'Auto keeps to the rule by itself');
   log('making a torrent: a fixed piece size over a tracker\'s largest, or over the one set, said');
+}
+
+/* ---------- the list of torrents: search, filter, sort, Shift-click, and what is remembered ---------- */
+{
+  const rows = [
+    { key: 'a1', name: 'The.Show.S01E01.mkv', size: 300, progress: 0.5, down: 10, up: 0, addedAt: 3, paused: false, complete: false, seeding: false, problem: false },
+    { key: 'b2', name: 'holiday photos', size: 900, progress: 1, down: 0, up: 5, addedAt: 1, paused: false, complete: true, seeding: true, problem: false },
+    { key: 'c3', name: 'the.show.s01e02.mkv', size: 300, progress: 0.2, down: 0, up: 0, addedAt: 2, paused: true, complete: false, seeding: false, problem: false },
+    { key: 'd4', name: 'private release', size: 50, progress: 0, down: 0, up: 0, addedAt: 4, paused: false, complete: false, seeding: false, problem: true },
+  ];
+  const keys = (list) => list.map((r) => r.key);
+  const matching = (opts) => keys(rows.filter((r) => rowMatches(r, opts)));
+  assert.deepEqual(matching({ query: 'show s01' }), ['a1', 'c3'], 'every word, anywhere in the name, case ignored');
+  assert.deepEqual(matching({ query: 'B2' }), ['b2'], 'or the info hash');
+  assert.deepEqual(matching({ filter: 'downloading' }), ['a1', 'd4'], 'downloading: not paused, not finished, not a seed');
+  assert.deepEqual(matching({ filter: 'seeding' }), ['b2']);
+  assert.deepEqual(matching({ filter: 'paused' }), ['c3']);
+  assert.deepEqual(matching({ filter: 'done' }), ['b2'], 'a finished download still sharing is done and seeding');
+  assert.deepEqual(matching({ filter: 'problem' }), ['d4']);
+  assert.deepEqual(matching({ filter: 'paused', query: 'holiday' }), [], 'the filter and the search both');
+  assert.deepEqual(matching({ filter: 'nonsense' }), keys(rows), 'a filter it does not know is all');
+
+  assert.deepEqual(keys(sortRows(rows)), ['d4', 'a1', 'c3', 'b2'], 'newest first by default');
+  assert.deepEqual(keys(sortRows(rows, { sort: 'name', dir: 'asc' })), ['b2', 'd4', 'a1', 'c3'], 'names as people read them, case ignored');
+  assert.deepEqual(keys(sortRows(rows, { sort: 'size', dir: 'desc' })), ['b2', 'a1', 'c3', 'd4'], 'the same size keeps the order it came in');
+  assert.deepEqual(keys(sortRows(rows, { sort: 'size', dir: 'asc' })), ['d4', 'a1', 'c3', 'b2'], 'either way');
+  assert.deepEqual(keys(sortRows(rows, { sort: 'progress' })), ['b2', 'a1', 'c3', 'd4']);
+  assert.deepEqual(keys(sortRows(rows, { sort: 'speed' })), ['a1', 'b2', 'c3', 'd4'], 'speed is down and up together; ties stay put');
+  assert.deepEqual(keys(sortRows([{ key: 'x', name: 'ep10' }, { key: 'y', name: 'ep9' }], { sort: 'name', dir: 'asc' })), ['y', 'x'], 'ep9 before ep10');
+  assert.notEqual(sortRows(rows), rows, 'a new array, the rows given left as they were');
+
+  const order = ['a', 'b', 'c', 'd', 'e'];
+  assert.deepEqual(rangeKeys(order, 'b', 'd'), ['b', 'c', 'd']);
+  assert.deepEqual(rangeKeys(order, 'd', 'b'), ['b', 'c', 'd'], 'upwards too, in the order listed');
+  assert.deepEqual(rangeKeys(order, 'gone', 'c'), ['c'], 'from a row no longer listed: the one clicked');
+  assert.deepEqual(rangeKeys(order, 'a', 'gone'), [], 'to one not listed: nothing');
+
+  const memory = () => {
+    const kept = new Map();
+    return { getItem: (k) => kept.get(k) ?? null, setItem: (k, v) => kept.set(k, String(v)), kept };
+  };
+  const store = memory();
+  assert.deepEqual(loadListPrefs(store), { filter: 'all', sort: 'added', dir: 'desc', view: 'cards' }, 'nothing saved: the defaults');
+  saveListPrefs({ filter: 'seeding', sort: 'name', dir: 'asc', view: 'table', query: 'not kept' }, store);
+  assert.deepEqual(loadListPrefs(store), { filter: 'seeding', sort: 'name', dir: 'asc', view: 'table' }, 'saved and read back, the search left out');
+  assert.deepEqual(JSON.parse(store.kept.get('phone-torrent:list')), { filter: 'seeding', sort: 'name', dir: 'asc', view: 'table' }, 'under the storage names the app keeps');
+  store.setItem('phone-torrent:list', JSON.stringify({ filter: 'x', sort: 'y', dir: 'sideways', view: 'tiles' }));
+  assert.deepEqual(loadListPrefs(store), { filter: 'all', sort: 'added', dir: 'desc', view: 'cards' }, 'what it does not know: the defaults');
+  store.setItem('phone-torrent:list', '{not json');
+  assert.deepEqual(loadListPrefs(store).filter, 'all', 'nor what is not JSON');
+  const throwing = { getItem() { throw new Error('SecurityError'); }, setItem() { throw new Error('QuotaExceededError'); } };
+  assert.deepEqual(loadListPrefs(throwing), { filter: 'all', sort: 'added', dir: 'desc', view: 'cards' }, 'storage that throws: the defaults');
+  assert.doesNotThrow(() => saveListPrefs({ filter: 'done' }, throwing), 'and saving to it is only skipped');
+  assert.ok(FILTERS.some((f) => f.key === 'problem') && SORTS.every((s) => s.dir === 'asc' || s.dir === 'desc'));
+  log('the list: search and filters, a stable sort each way, Shift-click ranges, and its settings even where storage throws');
+}
+
+/* ---------- what is dropped: folders opened all the way down, and the paths they give ---------- */
+{
+  // Entries as a browser hands them over: a folder's reader gives its children a batch at a time (the
+  // real ones, about a hundred), then an empty batch for the end.
+  const fileEntry = (fullPath, body = 'x') => ({
+    isFile: true, isDirectory: false, fullPath, name: fullPath.split('/').pop(),
+    file: (ok) => ok(new File([body], fullPath.split('/').pop())),
+  });
+  const dirEntry = (fullPath, children, batch = 2) => ({
+    isFile: false, isDirectory: true, fullPath, name: fullPath.split('/').pop(),
+    createReader() {
+      let at = 0;
+      return { readEntries(ok) { const next = children.slice(at, at + batch); at += batch; setTimeout(() => ok(next)); } };
+    },
+  });
+  const photos = dirEntry('/Photos', [
+    fileEntry('/Photos/a.jpg'), fileEntry('/Photos/b.jpg'), fileEntry('/Photos/c.jpg'),
+    dirEntry('/Photos/2024', [fileEntry('/Photos/2024/d.jpg'), dirEntry('/Photos/2024/empty', [])]),
+    fileEntry('/Photos/e.jpg'),
+  ]);
+  const files = await filesFromEntries([photos]);
+  assert.deepEqual(files.map((f) => f.fullPath), ['Photos/a.jpg', 'Photos/b.jpg', 'Photos/c.jpg', 'Photos/2024/d.jpg', 'Photos/e.jpg'], 'every batch read, folders opened, an empty one giving nothing');
+  assert.deepEqual(files.map((f) => relativePath(f)), files.map((f) => f.fullPath));
+  assert.equal(commonFolder(files), 'Photos', 'one folder dropped: its name');
+  assert.deepEqual(await filesFromEntries([dirEntry('/empty', [])]), [], 'an empty folder: nothing');
+  const loose = await filesFromEntries([fileEntry('/one.txt'), fileEntry('/two.txt')]);
+  assert.deepEqual(loose.map((f) => relativePath(f)), ['one.txt', 'two.txt'], 'loose files: their names');
+  assert.equal(commonFolder(loose), '', 'and no folder in common');
+  assert.equal(commonFolder([...files, ...loose]), '', 'nor a folder and loose files');
+  assert.equal(commonFolder([]), '');
+
+  // Sent to another open copy, a File loses where it was: put back, the same torrent is made there.
+  const bare = files.map((f) => new File([f], f.name));
+  assert.deepEqual(bare.map((f) => relativePath(f)), ['a.jpg', 'b.jpg', 'c.jpg', 'd.jpg', 'e.jpg'], 'what arrives in the other copy');
+  const back = withPaths(bare, files.map((f) => relativePath(f)));
+  assert.deepEqual(back.map((f) => relativePath(f)), files.map((f) => f.fullPath), 'and the paths put back');
+  assert.deepEqual(withPaths(loose, ['one.txt', undefined]).map((f) => relativePath(f)), ['one.txt', 'two.txt'], 'no path: as it was');
+  const made = await createTorrent(files, { hash: hashInline, creationDate: 0 });
+  const remade = await createTorrent(back, { hash: hashInline, creationDate: 0 });
+  assert.equal(remade.infoHash, made.infoHash, 'the same info hash');
+  assert.equal(made.name, 'Photos');
+
+  assert.equal(droppedText({ getData: (t) => ({ 'text/uri-list': '# a comment\nmagnet:?xt=urn:btih:abc\nhttps://x', 'text/plain': 'plain' }[t] || '') }), 'magnet:?xt=urn:btih:abc', 'a link: the first of the list');
+  assert.equal(droppedText({ getData: (t) => (t === 'text/plain' ? '  some text ' : '') }), 'some text', 'or the text');
+  assert.equal(droppedText({ getData() { throw new Error('protected'); } }), '', 'or nothing, when it cannot be read');
+  assert.equal(draggingFiles({ types: ['Files', 'text/uri-list'] }), true);
+  assert.equal(draggingFiles({ types: ['text/plain'] }), false);
+  assert.deepEqual(grabEntries({ items: [{ kind: 'file', webkitGetAsEntry: () => photos }], files: [] }).entries, [photos], 'entries, when every file has one');
+  assert.equal(grabEntries({ items: [{ kind: 'file' }], files: [new File(['x'], 'x')] }).entries, null, 'none without webkitGetAsEntry: the files instead');
+  log('dropped folders read all the way down, paths kept and put back after crossing to another copy, the same info hash');
+}
+
+/* ---------- saving into a folder: names any system takes, nothing left cut short ---------- */
+{
+  assert.equal(safeSegment('a/b:c*?.mkv'), 'a_b_c_.mkv', 'separators and what Windows refuses');
+  assert.equal(safeSegment('..'), '_', 'never the folder above');
+  assert.equal(safeSegment('name. '), 'name', 'no trailing dot or space');
+  assert.equal(safeSegment(''), '_');
+  // A folder handle with what the app asks of one, in memory.
+  const missing = () => Object.assign(new Error('not there'), { name: 'NotFoundError' });
+  const folder = () => {
+    const dirs = new Map();
+    const files = new Map();
+    return {
+      files,
+      dirs,
+      async getDirectoryHandle(n, { create } = {}) { if (!dirs.has(n)) { if (!create) throw missing(); dirs.set(n, folder()); } return dirs.get(n); },
+      async getFileHandle(n, { create } = {}) {
+        if (!files.has(n)) { if (!create) throw missing(); files.set(n, Buffer.alloc(0)); }
+        return { createWritable: async () => { const chunks = []; return { write: async (c) => { chunks.push(Buffer.from(c)); }, close: async () => { files.set(n, Buffer.concat(chunks)); }, abort: async () => {} }; } };
+      },
+      async removeEntry(n) { files.delete(n); dirs.delete(n); },
+    };
+  };
+  const streamOf = (...parts) => () => new Blob(parts).stream();
+  const root = folder();
+  const items = [
+    { path: ['Show', 'S01', 'e1.mkv'], size: 5, stream: streamOf('hello') },
+    { path: ['Show', 'notes.txt'], size: 2, stream: streamOf('ok') },
+  ];
+  assert.deepEqual(await existing(root, items), [], 'nothing there yet');
+  const done = [];
+  await writeToFolder(root, items, { onFile: (item, i) => done.push(i) });
+  assert.deepEqual(done, [0, 1]);
+  const show = root.dirs.get('Show');
+  assert.equal(String(show.dirs.get('S01').files.get('e1.mkv')), 'hello', 'the folders made, the bytes written');
+  assert.deepEqual((await existing(root, items)).map((i) => i.path.join('/')), ['Show/S01/e1.mkv', 'Show/notes.txt'], 'and then both there');
+  await assert.rejects(writeToFolder(root, [{ path: ['Show', 'cut.bin'], size: 10, stream: streamOf('short') }]), /ended early/, 'a stream short of its size throws');
+  assert.equal(show.files.has('cut.bin'), false, 'and leaves no file cut short behind');
+  await assert.rejects(writeToFolder(root, [{ path: ['Show', 'notes.txt'], size: 10, stream: streamOf('short') }]), /ended early/);
+  assert.equal(String(show.files.get('notes.txt')), 'ok', 'one that was there stays as it was');
+  log('saving into a folder: safe names, folders made, a short stream refused and nothing left cut short');
 }
 
 console.log('\nAll .torrent workshop checks passed.');

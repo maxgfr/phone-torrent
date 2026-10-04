@@ -1,4 +1,4 @@
-/* Optional CORS proxy for Phone Torrent, deployable for free on Cloudflare Workers.
+/* Optional CORS proxy for Swarmdeck, deployable for free on Cloudflare Workers.
  *
  * Torrent caches (itorrents.net, …), most HTTP web seeds and some cloud-fetch APIs
  * do not send CORS headers, so a web page cannot read them directly. This worker fetches the URL
@@ -27,7 +27,7 @@ const PASS_RESPONSE_HEADERS = ['content-type', 'content-length', 'content-range'
 
 /**
  * A browser sends only the origin, so an entry pasted as the app's address
- * ("https://<user>.github.io/phone-torrent/") is taken as the origin it names, as the server does. An
+ * ("https://<user>.github.io/swarmdeck/") is taken as the origin it names, as the server does. An
  * entry with no origin of its own is kept as written, and matches nothing.
  */
 function asOrigin(entry) {
@@ -76,7 +76,7 @@ export default {
         if (v) headers.set(h, v);
       }
     }
-    headers.set('User-Agent', 'phone-torrent-proxy');
+    headers.set('User-Agent', 'swarmdeck-proxy');
 
     let upstream;
     try {

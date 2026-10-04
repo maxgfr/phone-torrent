@@ -17,6 +17,10 @@
   --primary-fill: #2563eb;
   --danger-fill: #dc2626;
   --track: #e2e8f0;
+  /* The rows of the list: hovered, open, selected. Plain colours, so the tests can read their contrast. */
+  --row-hover: #f1f4f9;
+  --row-open: #f1f5fe;
+  --row-selected: #e5edfe;
   --shadow: 0 1px 2px rgba(15, 23, 42, 0.06), 0 4px 16px rgba(15, 23, 42, 0.04);
   --radius: 14px;
   color-scheme: light dark;
@@ -36,6 +40,9 @@
     --warn: #d97706;
     --danger-fill: #b91c1c;
     --track: #243049;
+    --row-hover: #18233a;
+    --row-open: #172544;
+    --row-selected: #1d3157;
     --shadow: none;
   }
 }
@@ -99,7 +106,10 @@ body {
 
 /* A grid item is as wide as its widest unbreakable content by default, and a text input's is its
    intrinsic width: on a 320px screen that alone made the page scroll sideways. */
-.container > * { min-width: 0; }
+.container > *, .list-pane > *, .detail-pane > * { min-width: 0; }
+
+/* One column on a phone, as it always was: the two panes only group things on a computer. */
+.list-pane, .detail-pane { display: contents; }
 
 .card {
   background: var(--card);
@@ -111,7 +121,6 @@ body {
 
 .card h2 { margin: 0 0 12px; font-size: 1rem; }
 
-.add-card.dragover { outline: 2px dashed var(--primary); outline-offset: 2px; }
 
 .add-row { display: flex; gap: 8px; margin-bottom: 10px; }
 .add-row input[type="text"], .add-row input[type="url"] {
@@ -170,7 +179,14 @@ body {
   color: var(--muted);
   cursor: pointer;
 }
-.icon-btn:hover { background: var(--bg); color: var(--text); }
+@media (hover: hover) {
+  .icon-btn:hover { background: var(--bg); color: var(--text); }
+  .btn:not(:disabled):hover { border-color: color-mix(in srgb, var(--text) 30%, var(--border)); }
+  .btn.primary:not(:disabled):hover { filter: brightness(1.08); }
+  .tab:not(.active):hover { color: var(--text); }
+}
+/* The ring the keyboard draws, on everything it reaches; a click draws none. */
+:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
 
 .hint { color: var(--muted); font-size: 0.85rem; margin: 6px 0 0; }
 .hint code { font-family: ui-monospace, monospace; }
@@ -338,6 +354,7 @@ body {
 
 /* seeding cards: the files are already on this device */
 .torrent.seeding .zip-btn,
+.torrent.seeding .folder-btn,
 .torrent.seeding .select-all-btn,
 .torrent.seeding .select-none-btn,
 .torrent.seeding .file-progress,
@@ -535,3 +552,138 @@ body {
 .check-result.all-good { border-color: var(--ok); }
 .check-summary { margin: 0; font-weight: 600; }
 #ed-check .progress { margin: 0; }
+
+/* ---- finding a torrent: search, filter, order, and on a computer, cards or a table ---- */
+.list-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.list-search {
+  flex: 1 1 180px; min-width: 0; font: inherit; padding: 9px 12px; border-radius: 10px;
+  border: 1px solid var(--border); background: var(--card); color: var(--text); min-height: 40px;
+}
+.list-tools select {
+  font: inherit; font-size: 0.9rem; padding: 8px 10px; border-radius: 10px; min-height: 40px; min-width: 0;
+  border: 1px solid var(--border); background: var(--card); color: var(--text);
+}
+.list-sort { display: inline-flex; align-items: center; gap: 2px; min-width: 0; }
+.list-sort .icon-btn { font-size: 1.1rem; }
+.list-density { display: none; gap: 4px; padding: 3px; background: var(--card); border: 1px solid var(--border); border-radius: 10px; }
+.list-density .tab { min-height: 32px; padding: 4px 12px; font-size: 0.85rem; }
+@media (max-width: 480px) {
+  .list-search { flex-basis: 100%; }
+  .list-tools select { flex: 1 1 0; }
+}
+/* What to do with the torrents selected in the list. */
+.bulk-bar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 10px 8px 14px;
+  background: var(--row-selected); border: 1px solid var(--border); border-radius: 12px;
+}
+.bulk-count { font-weight: 600; font-size: 0.9rem; margin-right: auto; }
+.bulk-bar .btn.danger { background: var(--card); }
+
+/* What the search or the filter leaves out, on a phone; the order chosen comes from `order`. */
+.torrents .torrent.filtered { display: none; }
+
+/* ---- the list itself: only on a computer ---- */
+.torrent-list { display: none; }
+.detail-empty { margin: 0; }
+.tl-head { display: none; }
+.tl-row {
+  display: grid; grid-template-columns: 28px minmax(0, 1fr); grid-template-areas: "check name" ". progress";
+  align-items: center; gap: 4px 10px; padding: 10px 14px; border-top: 1px solid var(--border); cursor: pointer;
+  outline-offset: -2px;
+}
+.tl-body > .tl-row:first-child { border-top: none; }
+.tl-row > .tl-cell { display: none; min-width: 0; }
+.tl-row > .tl-check { display: flex; grid-area: check; }
+.tl-row > .tl-name { display: grid; gap: 1px; grid-area: name; }
+.tl-row > .tl-progress { display: flex; grid-area: progress; }
+.tl-row > .tl-progress .tl-pct { display: none; }
+.tl-check { display: flex; align-items: center; }
+.tl-check input { width: 18px; height: 18px; margin: 0; accent-color: var(--primary); cursor: pointer; }
+.tl-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tl-sub { color: var(--muted); font-size: 0.8rem; font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tl-progress { align-items: center; gap: 6px; }
+.tl-track { flex: 1; height: 4px; border-radius: 999px; background: var(--track); overflow: hidden; }
+.tl-bar { display: block; height: 100%; width: 0; background: var(--primary); transition: width 0.3s ease; }
+.tl-row.done .tl-bar, .tl-row.seeding .tl-bar { background: var(--accent); }
+.tl-row.paused .tl-bar { background: var(--muted); }
+.tl-row.focused { background: var(--row-open); box-shadow: inset 3px 0 0 var(--primary); }
+.tl-row.selected { background: var(--row-selected); }
+.tl-row:focus-visible { outline: 2px solid var(--primary); }
+@media (hover: hover) {
+  .tl-row:hover:not(.focused, .selected) { background: var(--row-hover); }
+}
+.tl-empty { margin: 0; }
+.tl-sort { font: inherit; font-weight: 600; color: inherit; background: none; border: 0; padding: 4px 0; cursor: pointer; }
+[aria-sort="ascending"] > .tl-sort::after { content: " ↑"; }
+[aria-sort="descending"] > .tl-sort::after { content: " ↓"; }
+
+/* The table: one line a torrent, its numbers in columns, sorted by a click on a header. */
+.torrent-list.table .tl-head,
+.torrent-list.table .tl-row {
+  display: grid; grid-template-areas: none; grid-template-columns: 28px minmax(0, 1.6fr) 68px 112px 68px 68px 48px 52px minmax(96px, 0.7fr);
+  align-items: center; gap: 0 10px;
+}
+.torrent-list.table .tl-head {
+  padding: 6px 14px; font-size: 0.75rem; color: var(--muted); background: var(--bg); border-bottom: 1px solid var(--border);
+}
+.torrent-list.table .tl-head > .tl-cell { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.torrent-list.table .tl-row { padding: 7px 14px; }
+.torrent-list.table .tl-row > .tl-cell {
+  display: block; grid-area: auto; font-size: 0.85rem; font-variant-numeric: tabular-nums;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.torrent-list.table .tl-row > .tl-check,
+.torrent-list.table .tl-row > .tl-progress { display: flex; }
+.torrent-list.table .tl-row > .tl-progress .tl-pct { display: inline; width: 3.2em; text-align: right; flex: none; }
+.torrent-list.table .tl-sub { display: none; }
+.torrent-list.table .tl-title { font-weight: 500; }
+.torrent-list.table :is(.tl-size, .tl-down, .tl-up, .tl-peers, .tl-eta) { text-align: right; }
+.torrent-list.table .tl-track { height: 6px; }
+/* A narrow list (the window at 1024px, the open torrent taking its share) keeps the columns that matter. */
+@container (max-width: 760px) {
+  .torrent-list.table .tl-head,
+  .torrent-list.table .tl-row { grid-template-columns: 28px minmax(0, 1.6fr) 64px 104px 64px minmax(88px, 0.7fr); }
+  .torrent-list.table :is(.tl-head, .tl-row) > :is(.tl-up, .tl-peers, .tl-eta) { display: none; }
+}
+
+/* ---- a computer: the list, and the torrent open beside it ---- */
+@media (min-width: 1024px) {
+  .topbar { padding-inline: max(16px, calc((100% - 1440px) / 2 + 16px)); }
+  .container { max-width: 1440px; grid-template-columns: minmax(0, 62fr) minmax(360px, 38fr); align-items: start; }
+  .list-pane { display: grid; gap: 16px; min-width: 0; }
+  /* Under the top bar as the list scrolls, and scrolling on its own when the torrent is longer than the window. */
+  .detail-pane {
+    display: grid; gap: 16px; min-width: 0; position: sticky; top: 77px;
+    max-height: calc(100dvh - 93px); overflow-y: auto; overscroll-behavior: contain; border-radius: var(--radius);
+  }
+  .detail-empty { padding: 48px 24px; border: 1px dashed var(--border); border-radius: var(--radius); }
+  .torrents .torrent { display: none; }
+  .torrents .torrent.focused { display: block; }
+  .torrent-list {
+    display: block; background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+    box-shadow: var(--shadow); overflow: hidden; container-type: inline-size;
+  }
+  .list-density { display: inline-flex; }
+  .list-tools .keys-btn { display: inline-flex; }
+}
+
+/* ---- the computer's ways in: a folder, a drop anywhere, the keyboard ---- */
+.add-row .file-btn { flex: 1 1 0; min-width: 0; }
+.add-row .folder-pick { flex: 0 1 auto; width: auto; }
+.keys-btn { display: none; }
+.drop-overlay {
+  position: fixed; inset: 8px; z-index: 20; display: grid; place-items: center; pointer-events: none;
+  border: 3px dashed var(--primary); border-radius: var(--radius);
+  background: color-mix(in srgb, var(--bg) 86%, transparent);
+}
+.drop-overlay p {
+  margin: 0; padding: 14px 22px; border-radius: 12px; font-weight: 600; font-size: 1.05rem;
+  background: var(--card); color: var(--text); box-shadow: 0 8px 30px rgba(0, 0, 0, 0.2);
+}
+.keys { display: grid; grid-template-columns: auto 1fr; gap: 8px 16px; margin: 0; font-size: 0.9rem; align-items: baseline; }
+.keys dt { white-space: nowrap; }
+.keys dd { margin: 0; color: var(--muted); }
+kbd {
+  font: 0.8rem ui-monospace, SFMono-Regular, Menlo, monospace; padding: 1px 6px; border-radius: 6px;
+  border: 1px solid var(--border); border-bottom-width: 2px; background: var(--bg); color: var(--text);
+}
