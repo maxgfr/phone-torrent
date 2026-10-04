@@ -1160,6 +1160,82 @@ try {
     await edCtx.close();
   }
 
+  /* ---------- making a torrent: Seed & share's options ---------- */
+  // A private torrent with a source, made here: saved alone first ("only the .torrent"), then the same
+  // files shared — the same torrent — and downloaded by a second page from the .torrent saved.
+  {
+    const made = (n, seed) => {
+      const out = Buffer.alloc(n);
+      let x = seed;
+      for (let i = 0; i < n; i++) { x = (x * 1103515245 + 12345) & 0x7fffffff; out[i] = x >> 16; }
+      return out;
+    };
+    const content = made(200000, 76);
+    const settingsFor = ({ t, rtc }) => localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], trackerList: false, rtcConfig: rtc }));
+    const makerCtx = await browser.newContext({ acceptDownloads: true });
+    const maker = await makerCtx.newPage();
+    maker.on('pageerror', (e) => console.error('maker page error:', e));
+    await maker.addInitScript(settingsFor, { t: trackerUrl, rtc: rtcConfig });
+    await maker.goto(site.url);
+    await maker.waitForFunction(() => window.__phoneTorrent?.client);
+    await maker.waitForFunction(() => window.__phoneTorrent.saver.mode === 'stream' || window.__phoneTorrent.saver.reason, null, { timeout: 15000 });
+    await maker.click('.tab[data-tab="seed"]');
+    assert.equal(await maker.textContent('#seed-options-summary'), 'Auto pieces · public · app trackers', 'folded, and saying it makes torrents as always');
+    assert.equal(await maker.isVisible('#so-trackers'), false, 'its options out of the way until asked for');
+    await maker.click('#seed-options summary');
+    await maker.fill('#so-trackers', trackerUrl);
+    await maker.check('#so-private');
+    await maker.fill('#so-source', 'MADE-HERE');
+    await maker.check('#so-only');
+    assert.equal(await maker.textContent('#seed-options-summary'), 'Auto pieces · private · 1 tracker · source MADE-HERE · .torrent only');
+    const [download] = await Promise.all([
+      maker.waitForEvent('download', { timeout: 30000 }),
+      maker.setInputFiles('#seed-file-input', { name: 'made here.bin', mimeType: 'application/octet-stream', buffer: content }),
+    ]);
+    assert.equal(download.suggestedFilename(), 'made here.bin.torrent');
+    const madePath = path.join(TMP, 'made here.torrent');
+    await download.saveAs(madePath);
+    const madeTorrent = readFileSync(madePath);
+    const madeRoot = decodeBencode(new Uint8Array(madeTorrent));
+    assert.equal(madeRoot.get('info').get('private'), 1, 'the .torrent is private');
+    assert.equal(Buffer.from(madeRoot.get('info').get('source')).toString(), 'MADE-HERE', 'and carries its source');
+    assert.equal(Buffer.from(madeRoot.get('announce')).toString(), trackerUrl);
+    assert.equal(madeRoot.get('info').get('piece length'), 16384, 'Auto: the piece size sharing always used');
+    assert.equal((await maker.$$('.torrent')).length, 0, 'and nothing is shared');
+    const { spans } = decodeBencode(new Uint8Array(madeTorrent), { spans: true });
+    const madeHash = createHash('sha1').update(madeTorrent.subarray(...spans.get('info'))).digest('hex');
+
+    // The same files shared, with the same options: the same torrent, private on its card too.
+    await maker.uncheck('#so-only');
+    await maker.setInputFiles('#seed-file-input', { name: 'made here.bin', mimeType: 'application/octet-stream', buffer: content });
+    await maker.waitForSelector('.torrent .share-panel:not([hidden])', { timeout: 30000 });
+    assert.equal(await maker.evaluate(() => window.__phoneTorrent.client.torrents[0].infoHash), madeHash, 'shared, the torrent "only the .torrent" saved');
+    assert.equal(await maker.isVisible('.torrent .share-private'), true, 'its card treats it as private');
+    assert.deepEqual(await maker.evaluate(() => window.__phoneTorrent.client.torrents[0].announce), [trackerUrl], 'announced to its own tracker alone');
+    assert.equal(await maker.evaluate(() => JSON.parse(localStorage.getItem('phone-torrent:settings')).createOptions.source), 'MADE-HERE', 'the options kept for next time');
+
+    // A second page downloads it from the .torrent saved.
+    const takerCtx = await browser.newContext();
+    const taker = await takerCtx.newPage();
+    taker.on('pageerror', (e) => console.error('taker page error:', e));
+    await taker.addInitScript(settingsFor, { t: trackerUrl, rtc: rtcConfig });
+    await taker.goto(site.url);
+    await taker.waitForFunction(() => window.__phoneTorrent?.client);
+    await taker.setInputFiles('#torrent-file-input', { name: 'made here.torrent', mimeType: 'application/x-bittorrent', buffer: madeTorrent });
+    await waitFor(() => taker.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 'the torrent made here downloaded by another page', timeout: 120000 });
+    const got = await taker.evaluate(async () => {
+      const file = window.__phoneTorrent.client.torrents[0].files[0];
+      return Array.from(new Uint8Array(await new Response(file.stream()).arrayBuffer()));
+    });
+    assert.equal(sha(Buffer.from(got)), sha(content), 'byte for byte');
+    // The seed goes with its page before its context does (see the editor's card above).
+    await maker.reload();
+    await taker.reload();
+    await takerCtx.close();
+    await makerCtx.close();
+    log('making a torrent: private with a source, saved alone, then shared — the same info hash — and downloaded by another page');
+  }
+
   /* ---------- seeder ---------- */
   const seederCtx = await browser.newContext();
   const seeder = await seederCtx.newPage();
@@ -2837,6 +2913,9 @@ try {
     window.__holdHashes = sessionStorage.getItem('hold-hashes') === '1';
     crypto.subtle.digest = (algorithm, data) => (window.__holdHashes && data.byteLength >= 16384 ? new Promise((resolve) => held.push(resolve)) : Promise.resolve())
       .then(() => digest(algorithm, data));
+    // A seed is hashed off the page where there is a Worker (lib/torrent-hash.js), out of this hold's
+    // reach: here, as in a browser without one, it is hashed on the page.
+    Object.defineProperty(window, 'Worker', { value: undefined, configurable: true });
     window.__releaseHashes = () => {
       window.__holdHashes = false;
       sessionStorage.removeItem('hold-hashes');

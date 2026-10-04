@@ -2,7 +2,9 @@ import WebTorrent from './vendor/webtorrent.min.js';
 import { makeZip, predictLength } from './vendor/client-zip.js';
 import { saver } from './saver.js';
 import { createEditor } from './lib/editor.js';
-import { parseMagnet } from './lib/torrent-meta.js';
+import { parseMagnet, createTorrent } from './lib/torrent-meta.js';
+import { hashPieces } from './lib/torrent-hash.js';
+import { createOptionsUI, creationOptions, normalizeCreate } from './lib/create-options.js';
 import { createPresetsUI, normalizePresets } from './lib/presets.js';
 
 const DEFAULT_CLOUD_PROVIDER = 'torbox';
@@ -176,6 +178,8 @@ function loadSettings() {
     dohResolver: DEFAULT_DOH,
     // What a tracker wants in every torrent for it, under a name: see lib/presets.js.
     presets: [],
+    // How Seed & share makes its torrents (lib/create-options.js); the defaults make them as always.
+    createOptions: normalizeCreate(),
   };
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
@@ -196,6 +200,7 @@ function loadSettings() {
         metadataSources: sources,
         cloud: { ...defaults.cloud, ...(parsed.cloud || {}) },
         presets: normalizePresets(parsed.presets),
+        createOptions: normalizeCreate(parsed.createOptions),
       };
     }
   } catch { /* ignore */ }
@@ -2545,31 +2550,73 @@ function sourceToId(record) {
   return null;
 }
 
-async function seedFiles(files, { name, pickedIn = '', handedOver = false } = {}) {
+/** What WebTorrent's own seed wrote as "created by" ("WebTorrent/0208"), which sharing always wrote. */
+const CREATED_BY = `WebTorrent/${String(WebTorrent.VERSION || '').replace(/\d*./g, (v) => `0${v % 100}`.slice(-2)).slice(0, 4)}`;
+
+/** What createTorrent is given for these Seed & share options. */
+function creationFor(options) {
+  return creationOptions(options, { appTrackers: effectiveTrackers(), createdBy: CREATED_BY });
+}
+
+/**
+ * Share files as a torrent. It is made here (lib/torrent-meta.js, hashed off the page by
+ * lib/torrent-hash.js) with the Seed & share options, then added as WebTorrent's own seed adds one:
+ * an empty torrent at once, for its card, then its .torrent, then the files loaded into its storage.
+ * The .torrent shared is the one "Only make the .torrent" would have saved.
+ */
+async function seedFiles(files, { name, options = settings.createOptions, pickedIn = '', handedOver = false } = {}) {
   if (!files.length) return null;
   if (IN_BROWSER_BLOCKED) throw new Error(IN_BROWSER_BLOCKED);
-  if (!(await leading)) return addThroughLead({ op: 'seed', files: [...files], name }, { share: true });
+  const message = { op: 'seed', files: [...files], name, options };
+  if (!(await leading)) return addThroughLead(message, { share: true });
   await storageReady;
-  if (follower) return addThroughLead({ op: 'seed', files: [...files], name }, { share: true });
+  if (follower) return addThroughLead(message, { share: true });
+  const made = creationFor(options);
+  // A private torrent (BEP 27) is announced to its own trackers alone; any other to the app's as well,
+  // so browsers find it whatever trackers its file names.
+  const own = made.trackers.flat();
+  const announce = made.private ? own : [...new Set([...own, ...effectiveTrackers()])];
   // Seeds copy the files into OPFS; drop that copy when the seed is removed.
-  const opts = { ...storeOpts(), announce: effectiveTrackers(), destroyStoreOnDestroy: true };
-  if (name) opts.name = name;
-  // Files already being shared make the same torrent: WebTorrent closes the new one without a word
-  // and hands over the one there is. Picked again to get the link back, that is where it is.
-  const torrent = client.seed(files, opts, (seeded) => {
-    if (seeded === torrent || !views.has(seeded) || handedOver) return;
-    toast(`"${seeded.name}" is already being shared.`);
-    shareTorrent(seeded);
-    // Picked in a copy that follows this one: that is where its link is wanted.
-    if (pickedIn) {
-      postState();
-      otherCopies?.postMessage({ type: 'share', to: pickedIn, sid: syncId(seeded) });
-    }
-  });
+  const torrent = client.add(null, { ...storeOpts(), announce, destroyStoreOnDestroy: true, skipVerify: true });
   const view = attachTorrent(torrent, { seeding: true });
   // A seed is never remembered: what was picked is what another open copy needs to go on sharing it.
-  view.picked = { files: [...files], name };
+  view.picked = { files: [...files], name, options };
   keepStorage();
+  let created;
+  try {
+    created = await createTorrent(files, { ...made, name, hash: hashPieces, onProgress: (done, total) => { view.hashed = total ? done / total : 1; } });
+  } catch (err) {
+    removeView(torrent);
+    updateEmptyState();
+    if (!torrent.destroyed) torrent.destroy();
+    throw err;
+  }
+  // Removed while its files were being hashed.
+  if (torrent.destroyed) return null;
+  view.reach = torrentReach(created.bytes);
+  // Files already being shared make the same torrent. Picked again to get the link back, that is
+  // where it is.
+  const existing = client.torrents.find((t) => t !== torrent && t.infoHash === created.infoHash);
+  if (existing) {
+    // Its card goes now, not when WebTorrent is done closing it: one card for one torrent.
+    removeView(torrent);
+    updateEmptyState();
+    torrent.destroy();
+    if (views.has(existing) && !handedOver) {
+      toast(`"${existing.name}" is already being shared.`);
+      shareTorrent(existing);
+      // Picked in a copy that follows this one: that is where its link is wanted.
+      if (pickedIn) {
+        postState();
+        otherCopies?.postMessage({ type: 'share', to: pickedIn, sid: syncId(existing) });
+      }
+    }
+    return existing;
+  }
+  torrent._onTorrentId(created.bytes);
+  torrent.load(created.files.map((f) => f.stream()), (err) => {
+    if (err && !torrent.destroyed) torrent._destroy(err);
+  });
   // Shared already, in the copy that ran it before this one: nothing new to say.
   if (handedOver) return torrent;
   // Sharing is what a seed is for: the link, shown and selected, rather than the details panel.
@@ -2578,6 +2625,21 @@ async function seedFiles(files, { name, pickedIn = '', handedOver = false } = {}
     shareTorrent(torrent);
   });
   return torrent;
+}
+
+/** "Only make the .torrent": the same torrent sharing would make, saved to the device instead. */
+async function saveTorrentOf(files, { name, options = settings.createOptions } = {}) {
+  toast('Making the .torrent…');
+  const created = await createTorrent(files, { ...creationFor(options), name, hash: hashPieces });
+  const fileName = `${created.name.replace(/[\\/:*?"<>|\u0000-\u001f]+/g, '_') || 'torrent'}.torrent`;
+  await saver.save({ name: fileName, size: created.bytes.length, stream: () => new Blob([created.bytes]).stream() });
+  toast(`Saved ${fileName} (${created.infoHash}).`);
+  return created;
+}
+
+/** Files picked or dropped to share: shared, or only made into a .torrent when the options say so. */
+function shareOrMake(files, { name } = {}) {
+  return settings.createOptions?.onlyTorrent ? saveTorrentOf(files, { name }) : seedFiles(files, { name });
 }
 
 async function seedRemoteUrl(url) {
@@ -2589,7 +2651,7 @@ async function seedRemoteUrl(url) {
   const cd = res.headers.get('Content-Disposition');
   const m = cd && cd.match(/filename\*?=(?:UTF-8'')?"?([^";]+)"?/i);
   if (m) name = decodeURIComponent(m[1]);
-  return seedFiles([new File([blob], name, { type: blob.type })]);
+  return shareOrMake([new File([blob], name, { type: blob.type })]);
 }
 
 function attachTorrent(torrent, { record, seeding, reach = null }) {
@@ -2895,7 +2957,7 @@ function refreshView(view) {
   let state;
   if (selected.length === 0 && torrent.files.length) state = 'nothing selected';
   else if (torrent.paused && !view.autoStopped) state = 'paused';
-  else if (view.seeding && !torrent.ready) state = 'hashing';
+  else if (view.seeding && !torrent.ready) state = view.hashed !== undefined && view.hashed < 1 ? `hashing ${Math.floor(view.hashed * 100)}%` : 'hashing';
   else if (complete) state = torrent.numPeers ? `seeding to ${torrent.numPeers}` : (view.seeding ? 'seeding · waiting for peers' : 'complete');
   else if (!navigator.onLine && torrent.numPeers === 0) state = 'offline, waiting for the network';
   else if (!torrent.metadata) state = 'fetching metadata';
@@ -3881,7 +3943,7 @@ async function runCall(message, from = '') {
       if (message.handover && !takesHandOver(message)) return { sid: '' };
       // A seed whose link was never shown (it was still getting ready) shows it here.
       const quiet = message.handover === true && message.ready === true;
-      const seeded = await seedFiles(message.files || [], { name: message.name, pickedIn: message.handover ? '' : from, handedOver: quiet });
+      const seeded = await seedFiles(message.files || [], { name: message.name, options: message.options, pickedIn: message.handover ? '' : from, handedOver: quiet });
       if (message.handover && seeded && !seeded.remote) keepPaused(seeded, message);
       return { sid: syncId(seeded) };
     }
@@ -4130,7 +4192,7 @@ function seedsToHandOver() {
   return [...views.values()].filter((v) => v.seeding && !v.torrent.remote && !v.torrent.destroyed).map((v) => {
     const { torrent } = v;
     const about = { handover: true, infoHash: torrent.infoHash || '', paused: Boolean(torrent.paused), ready: Boolean(torrent.ready) };
-    if (v.picked) return { op: 'seed', files: v.picked.files, name: v.picked.name, ...about };
+    if (v.picked) return { op: 'seed', files: v.picked.files, name: v.picked.name, options: v.picked.options, ...about };
     if (opfsOk && torrent.metadata && torrent.torrentFile) return { op: 'add', id: new Uint8Array(torrent.torrentFile), seeding: true, ...about };
     return null;
   }).filter(Boolean);
@@ -4503,7 +4565,7 @@ els.seedFileInput.addEventListener('change', () => {
     if (name === null) return;
     name = name.trim() || 'Shared files';
   }
-  seedFiles(files, { name }).catch((err) => toast(err.message, { error: true, timeout: 9000 }));
+  shareOrMake(files, { name }).catch((err) => toast(err.message, { error: true, timeout: 9000 }));
 });
 
 els.seedUrlForm.addEventListener('submit', async (event) => {
@@ -4645,6 +4707,12 @@ els.editMagnetForm.addEventListener('submit', async (event) => {
 
 const activeTab = () => $('.tabs .tab.active')?.dataset.tab || 'download';
 
+const seedOptions = createOptionsUI($('#tab-seed'), {
+  load: () => settings.createOptions,
+  save: (createOptions) => saveSettings({ ...settings, createOptions }),
+  getPresets: () => settings.presets || [],
+});
+
 // Only the add card's tabs: the Simple / Expert switch in Settings looks like one (class "tab") but
 // has no panel, and matching it too hid every panel the moment the mode was changed.
 $$('.tabs .tab').forEach((tab) => tab.addEventListener('click', () => {
@@ -4681,7 +4749,7 @@ els.dropZone.addEventListener('drop', async (e) => {
   const torrents = files.filter((f) => /\.torrent$/i.test(f.name));
   if (torrents.length) return addTorrentFiles(torrents);
   if (files.length) {
-    return seedFiles(files, { name: files.length > 1 ? 'Shared files' : undefined })
+    return shareOrMake(files, { name: files.length > 1 ? 'Shared files' : undefined })
       .catch((err) => toast(err.message, { error: true, timeout: 9000 }));
   }
   const text = e.dataTransfer?.getData('text');
@@ -5417,4 +5485,4 @@ async function restoreTorrents(records) {
 started.then(() => startupRestored(), () => startupRestored());
 
 // Expose for debugging and tests.
-window.__phoneTorrent = { editor, get follower() { return follower; }, get settings() { return settings; }, client, views, saver, started, addTorrent, askTrackersNow, seedFiles, torrentReach, unreachableReason, cloudCtx, CLOUD_PROVIDERS, cloudSend, refreshCloudLibrary, cloudRemoveItem, keyRefused, effectiveTrackers, refreshTrackerList, fetchMetadataFallback, verifyTorrentBytes, findInfoSpan, runNetworkCheck, cleanOrphanStores, isComplete, get opfsOk() { return opfsOk; } };
+window.__phoneTorrent = { editor, seedOptions, createTorrent, hashPieces, get follower() { return follower; }, get settings() { return settings; }, client, views, saver, started, addTorrent, askTrackersNow, seedFiles, torrentReach, unreachableReason, cloudCtx, CLOUD_PROVIDERS, cloudSend, refreshCloudLibrary, cloudRemoveItem, keyRefused, effectiveTrackers, refreshTrackerList, fetchMetadataFallback, verifyTorrentBytes, findInfoSpan, runNetworkCheck, cleanOrphanStores, isComplete, get opfsOk() { return opfsOk; } };

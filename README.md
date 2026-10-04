@@ -49,6 +49,15 @@ and saved to the device file by file or as one `.zip`.
   say otherwise; Cancel there seeds nothing). Picked again, files already being shared open the link
   of the seed there is. A seed stays a seed through a retry: never remembered, and gone with the page.
   A CORS‑enabled remote URL can be seeded too. The `.torrent` and the magnet are one tap away.
+  The app makes the torrent itself, hashing the files off the page in a Worker (on the page where there
+  is none), with its progress on the card — and with the defaults it is the very torrent WebTorrent's
+  own seed made of the same files. **Torrent options**, folded into one line above the picker ("Auto
+  pieces · public · app trackers"), change that: a preset; the trackers the file names (browsers are
+  still told on the app's own, unless it is private); the piece size — Auto, mkbrr's table, a number of
+  pieces or a size of your own, with a largest piece, and a private tracker's own table when its first
+  tracker has one; private, source (the tracker's expected one unless you set another), comment, web
+  seeds; no creation date, no *created by*; names to leave out (`*.nfo`); and **Only make the .torrent**,
+  which saves the very `.torrent` sharing would have shared, and shares nothing. They are remembered.
 - **Share hands you the link.** Not a message saying it was copied: the app link and the magnet, both
   shown, selected and one tap from the clipboard — plus the system share sheet where there is one, and
   **Save .torrent**. Every torrent can be shared, not only the ones you seed — except a private one:
@@ -336,8 +345,13 @@ the trackers, web seeds, comment, *created by* and date edited with the info has
 whose keys are not sorted included, which only a copy of its bytes leaves alone — and the name, private
 flag, source and entropy each making a new one; v2 and hybrid torrents keeping theirs; tiers of
 trackers as text; magnets read and written again, base32 hashes and unknown parameters included;
-piece sizes; the trackers' rules; the same edits across several files; and presets, read from
-whatever was stored.
+piece sizes; the trackers' rules; the same edits across several files; presets, read from whatever
+was stored; pieces hashed across file boundaries, with a missing file and a short one marked absent,
+progress and a stop; a torrent made with the info hash of a hand‑made one, and of WebTorrent's own
+`create-torrent` for a folder (its name taken from it, `.DS_Store` left out and `Thumbs.db` kept, as
+there), every option written where it goes, and a private tracker's own piece table; and the Seed &
+share options, folded into their line, giving the app's trackers when none are written and a rule's
+source when none is set.
 
 `test/e2e.mjs` boots a WebSocket tracker and a static server, seeds a two‑file torrent through the
 UI of one browser context and downloads it in a second, phone‑sized one — the real UI throughout. It
@@ -419,7 +433,10 @@ opened from its **Edit .torrent**, and made private with a warning; two `.torren
 tracker added and a comment cleared with their info hashes kept, then a source set with a new hash
 each, both times unzipped from the `.zip` saved; a preset made in Settings (Enter keeping it, not
 closing Settings) filling the trackers and comment, the PTP rule it brings shown and its source set in
-one tap, never by itself; and at 320px, four tabs and the
+one tap, never by itself; a private torrent with a source made in Seed & share, saved alone with
+**Only make the .torrent** (its piece size the one sharing always used, nothing shared), then the same
+files shared — the same info hash, its card private, announced to its own tracker alone, the options
+remembered — and downloaded from the saved file by another page, byte for byte; and at 320px, four tabs and the
 whole dialog on the screen, its banner, mark, hints and Save at 4.5:1 or better in light and dark.
 
 `test/server.mjs` is the other half, with no browser anywhere: a plain BitTorrent client seeds a file
@@ -487,6 +504,8 @@ require it.
 | `lib/torrent-meta.js` | a `.torrent` read and edited (its `info` copied when untouched), magnets, piece sizes, the trackers' rules |
 | `lib/editor.js` | the editor's dialog: one form for a `.torrent`, a magnet and several files at once |
 | `lib/presets.js` | presets, and their list and form in Settings |
+| `lib/torrent-hash.js`, `lib/hash-worker.js` | the SHA‑1 of every piece, across files, in a Worker, with progress and a stop |
+| `lib/create-options.js` | Seed & share's torrent options, folded into one line |
 | `sw.js` | turns that stream into a download, and receives Web Share Target posts |
 | `server/` | the real BitTorrent client, its API and its Dockerfile |
 | `cloudflare/` | the Worker and container config for `wrangler deploy` |
@@ -502,7 +521,7 @@ require it.
 | Select the files to download | yes | on the page; the server fetches the whole torrent |
 | Pause, resume, remove | yes | remove, on the account |
 | Speed limits, sequential download | yes | the service's own settings |
-| Seeding, creating a torrent | yes, while the page is open | the server keeps seeding after a download |
+| Seeding, creating a torrent | yes, while the page is open — piece size, private, source, trackers, or only the `.torrent` | the server keeps seeding after a download |
 | Web seeds | yes | n/a |
 | Edit a `.torrent` (trackers, web seeds, comment, name, source, private) | yes | yes, on the page |
 | DHT, PEX, `udp://` and `http(s)://` trackers | **no** — impossible in a browser | **yes** |

@@ -70,6 +70,72 @@
 
       <div class="tab-panel" id="tab-seed" role="tabpanel" hidden>
         <p class="notice error insecure-note" hidden></p>
+        <details class="torrent-options" id="seed-options">
+          <summary><span class="torrent-options-title">Torrent options</span> <span class="hint" id="seed-options-summary"></span></summary>
+          <div class="torrent-options-body">
+            <label class="field">
+              <span>Preset</span>
+              <select id="so-preset"></select>
+            </label>
+            <label class="field">
+              <span>Trackers</span>
+              <textarea id="so-trackers" rows="3" spellcheck="false" autocapitalize="off" placeholder="The app's own trackers"></textarea>
+              <span class="hint">Empty: the app's own, as always. One per line, a blank line between tiers. Browsers are
+                told about it on the app's trackers too, unless it is private.</span>
+            </label>
+            <p class="hint" id="so-rule" hidden></p>
+            <div class="field two-col">
+              <label class="field">
+                <span>Piece size</span>
+                <select id="so-piece"></select>
+              </label>
+              <label class="field">
+                <span>At most</span>
+                <select id="so-max"></select>
+              </label>
+            </div>
+            <label class="field" id="so-target-field" hidden>
+              <span>About this many pieces</span>
+              <input id="so-target" type="number" min="1" step="100" inputmode="numeric" />
+            </label>
+            <label class="toggle">
+              <input id="so-private" type="checkbox" />
+              <span>Private: announced to its own trackers only</span>
+            </label>
+            <div class="field two-col">
+              <label class="field">
+                <span>Source</span>
+                <input id="so-source" type="text" spellcheck="false" autocomplete="off" />
+              </label>
+              <label class="field">
+                <span>Comment</span>
+                <input id="so-comment" type="text" autocomplete="off" />
+              </label>
+            </div>
+            <label class="field">
+              <span>Web seeds</span>
+              <textarea id="so-webseeds" rows="2" spellcheck="false" autocapitalize="off"></textarea>
+            </label>
+            <label class="field">
+              <span>Leave out</span>
+              <input id="so-exclude" type="text" spellcheck="false" autocapitalize="off" placeholder="*.nfo, Thumbs.db" />
+              <span class="hint">File names, separated by commas; * and ? work. Hidden system files (.DS_Store, ._*) always are.</span>
+            </label>
+            <label class="toggle">
+              <input id="so-no-date" type="checkbox" />
+              <span>No creation date</span>
+            </label>
+            <label class="toggle">
+              <input id="so-no-created-by" type="checkbox" />
+              <span>No "created by"</span>
+            </label>
+            <label class="toggle">
+              <input id="so-only" type="checkbox" />
+              <span>Only make the .torrent (don't share)</span>
+            </label>
+            <button id="so-reset" class="btn small ghost" type="button">Back to the defaults</button>
+          </div>
+        </details>
         <div class="add-row">
           <label class="btn primary file-btn">
             <input id="seed-file-input" type="file" multiple />

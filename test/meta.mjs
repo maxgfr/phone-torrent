@@ -9,9 +9,12 @@ import { createHash } from 'node:crypto';
 import { decode, encode, infoHashOf, Raw, text } from '../lib/bencode.js';
 import {
   readTorrent, applyEdits, applyBatch, identityChanges, parseTiers, formatTiers, parseMagnet, toMagnet,
-  autoPieceLength, ruleFor, describeRule, ruleProblems,
+  autoPieceLength, ruleFor, describeRule, ruleProblems, createTorrent, excludeTest,
 } from '../lib/torrent-meta.js';
 import { normalizePreset, normalizePresets, presetSummary } from '../lib/presets.js';
+import { hashInline } from '../lib/torrent-hash.js';
+import { createSummary, creationOptions, normalizeCreate } from '../lib/create-options.js';
+import createTorrentPackage from 'create-torrent';
 import { bencode, makeTorrent } from './torrents.mjs';
 
 const log = (...a) => console.log('•', ...a);
@@ -250,6 +253,96 @@ const u8 = (b) => new Uint8Array(b.buffer, b.byteOffset, b.byteLength);
   assert.deepEqual(normalizePresets('nonsense'), []);
   assert.deepEqual(normalizePreset({ trackers: ['wss://a', ['wss://b', '']] }).trackers, [['wss://a'], ['wss://b']], 'a tier written as a bare address is one tier');
   log('presets: whatever was stored read as a preset, and summed up in a line');
+}
+
+/* ---------- hashing pieces ---------- */
+{
+  const a = body(40000, 21);
+  const b = body(9000, 22);
+  const whole = Buffer.concat([a, b]);
+  const len = 16384;
+  const want = [];
+  for (let off = 0; off < whole.length; off += len) want.push(createHash('sha1').update(whole.subarray(off, off + len)).digest());
+  const { hashes, absent } = await hashInline([{ blob: new Blob([a]), length: a.length }, { blob: new Blob([b]), length: b.length }], len);
+  assert.deepEqual(Buffer.from(hashes), Buffer.concat(want), 'pieces run on from one file into the next');
+  assert.deepEqual([...absent], [0, 0, 0]);
+  // A file missing, and one shorter than the torrent says: the pieces they would fill are absent.
+  const gone = await hashInline([{ blob: new Blob([a]), length: a.length }, { blob: null, length: b.length }], len);
+  assert.deepEqual([...gone.absent], [0, 0, 1], 'a missing file: the piece it shares with the one before');
+  assert.deepEqual(Buffer.from(gone.hashes.subarray(0, 40)), Buffer.concat(want.slice(0, 2)));
+  const short = await hashInline([{ blob: new Blob([a.subarray(0, 20000)]), length: a.length }, { blob: new Blob([b]), length: b.length }], len);
+  assert.deepEqual([...short.absent], [0, 1, 1], 'a short file: the pieces past its end');
+  let seen = 0;
+  await hashInline([{ blob: new Blob([whole]), length: whole.length }], len, { onProgress: (done) => { seen = done; } });
+  assert.equal(seen, whole.length, 'progress ends at the whole length');
+  const stop = new AbortController();
+  stop.abort();
+  await assert.rejects(hashInline([{ blob: new Blob([whole]), length: whole.length }], len, { signal: stop.signal }), /stopped/);
+  log('hashing: pieces across files, a missing file and a short one marked absent, progress, and a stop');
+}
+
+/* ---------- making a torrent ---------- */
+{
+  const hash = (parts, len, o) => hashInline(parts, len, o);
+  const content = body(70000, 31);
+  const made = await createTorrent([new File([content], 'file.bin')], { pieceLength: 16384, hash, creationDate: 1700000000 });
+  assert.equal(made.infoHash, makeTorrent(content, { name: 'file.bin' }).infoHash, 'the same info hash as a .torrent made by hand from the same bytes');
+  assert.equal(await infoHashOf(made.bytes), made.infoHash);
+
+  // What WebTorrent's own seed made (create-torrent): the same info, file for file — a folder they all
+  // share as the name, system files left out, and its piece size.
+  const file = (data, path) => Object.assign(new File([data], path.split('/').pop()), { fullPath: path });
+  const picked = () => [file(body(30000, 41), 'Album/cd1/one.flac'), file(body(500, 42), 'Album/.DS_Store'), file(body(20000, 43), 'Album/two.flac'), file(body(10, 44), 'Album/Thumbs.db')];
+  const theirs = await new Promise((resolve, reject) => createTorrentPackage(picked(), { announce: ['wss://t.example'], createdBy: 'WebTorrent/0208' }, (err, buf) => (err ? reject(err) : resolve(new Uint8Array(buf)))));
+  const ours = await createTorrent(picked(), { trackers: [['wss://t.example']], createdBy: 'WebTorrent/0208', hash });
+  assert.equal(ours.infoHash, await infoHashOf(theirs), 'the same torrent WebTorrent makes of the same files');
+  const back = await readTorrent(ours.bytes);
+  assert.equal(back.fields.name, 'Album');
+  assert.deepEqual(back.fields.files.map((f) => f.path), ['cd1/one.flac', 'two.flac', 'Thumbs.db'], '.DS_Store left out, Thumbs.db kept, as create-torrent does');
+  assert.deepEqual(back.fields.trackers, (await readTorrent(theirs)).fields.trackers);
+  assert.equal(back.fields.createdBy, 'WebTorrent/0208');
+  assert.deepEqual(ours.files.map((f) => f.name), ['one.flac', 'two.flac', 'Thumbs.db'], 'and the files to seed, in the torrent\'s order');
+
+  // Every option, written where it goes.
+  const full = await createTorrent(picked(), {
+    name: 'Renamed', exclude: '*.db', trackers: [['https://tracker.passthepopcorn.me/k/announce'], ['udp://b.example:80']], webSeeds: ['https://w.example/'],
+    private: true, source: 'PTP', comment: 'made here', createdBy: '', creationDate: null, entropy: 'ab12', pieceMode: 'mkbrr', hash,
+  });
+  const fb = await readTorrent(full.bytes);
+  assert.equal(fb.fields.name, 'Renamed');
+  assert.deepEqual(fb.fields.files.map((f) => f.path), ['cd1/one.flac', 'two.flac'], 'an exclusion leaves its files out');
+  assert.equal(fb.fields.private, true);
+  assert.equal(fb.fields.source, 'PTP');
+  assert.equal(fb.fields.entropy, 'ab12');
+  assert.equal(fb.fields.comment, 'made here');
+  assert.equal(fb.fields.createdBy, '');
+  assert.equal(fb.fields.creationDate, null, 'no date when asked for none');
+  assert.deepEqual(fb.fields.trackers, [['https://tracker.passthepopcorn.me/k/announce'], ['udp://b.example:80']]);
+  assert.deepEqual(fb.fields.webSeeds, ['https://w.example/']);
+  assert.equal(fb.fields.pieceLength, 64 * 1024, 'PTP\'s own table for 50 KB');
+  await assert.rejects(createTorrent([file(body(5, 1), 'x/.DS_Store')], { hash }), /nothing to make a torrent of/);
+  assert.equal(excludeTest('*.nfo, Thumbs.db')('Movie.NFO'), true);
+  assert.equal(excludeTest('*.nfo, Thumbs.db')('movie.mkv'), false);
+  assert.equal(excludeTest('')('anything'), false);
+  log('making a torrent: the info hash WebTorrent makes of the same files, and every option where it goes');
+}
+
+/* ---------- the Seed & share tab's options ---------- */
+{
+  assert.equal(createSummary({}), 'Auto pieces · public · app trackers', 'folded, the defaults in one line');
+  assert.equal(createSummary({ pieceMode: 'fixed', pieceSize: 2 ** 20, private: true, trackers: 'udp://a\n\nudp://b', source: 'X', onlyTorrent: true }), '1 MiB pieces · private · 2 trackers · source X · .torrent only');
+  const defaults = creationOptions({}, { appTrackers: ['wss://one', 'wss://two'], createdBy: 'WebTorrent/0208', now: 1700000000000 });
+  assert.deepEqual(defaults, {
+    trackers: [['wss://one'], ['wss://two']], webSeeds: [], private: false, source: '', comment: '', createdBy: 'WebTorrent/0208',
+    creationDate: 1700000000, pieceMode: 'auto', pieceLength: 0, targetCount: 1000, maxPiece: 0, exclude: '',
+  }, 'left alone: the app\'s trackers, a tier each, as sharing always wrote them');
+  const ruled = creationOptions({ trackers: 'https://tracker.passthepopcorn.me/k/announce', noDate: true, noCreatedBy: true }, { createdBy: 'x' });
+  assert.equal(ruled.source, 'PTP', 'the tracker\'s rule gives the source it expects');
+  assert.equal(ruled.creationDate, null);
+  assert.equal(ruled.createdBy, '');
+  assert.equal(creationOptions({ trackers: 'https://tracker.passthepopcorn.me/k/announce', source: 'mine' }).source, 'mine', 'unless one is set');
+  assert.deepEqual(normalizeCreate({ pieceMode: 'nonsense', pieceSize: 3, targetCount: -5 }), { ...normalizeCreate({}), targetCount: 1 });
+  log('Seed & share options: one line for the defaults, the app\'s trackers when none are written, the rule\'s source');
 }
 
 console.log('\nAll .torrent workshop checks passed.');

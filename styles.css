@@ -302,7 +302,11 @@ body {
 /* Four of them on a phone: each as wide as its label, so "Download" is not cut at a quarter of the
    card while "Edit" has room to spare; "Seed & share" takes two lines when it must. */
 @media (max-width: 480px) {
-  .tabs .tab { flex: 1 1 0; min-width: min-content; }
+  .tabs .tab { flex: 1 1 auto; min-width: min-content; padding: 9px 6px; }
+}
+/* At 320px, a little smaller still: "Seed & share" on two lines, not one word a line. */
+@media (max-width: 360px) {
+  .tabs .tab { padding: 9px 3px; font-size: 0.85rem; }
 }
 .tab.active { background: var(--card); color: var(--text); box-shadow: var(--shadow); }
 
@@ -513,3 +517,12 @@ body {
 .preset-item .hint { margin: 0; }
 .preset-form { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; display: grid; gap: 10px; margin: 0; min-width: 0; }
 .preset-form legend { font-weight: 600; font-size: 0.9rem; padding: 0 4px; }
+
+/* ---- Seed & share: how the torrent is made, folded into one line ---- */
+.torrent-options { margin-bottom: 10px; border: 1px solid var(--border); border-radius: 10px; padding: 8px 12px; }
+.torrent-options > summary { cursor: pointer; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; min-height: 28px; }
+.torrent-options-title { font-weight: 600; font-size: 0.9rem; }
+.torrent-options > summary .hint { margin: 0; }
+.torrent-options-body { display: grid; gap: 12px; margin-top: 12px; }
+.torrent-options-body .hint { margin: 0; }
+.torrent-options-body > .btn { justify-self: start; }
