@@ -701,6 +701,22 @@ const browser = BROWSER === 'webkit'
   : await chromium.launch({ executablePath: findChromium(), args: ['--allow-insecure-localhost'] });
 log('browser:', BROWSER);
 
+/**
+ * A context for a test: 900px wide unless it says otherwise. Playwright's own default, 1280px, is the
+ * computer's layout now — the list beside one open torrent — and these tests were written for the one
+ * column, with every card on the page. Its pages also say yes when asked to leave (beforeunload, while
+ * a torrent runs): a reload would otherwise wait on that question for ever. A page's own dialog handler
+ * leaves those to this one; a page without one has every other dialog dismissed, as with no handler.
+ */
+async function context(options = {}) {
+  const ctx = await browser.newContext({ viewport: { width: 900, height: 800 }, ...options });
+  ctx.on('page', (page) => page.on('dialog', (d) => {
+    if (d.type() === 'beforeunload') d.accept().catch(() => {});
+    else if (page.listenerCount('dialog') === 1) d.dismiss().catch(() => {});
+  }));
+  return ctx;
+}
+
 let failed = false;
 try {
   /* ---------- npm start: this machine only, unless asked; and then the app, not the checkout ---------- */
@@ -731,7 +747,7 @@ try {
   /* ---------- the page on a small screen, in both colour schemes, and as the installed iPhone app ---------- */
   {
     const open = async (options, init) => {
-      const ctx = await browser.newContext(options);
+      const ctx = await context(options);
       const page = await ctx.newPage();
       page.on('pageerror', (e) => console.error('layout page error:', e));
       await page.addInitScript(({ t, rtc }) => localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], trackerList: false, rtcConfig: rtc })), { t: trackerUrl, rtc: rtcConfig });
@@ -925,7 +941,7 @@ try {
       const [start, end] = spans.get('info');
       return createHash('sha1').update(buf.subarray(start, end)).digest('hex');
     };
-    const edCtx = await browser.newContext({ acceptDownloads: true, serviceWorkers: 'block', viewport: { width: 320, height: 640 }, isMobile: true, hasTouch: true });
+    const edCtx = await context({ acceptDownloads: true, serviceWorkers: 'block', viewport: { width: 320, height: 640 }, isMobile: true, hasTouch: true });
     let publicFetches = 0;
     await edCtx.route('https://newtrackon.com/api/stable', (route) => {
       publicFetches += 1;
@@ -1269,7 +1285,7 @@ try {
     // The top frame only: an init script runs in every frame, the saver's download frame included, and
     // writing the settings from there is another copy saving them — which this page now follows.
     const settingsFor = ({ t, rtc }) => { if (window === window.top) localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], trackerList: false, rtcConfig: rtc })); };
-    const makerCtx = await browser.newContext({ acceptDownloads: true });
+    const makerCtx = await context({ acceptDownloads: true });
     const maker = await makerCtx.newPage();
     maker.on('pageerror', (e) => console.error('maker page error:', e));
     await maker.addInitScript(settingsFor, { t: trackerUrl, rtc: rtcConfig });
@@ -1312,7 +1328,7 @@ try {
     assert.equal(await maker.evaluate(() => JSON.parse(localStorage.getItem('phone-torrent:settings')).createOptions.source), 'MADE-HERE', 'the options kept for next time');
 
     // A second page downloads it from the .torrent saved.
-    const takerCtx = await browser.newContext();
+    const takerCtx = await context();
     const taker = await takerCtx.newPage();
     taker.on('pageerror', (e) => console.error('taker page error:', e));
     await taker.addInitScript(settingsFor, { t: trackerUrl, rtc: rtcConfig });
@@ -1334,10 +1350,10 @@ try {
 
     // A seed removed while its files are being hashed stops being hashed: on a phone, gigabytes of it
     // were minutes of battery for nothing. Hashed on the page here, and held, so the test sees it.
-    const stopCtx = await browser.newContext();
+    const stopCtx = await context();
     const stopper = await stopCtx.newPage();
     stopper.on('pageerror', (e) => console.error('stopper page error:', e));
-    stopper.on('dialog', (d) => d.accept());
+    stopper.on('dialog', (d) => { if (d.type() === 'beforeunload') return; d.accept(); });
     await stopper.addInitScript(({ t }) => {
       if (window !== window.top) return;
       localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], trackerList: false }));
@@ -1374,7 +1390,7 @@ try {
   }
 
   /* ---------- seeder ---------- */
-  const seederCtx = await browser.newContext();
+  const seederCtx = await context();
   const seeder = await seederCtx.newPage();
   seeder.on('pageerror', (e) => console.error('seeder page error:', e));
   // trackerList off, as for every page here: the suite's content is fixed, so is its info hash, and
@@ -1409,12 +1425,12 @@ try {
   // Seed through the real UI: "Seed & share" tab, pick files, name the collection. Cancel on the
   // name is a cancel: it used to seed all the same, named after the first file.
   await seeder.click('.tab[data-tab="seed"]');
-  seeder.once('dialog', (d) => d.dismiss());
+  seeder.once('dialog', (d) => { if (d.type() === 'beforeunload') return; d.dismiss(); });
   await seeder.setInputFiles('#seed-file-input', files.map((f, i) => ({ name: f.name, mimeType: 'application/octet-stream', buffer: seedBuffers[i] })));
   await new Promise((r) => setTimeout(r, 1000));
   assert.equal(await seeder.evaluate(() => window.__phoneTorrent.client.torrents.length), 0, 'a cancelled name seeds nothing');
   assert.equal((await seeder.$$('.torrent')).length, 0);
-  seeder.once('dialog', (d) => d.accept('Swarmdeck Test'));
+  seeder.once('dialog', (d) => { if (d.type() === 'beforeunload') return; d.accept('Swarmdeck Test'); });
   await seeder.setInputFiles('#seed-file-input', files.map((f, i) => ({ name: f.name, mimeType: 'application/octet-stream', buffer: seedBuffers[i] })));
   await seeder.waitForSelector('.torrent.seeding .file', { timeout: 30000 });
   await waitFor(() => seeder.evaluate(() => window.__phoneTorrent.client.torrents[0]?.ready), { label: 'seeder ready' });
@@ -1519,7 +1535,7 @@ try {
   log('seeding', files.map((f) => `${f.name} (${f.size} B)`).join(', '));
 
   /* ---------- downloader ("the phone") ---------- */
-  const phoneCtx = await browser.newContext({
+  const phoneCtx = await context({
     acceptDownloads: true,
     viewport: { width: 390, height: 844 },
     isMobile: true,
@@ -1528,7 +1544,7 @@ try {
   const phone = await phoneCtx.newPage();
   phone.on('pageerror', (e) => console.error('phone page error:', e));
   let dialogs = 0;
-  phone.on('dialog', (d) => { dialogs++; d.accept(); });
+  phone.on('dialog', (d) => { if (d.type() === 'beforeunload') return; dialogs++; d.accept(); });
   // The phone only knows a dead tracker; the real one must come from the fetched tracker list
   // (the qBittorrent-style "automatically add trackers" feature).
   // The public list writes the default port where a user's list does not: the same tracker twice.
@@ -1561,7 +1577,7 @@ try {
   // field: a list that was the old defaults becomes today's, any other loses only the dead entries,
   // and a metadata cache that moved is followed, one that serves no .torrent any more dropped.
   {
-    const oldCtx = await browser.newContext();
+    const oldCtx = await context();
     const retired = ['wss://tracker.btorrent.xyz', 'wss://tracker.files.fm:7073/announce'];
     const oldDefaults = ['wss://tracker.openwebtorrent.com', retired[0], 'wss://tracker.webtorrent.dev', retired[1]];
     const oldSources = ['https://itorrents.org/torrent/{INFOHASH}.torrent', 'https://torrage.info/torrent.php?h={INFOHASH}'];
@@ -2116,7 +2132,7 @@ try {
   // the context drops the WebSocket, and the tracker forgets the peer there and then.
   // Its bytes are random per run, so two CI jobs never share this info hash either.
   log('creating orphan torrent');
-  const orphanCtx = await browser.newContext();
+  const orphanCtx = await context();
   const orphanPage = await orphanCtx.newPage();
   orphanPage.on('pageerror', (e) => console.error('orphan page error:', e));
   await orphanPage.addInitScript(({ t, rtc }) => localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], trackerList: false, rtcConfig: rtc })), { t: trackerUrl, rtc: rtcConfig });
@@ -2252,10 +2268,10 @@ try {
 
   /* ---------- iOS (Safari / Brave / Chrome on iPhone all report a WebKit iPhone UA) ---------- */
   const iphone = devices['iPhone 13'];
-  const iosCtx = await browser.newContext({ ...iphone, acceptDownloads: true });
+  const iosCtx = await context({ ...iphone, acceptDownloads: true });
   const ios = await iosCtx.newPage();
   ios.on('pageerror', (e) => console.error('ios page error:', e));
-  ios.on('dialog', (d) => d.accept());
+  ios.on('dialog', (d) => { if (d.type() === 'beforeunload') return; d.accept(); });
   // This context saves settings from the app's own dialog later on, so the init script merges its
   // tracker choice into whatever is stored instead of replacing it on every navigation.
   await ios.addInitScript(({ t, rtc }) => {
@@ -2775,10 +2791,10 @@ try {
     const ready = state === 'completed';
     return { id, hash, name, size: 1000, progress: ready ? 1 : progress, download_state: state, download_present: ready, download_finished: ready, files };
   };
-  const troubleCtx = await browser.newContext();
+  const troubleCtx = await context();
   const trouble = await troubleCtx.newPage();
   trouble.on('pageerror', (e) => console.error('trouble page error:', e));
-  trouble.on('dialog', (d) => d.accept());
+  trouble.on('dialog', (d) => { if (d.type() === 'beforeunload') return; d.accept(); });
   await trouble.addInitScript(({ t, rtc, base, key, putio }) => localStorage.setItem('phone-torrent:settings', JSON.stringify({
     trackers: [t], trackerList: false, rtcConfig: rtc, metadataSources: [],
     cloud: { provider: 'torbox', apiKey: key, apiBase: base, viaProxy: false, accounts: { putio: { apiKey: 'putio-token', apiBase: putio } } },
@@ -2930,7 +2946,7 @@ try {
 
   /* Real-Debrid: a choice of files that did not go through, a pack of files, an account of more
    * torrents than one page holds. */
-  const rdCtx = await browser.newContext();
+  const rdCtx = await context();
   const rd = await rdCtx.newPage();
   rd.on('pageerror', (e) => console.error('rd page error:', e));
   await rd.addInitScript(({ t, rtc, base }) => localStorage.setItem('phone-torrent:settings', JSON.stringify({
@@ -2992,7 +3008,7 @@ try {
   // Before a torrent is ready, WebTorrent selects every piece it does not have yet. With the pieces on
   // disk that check runs after the file list is shown, and used to undo a file unticked in the
   // meantime: its box stayed empty while it downloaded anyway.
-  const untickCtx = await browser.newContext();
+  const untickCtx = await context();
   const untick = await untickCtx.newPage();
   untick.on('pageerror', (e) => console.error('untick page error:', e));
   await untick.addInitScript(({ t, rtc }) => localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], trackerList: false, rtcConfig: rtc, downloadLimit: 1000 })), { t: trackerUrl, rtc: rtcConfig });
@@ -3030,10 +3046,10 @@ try {
       },
     });
   };
-  const lifeCtx = await browser.newContext();
+  const lifeCtx = await context();
   const life = await lifeCtx.newPage();
   life.on('pageerror', (e) => console.error('life page error:', e));
-  life.on('dialog', (d) => d.accept());
+  life.on('dialog', (d) => { if (d.type() === 'beforeunload') return; d.accept(); });
   await life.addInitScript(stubWakeLock);
   await life.addInitScript(({ t, rtc }) => {
     // No metadata caches: a magnet here waits for peers, and only for peers.
@@ -3195,7 +3211,7 @@ try {
    * either does not come back. */
   const secondCopy = await lifeCtx.newPage();
   secondCopy.on('pageerror', (e) => console.error('second copy page error:', e));
-  secondCopy.on('dialog', (d) => d.accept());
+  secondCopy.on('dialog', (d) => { if (d.type() === 'beforeunload') return; d.accept(); });
   await secondCopy.goto(site.url);
   await secondCopy.waitForFunction(() => window.__phoneTorrent?.client);
   const secondCard = (name) => secondCopy.locator('.torrent', { has: secondCopy.locator('.name', { hasText: name }) }).first();
@@ -3326,7 +3342,7 @@ try {
   await lifeCtx.close();
 
   // Handed to a cloud service and ready there, a torrent needs the screen on no more than a private one.
-  const handedCtx = await browser.newContext();
+  const handedCtx = await context();
   const handed = await handedCtx.newPage();
   handed.on('pageerror', (e) => console.error('handed page error:', e));
   await handed.addInitScript(stubWakeLock);
@@ -3347,11 +3363,11 @@ try {
   /* ---------- web seeds: a pause drops the connection, never the seed ---------- */
   // Nobody seeds these but an HTTP mirror: the torrent's own url-list, or one added by hand. "Keep
   // seeding" is off in this context, for the last of them.
-  const webCtx = await browser.newContext();
+  const webCtx = await context();
   const web = await webCtx.newPage();
   web.on('pageerror', (e) => console.error('web seed page error:', e));
   let webSeedUrl = '';
-  web.on('dialog', (d) => d.accept(d.type() === 'prompt' ? webSeedUrl : undefined));
+  web.on('dialog', (d) => { if (d.type() === 'beforeunload') return; d.accept(d.type() === 'prompt' ? webSeedUrl : undefined); });
   await web.addInitScript(stubWakeLock);
   await web.addInitScript(({ t, rtc }) => localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], trackerList: false, rtcConfig: rtc, metadataSources: [], seedAfterDone: false })), { t: trackerUrl, rtc: rtcConfig });
   await web.goto(site.url);
@@ -3441,7 +3457,7 @@ try {
   // there, which WebTorrent hashes with, and a torrent failed with "Invalid torrent identifier" or
   // hashed for ever. The Cloud tab works there; the other two say why they do not. Playwright serves
   // the app at a name that is not localhost, which is all it takes.
-  const lanCtx = await browser.newContext();
+  const lanCtx = await context();
   const REPO = path.join(HERE, '..');
   await lanCtx.route('http://phone.lan/**', (route) => {
     const { pathname } = new URL(route.request().url());
@@ -3451,7 +3467,7 @@ try {
   const lan = await lanCtx.newPage();
   lan.on('pageerror', (e) => console.error('lan page error:', e));
   const lanDialogs = [];
-  lan.on('dialog', (d) => { lanDialogs.push(d.message()); d.accept(); });
+  lan.on('dialog', (d) => { if (d.type() === 'beforeunload') return; lanDialogs.push(d.message()); d.accept(); });
   await lan.goto(`http://phone.lan/#magnet:?xt=urn:btih:${'6'.repeat(40)}&dn=from%20a%20link`);
   await lan.waitForFunction(() => window.__phoneTorrent?.client);
   assert.equal(await lan.evaluate(() => window.isSecureContext), false, 'plain http at a name that is not localhost');
@@ -3488,7 +3504,7 @@ try {
   // fresh page asks its own origin and makes it the service, where it used to say "No API key yet".
   // No service worker: once one controls the page, WebKit sends its requests past context.route(),
   // so the account and the list would reach the static test server instead of these answers.
-  const ownCtx = await browser.newContext({ serviceWorkers: 'block' });
+  const ownCtx = await context({ serviceWorkers: 'block' });
   const ownCalls = [];
   // What the server lists: nothing, until the test puts a transfer there.
   const ownTransfers = [];
@@ -3622,7 +3638,7 @@ try {
   // Delete in the library takes the transfer off the list without listing again, and the account line
   // went on counting it: nothing was downloading, so no poll came to put it right.
   await waitFor(() => own.$eval('#cloud-account', (e) => e.textContent === 'My own server · your server · 6 transfers · 30 GB free'), { label: 'the account line to count six transfers', timeout: 5000 });
-  own.once('dialog', (d) => d.accept());
+  own.once('dialog', (d) => { if (d.type() === 'beforeunload') return; d.accept(); });
   await own.locator('.cloud-item', { has: own.locator('.cloud-item-name', { hasText: 'Older 5' }) }).locator('.cloud-item-delete').click();
   await waitFor(() => ownCalls.includes(`DELETE /api/transfers/${'5'.repeat(40)}`), { label: 'the delete to reach the server', timeout: 5000 });
   await waitFor(() => own.$eval('#cloud-account', (e) => e.textContent === 'My own server · your server · 5 transfers · 30 GB free'), { label: 'the account line to stop counting the transfer deleted', timeout: 5000 });
@@ -3647,7 +3663,7 @@ try {
   await new Promise((resolve) => dialectServer.listen(0, '127.0.0.1', resolve));
   const dialectBase = `http://127.0.0.1:${dialectServer.address().port}`;
   const answer = (at, body, status = 200) => dialects.answers.set(at, { status, body });
-  const dialectCtx = await browser.newContext({ serviceWorkers: 'block' });
+  const dialectCtx = await context({ serviceWorkers: 'block' });
   const dialect = await dialectCtx.newPage();
   dialect.on('pageerror', (e) => console.error('dialect page error:', e));
   await dialect.addInitScript(({ t }) => localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], trackerList: false, metadataSources: [] })), { t: trackerUrl });
@@ -3718,7 +3734,7 @@ try {
   assert.equal(rdList.find((i) => i.id === 'T101').idle, true, 'one left waiting for its files to be chosen is not polled for');
   // Deleting one the service no longer has (deleted on its site, or from another device): done all the same.
   answer('DELETE /realdebrid/rest/1.0/torrents/delete/GONE', { error: 'unknown_ressource', error_code: 7 }, 404);
-  dialect.once('dialog', (d) => d.accept());
+  dialect.once('dialog', (d) => { if (d.type() === 'beforeunload') return; d.accept(); });
   await dialect.evaluate((base) => window.__phoneTorrent.cloudRemoveItem({ id: 'GONE', name: 'gone', provider: 'realdebrid', base: `${base}/realdebrid` }), dialectBase);
   await waitFor(() => dialect.$$eval('.toast', (l) => l.some((t) => /Deleted from the cloud/.test(t.textContent))), { label: 'a transfer already gone to count as deleted', timeout: 5000 });
 
@@ -3738,7 +3754,7 @@ try {
   dialectServer.close();
   log('each service as its docs write it: AllDebrid AUTH_ codes, delayed links and per-magnet errors; put.io seeding deletes; Real-Debrid archives, refusals, pages and waits; a delete of one already gone; TorBox empty accounts, hand-offs, expiry and plans');
   // Anywhere else (GitHub Pages, npm start) that address is a 404, and the default stays.
-  const elsewhereCtx = await browser.newContext();
+  const elsewhereCtx = await context();
   const elsewhere = await elsewhereCtx.newPage();
   await elsewhere.goto(site.url);
   await elsewhere.waitForFunction(() => window.__phoneTorrent?.client);
@@ -3748,7 +3764,7 @@ try {
   // A server deployed on Render, Fly or behind a tunnel has an AUTH_TOKEN; its health answers all
   // the same, and the page takes it as the service. Settings then asks for that token, rather than
   // saying a server alone on your machine needs none.
-  const tokenCtx = await browser.newContext({ serviceWorkers: 'block' });
+  const tokenCtx = await context({ serviceWorkers: 'block' });
   await tokenCtx.route(`${site.url}api/**`, (route) => {
     const { pathname } = new URL(route.request().url());
     const [status, body] = pathname === '/api/health' ? [200, { ok: true, torrents: 0 }] : [401, { error: 'bad or missing token' }];
@@ -3776,7 +3792,7 @@ try {
   // Stopped, or out of reach, while its page is still open (or served by the service worker): only its
   // API is gone here. The library said the account was empty, the Cloud tab said to set a CORS proxy —
   // wrong for the server's own page, where there is no CORS at all — and nothing asked again once it was back.
-  const downCtx = await browser.newContext({ serviceWorkers: 'block' });
+  const downCtx = await context({ serviceWorkers: 'block' });
   let downServerUp = false;
   await downCtx.route(`${site.url}api/**`, (route) => {
     const { pathname } = new URL(route.request().url());
@@ -3817,7 +3833,7 @@ try {
   /* ---------- the installed app, on https, pointed at a server's http:// address ---------- */
   // The browser refuses the call outright (mixed content), before anything is sent: ALLOWED_ORIGINS,
   // which is what the app said, cannot change that.
-  const httpsCtx = await browser.newContext({ serviceWorkers: 'block' });
+  const httpsCtx = await context({ serviceWorkers: 'block' });
   const httpsCalls = [];
   httpsCtx.on('request', (req) => { if (req.url().startsWith('http://192.0.2.1')) httpsCalls.push(req.url()); });
   const servePhoneTest = (route) => {
@@ -3858,7 +3874,7 @@ try {
   // With a CORS proxy set, the proxy is asked instead: it fetches the address itself, and reaches a
   // server on the internet. The page used to refuse before asking anyone, and the proxy that had
   // relayed these calls was never asked again.
-  const relayedCtx = await browser.newContext({ serviceWorkers: 'block' });
+  const relayedCtx = await context({ serviceWorkers: 'block' });
   const relayedDirect = [];
   const relayedProxied = [];
   relayedCtx.on('request', (req) => { if (req.url().startsWith('http://192.0.2.1')) relayedDirect.push(req.url()); });
@@ -3884,7 +3900,7 @@ try {
   log('an https page pointed at an http:// server goes through the CORS proxy when one is set');
 
   /* ---------- offline: the card says so, and nothing blames CORS ---------- */
-  const offCtx = await browser.newContext();
+  const offCtx = await context();
   const off = await offCtx.newPage();
   off.on('pageerror', (e) => console.error('offline page error:', e));
   await off.addInitScript(({ t, rtc, meta }) => localStorage.setItem('phone-torrent:settings', JSON.stringify({
@@ -3911,10 +3927,10 @@ try {
   log('offline: said on the card and the top bar, the caches wait, and the network coming back wakes it');
 
   /* ---------- Settings: diagnostics without the keys, and fields mended rather than dropped ---------- */
-  const diagCtx = await browser.newContext();
+  const diagCtx = await context();
   const diag = await diagCtx.newPage();
   diag.on('pageerror', (e) => console.error('diagnostics page error:', e));
-  diag.on('dialog', (d) => d.accept());
+  diag.on('dialog', (d) => { if (d.type() === 'beforeunload') return; d.accept(); });
   const secrets = ['TORBOX-SECRET-KEY', 'PUTIO-SECRET-TOKEN', 'myproxy-secret', 'turn-user-secret', 'turn-pass-secret', 'PASSKEY-SECRET'];
   await diag.addInitScript(({ t, rtc }) => {
     localStorage.setItem('phone-torrent:settings', JSON.stringify({
@@ -4009,7 +4025,7 @@ try {
   // Tor Browser, Mullvad Browser, Firefox with media.peerconnection.enabled off. WebTorrent then skips
   // every ws(s):// tracker with a warning the app dropped, and the card said it was waiting on four
   // trackers it talked to none of. A web seed would still work, so nothing is switched off.
-  const noRtcCtx = await browser.newContext();
+  const noRtcCtx = await context();
   const noRtc = await noRtcCtx.newPage();
   noRtc.on('pageerror', (e) => console.error('no WebRTC page error:', e));
   await noRtc.addInitScript(({ t }) => {
@@ -4034,7 +4050,7 @@ try {
   /* ---------- the CORS proxy refusing a call: its reason, not the service's address ---------- */
   // The proxy forwards a write only to the hosts in its API_HOSTS, which was set for the metadata
   // caches and not for this service. The refusal came through, and the app said to check the address.
-  const relayCtx = await browser.newContext();
+  const relayCtx = await context();
   const relay = await relayCtx.newPage();
   relay.on('pageerror', (e) => console.error('relay page error:', e));
   await relay.addInitScript(({ t, api, proxy }) => localStorage.setItem('phone-torrent:settings', JSON.stringify({
@@ -4057,7 +4073,7 @@ try {
   // desktop, a phone on its charger — where the README says every six hours. On a clock of its own here.
   // No service worker, as for the other contexts that answer with route(): in WebKit a page it
   // controls sends its requests past route(), and the list would never be counted.
-  const clockCtx = await browser.newContext({ serviceWorkers: 'block' });
+  const clockCtx = await context({ serviceWorkers: 'block' });
   let listFetches = 0;
   await clockCtx.route('https://lists.invalid/trackers.txt', (route) => {
     listFetches += 1;
@@ -4083,7 +4099,7 @@ try {
   // What a browser that offers neither gets (private browsing in some): saves go through memory, and
   // so do the pieces. "Keep seeding" is off here, and the download is throttled so that a file can be
   // unticked before it arrives.
-  const legacyCtx = await browser.newContext({ acceptDownloads: true, serviceWorkers: 'block' });
+  const legacyCtx = await context({ acceptDownloads: true, serviceWorkers: 'block' });
   const legacy = await legacyCtx.newPage();
   legacy.on('pageerror', (e) => console.error('legacy page error:', e));
   await legacy.addInitScript(({ t, rtc }) => {
