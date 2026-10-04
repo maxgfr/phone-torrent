@@ -1331,6 +1331,46 @@ try {
     await takerCtx.close();
     await makerCtx.close();
     log('making a torrent: private with a source, saved alone, then shared — the same info hash — and downloaded by another page');
+
+    // A seed removed while its files are being hashed stops being hashed: on a phone, gigabytes of it
+    // were minutes of battery for nothing. Hashed on the page here, and held, so the test sees it.
+    const stopCtx = await browser.newContext();
+    const stopper = await stopCtx.newPage();
+    stopper.on('pageerror', (e) => console.error('stopper page error:', e));
+    stopper.on('dialog', (d) => d.accept());
+    await stopper.addInitScript(({ t }) => {
+      if (window !== window.top) return;
+      localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], trackerList: false }));
+      Object.defineProperty(window, 'Worker', { value: undefined, configurable: true });
+      const digest = crypto.subtle.digest.bind(crypto.subtle);
+      const held = [];
+      window.__digests = 0;
+      window.__hold = true;
+      crypto.subtle.digest = (algorithm, data) => {
+        if (data.byteLength < 16384) return digest(algorithm, data);
+        window.__digests += 1;
+        return (window.__hold ? new Promise((resolve) => held.push(resolve)) : Promise.resolve()).then(() => digest(algorithm, data));
+      };
+      window.__release = () => {
+        window.__hold = false;
+        held.splice(0).forEach((resolve) => resolve());
+      };
+    }, { t: trackerUrl });
+    await stopper.goto(site.url);
+    await stopper.waitForFunction(() => window.__phoneTorrent?.client);
+    await stopper.click('.tab[data-tab="seed"]');
+    // 32 MiB in 32 KiB pieces: four windows of 8 MiB, 256 pieces each.
+    await stopper.setInputFiles('#seed-file-input', { name: 'long to hash.bin', mimeType: 'application/octet-stream', buffer: Buffer.alloc(32 * 1024 * 1024, 5) });
+    await waitFor(() => stopper.evaluate(() => window.__digests > 0), { label: 'hashing to start', timeout: 15000 });
+    await stopper.click('.torrent .remove-btn');
+    await waitFor(() => stopper.$$('.torrent').then((l) => l.length === 0), { label: 'the card removed', timeout: 5000 });
+    await stopper.evaluate(() => window.__release());
+    await new Promise((r) => setTimeout(r, 1500));
+    const digests = await stopper.evaluate(() => window.__digests);
+    assert.ok(digests <= 256, `hashing stopped with the card: ${digests} pieces hashed of 1024`);
+    assert.equal(await stopper.$$eval('.toast.error', (els) => els.length), 0, 'and nothing said wrong');
+    await stopCtx.close();
+    log(`making a torrent: a seed removed while hashing stops being hashed (${digests} of 1024 pieces)`);
   }
 
   /* ---------- seeder ---------- */
@@ -3424,12 +3464,24 @@ try {
   await lan.click('.tab[data-tab="seed"]');
   assert.equal(await lan.isVisible('#tab-seed .insecure-note'), true, 'so does Seed & share');
   assert.equal(await lan.$eval('#seed-file-input', (e) => e.disabled), true);
+  // The editor hashes with crypto.subtle too: switched off, and a .torrent dropped on it said why.
+  await lan.click('.tab[data-tab="edit"]');
+  assert.equal(await lan.isVisible('#tab-edit .insecure-note'), true, 'so does Edit');
+  assert.deepEqual(await lan.$$eval('#edit-file-input, #edit-magnet-input', (els) => els.map((e) => e.disabled)), [true, true]);
+  await lan.evaluate(() => {
+    document.querySelector('#toasts').replaceChildren();
+    const dt = new DataTransfer();
+    dt.items.add(new File(['d4:infod4:name1:aee'], 'dropped.torrent'));
+    document.querySelector('#drop-zone').dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
+  });
+  await waitFor(() => lan.$$eval('.toast', (els) => els.length > 0), { label: 'a drop on the Edit tab answered', timeout: 5000 });
+  assert.deepEqual(await lan.$$eval('.toast', (els) => els.map((e) => /need a secure page, HTTPS or localhost/.test(e.textContent))), [true], 'a drop there says why, not a script error');
   await lan.click('.tab[data-tab="cloud"]');
   assert.equal(await lan.$eval('#cloud-input', (e) => e.disabled), false, 'the Cloud tab is the one that works here');
   await assert.rejects(lan.evaluate(() => window.__phoneTorrent.addTorrent(`magnet:?xt=urn:btih:${'7'.repeat(40)}`)), /HTTPS or localhost/);
   assert.match(await lan.evaluate(() => window.__phoneTorrent.saver.reason), /HTTPS/, 'and saves blame the page, not the browser');
   await lanCtx.close();
-  log('a page that is not secure: the Cloud tab works, the other two say why they do not');
+  log('a page that is not secure: the Cloud tab works, the other three say why they do not, a drop on Edit included');
 
   /* ---------- served by your own server, the page knows it ---------- */
   // server/app.mjs is stood in for by its answers: /api/health, then the account and the list. A
@@ -3968,6 +4020,8 @@ try {
   await noRtc.waitForFunction(() => window.__phoneTorrent?.client);
   assert.match(await noRtc.$eval('#tab-download .insecure-note', (e) => (e.hidden ? '' : e.textContent)), /WebRTC is turned off in this browser/, 'the Download tab says WebRTC is off');
   assert.equal(await noRtc.$eval('#magnet-input', (e) => e.disabled), false, 'and switches nothing off');
+  assert.equal(await noRtc.isVisible('#tab-edit .insecure-note'), false, 'the Edit tab, which talks to no peer, has nothing to say');
+  assert.equal(await noRtc.$eval('#edit-file-input', (e) => e.disabled), false);
   await noRtc.fill('#magnet-input', `magnet:?xt=urn:btih:${'e'.repeat(40)}&dn=no%20webrtc`);
   await noRtc.click('#magnet-form button[type="submit"]');
   await waitFor(() => noRtc.$eval('.torrent .nopeers-text', (e) => /WebRTC is turned off/.test(e.textContent)).catch(() => false), { label: 'the card to say why nothing comes', timeout: 5000 });

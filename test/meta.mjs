@@ -45,6 +45,9 @@ const u8 = (b) => new Uint8Array(b.buffer, b.byteOffset, b.byteLength);
   assert.deepEqual([...unsorted.keys()], ['b', 'a'], 'keys in the order the file has them');
   assert.deepEqual(new TextDecoder().decode(encode(unsorted)), 'd1:ai2e1:bi1ee', 'and sorted when written');
   assert.deepEqual(encode({ x: new Raw(new TextEncoder().encode('i7e')) }), new TextEncoder().encode('d1:xi7ee'), 'a Raw value is written as it is');
+  // A 64 MB .torrent is mostly its piece hashes: read in place, not copied.
+  const inPlace = new TextEncoder().encode('d6:pieces4:abcde');
+  assert.equal(decode(inPlace).get('pieces').buffer, inPlace.buffer, 'byte strings are views of the bytes read');
   for (const bad of ['d1:ai1e1:ai2ee', 'l', 'i1', '5:abc', 'd1:ai1ee extra', 'i1.5e']) {
     assert.throws(() => decode(new TextEncoder().encode(bad)), /not valid bencode/, `refused: ${bad}`);
   }

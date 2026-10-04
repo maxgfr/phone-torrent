@@ -2588,13 +2588,18 @@ async function seedFiles(files, { name, options = settings.createOptions, picked
   // A seed is never remembered: what was picked is what another open copy needs to go on sharing it.
   view.picked = { files: [...files], name, options };
   keepStorage();
+  // Removed while its files are hashed, it stops being hashed: gigabytes of it on a phone are minutes
+  // of battery for nothing.
+  const stop = new AbortController();
+  torrent.once('close', () => stop.abort());
   let created;
   try {
-    created = await createTorrent(files, { ...made, name, hash: hashPieces, onProgress: (done, total) => { view.hashed = total ? done / total : 1; } });
+    created = await createTorrent(files, { ...made, name, hash: hashPieces, signal: stop.signal, onProgress: (done, total) => { view.hashed = total ? done / total : 1; } });
   } catch (err) {
     removeView(torrent);
     updateEmptyState();
     if (!torrent.destroyed) torrent.destroy();
+    if (stop.signal.aborted) return null;
     throw err;
   }
   // Removed while its files were being hashed.
@@ -2636,6 +2641,7 @@ async function seedFiles(files, { name, options = settings.createOptions, picked
 
 /** "Only make the .torrent": the same torrent sharing would make, saved to the device instead. */
 async function saveTorrentOf(files, { name, options = settings.createOptions } = {}) {
+  if (IN_BROWSER_BLOCKED) throw new Error(IN_BROWSER_BLOCKED);
   toast('Making the .torrent…');
   const made = creationFor(options);
   const created = await createTorrent(files, { ...made, name, hash: hashPieces });
@@ -4668,6 +4674,8 @@ async function editTorrent(torrent) {
 
 /** A magnet, an info hash or a .torrent address, opened in the editor: in full when the list has it. */
 async function editFromText(value) {
+  // The editor hashes with crypto.subtle, which a page that is not secure does not have.
+  if (IN_BROWSER_BLOCKED) throw new Error(IN_BROWSER_BLOCKED);
   const id = parseTorrentText(value);
   if (!id) throw new Error('Paste a magnet link, a 40-character info hash, or a .torrent URL.');
   if (/^https?:\/\//i.test(id)) return editor.openTorrent(await fetchTorrentUrl(id));
@@ -4679,6 +4687,10 @@ async function editFromText(value) {
 }
 
 async function editTorrentFiles(fileList) {
+  if (IN_BROWSER_BLOCKED) {
+    toast(IN_BROWSER_BLOCKED, { error: true, timeout: 9000 });
+    return;
+  }
   const picked = [];
   for (const f of fileList) {
     let bytes;

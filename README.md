@@ -412,7 +412,7 @@ address included; magnets cut short, without an info hash or v2‑only refused w
 left in the box, and a capital `M` and a sentence around a link accepted; Settings cancelled with no
 keyboard, past a field that cannot be saved, and saved by Enter in a field; a page that is not
 secure (plain `http` at a name that is not `localhost`) saying why only the Cloud tab works, without
-first asking to start a linked magnet; a page served by your own server taking it as the service
+first asking to start a linked magnet, a `.torrent` dropped on its Edit tab included; a page served by your own server taking it as the service
 with nothing set, asking for its token when it has one, and one that is not keeping its default; the
 account line counting a transfer as soon as the library lists it, and no longer once it is deleted there; a library file list, open while your own server finishes a season, taking on each episode in its place
 and leaving the rows it has alone, a file it cannot play saying so and one whose connection drops
@@ -452,7 +452,8 @@ the way staying closed; a hybrid torrent's identity staying locked through a pre
 options following another open copy; a private torrent with a source made in Seed & share, saved alone with
 **Only make the .torrent** (its piece size the one sharing always used, nothing shared), then the same
 files shared — the same info hash, its card private, announced to its own tracker alone, the options
-remembered — and downloaded from the saved file by another page, byte for byte; and at 320px, four tabs and the
+remembered — and downloaded from the saved file by another page, byte for byte; a seed removed while
+its files are hashed no longer hashed; and at 320px, four tabs and the
 whole dialog on the screen, its banner, mark, hints and Save at 4.5:1 or better in light and dark.
 
 `test/server.mjs` is the other half, with no browser anywhere: a plain BitTorrent client seeds a file
