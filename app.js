@@ -3216,6 +3216,8 @@ function renderList() {
     emptyText: all.length ? 'Nothing here matches: change the search or the filter.' : '',
   });
   els.listTools.hidden = all.length === 0;
+  // Nothing to list: no list either, or its border alone is drawn as a line under the card.
+  els.torrentList.hidden = all.length === 0;
   els.detailEmpty.hidden = all.length === 0 || Boolean(focusedKey);
   renderBulkBar();
   for (const option of els.listFilter.options) {

@@ -1014,6 +1014,7 @@ try {
     await desk.waitForFunction(() => window.__phoneTorrent?.client);
     await desk.evaluate(() => window.__phoneTorrent.started);
     assert.equal(await desk.isVisible('#list-tools'), false, 'no torrents: nothing to search');
+    assert.equal(await desk.$eval('#torrent-list', (e) => e.getBoundingClientRect().height), 0, 'and no empty list drawn as a line under the card');
     await desk.click('.tab[data-tab="seed"]');
     const seeds = [
       [{ name: 'The.Show.S01E01.mkv', mimeType: 'video/x-matroska', buffer: Buffer.alloc(30000, 1) }],
