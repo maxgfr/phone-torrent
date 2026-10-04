@@ -88,7 +88,7 @@ export function startServer(port = 0, host = '127.0.0.1') {
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const host = process.env.HOST || '127.0.0.1';
   const { url, port } = await startServer(Number(process.argv[2]) || 8080, host);
-  console.log(`Phone Torrent served at ${url}`);
+  console.log(`Swarmdeck served at ${url}`);
   if (host === '127.0.0.1') console.log('Only this machine can open it; HOST=0.0.0.0 npm start lets a phone on the same network in.');
   else {
     const lan = Object.values(os.networkInterfaces()).flat().filter((a) => a && a.family === 'IPv4' && !a.internal && ['0.0.0.0', '::', a.address].includes(host));

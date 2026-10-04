@@ -25,12 +25,26 @@ const OLD_DEFAULT_TRACKERS = [
 ];
 const RETIRED_TRACKERS = ['wss://tracker.btorrent.xyz', 'wss://tracker.files.fm:7073/announce'];
 
+/*
+ * Where this app keeps things in the browser, under the name it had before Swarmdeck: Phone Torrent.
+ * Kept on purpose. Renamed, the settings, the presets and the list of torrents would start empty, and
+ * cleanOrphanStores, finding no record for the pieces in OPFS, would delete every one of them. The
+ * locks and the channel are shared by every open copy, and a tab still on the old version and one on
+ * this one must keep agreeing on which of them runs the torrents (see LEAD_LOCK). sw.js and saver.js
+ * keep their own the same way, as does window.__phoneTorrent below, which the tests read.
+ */
 const SETTINGS_KEY = 'phone-torrent:settings';
 const DB_NAME = 'phone-torrent';
 const DB_STORE = 'torrents';
 const INBOX_CACHE = 'phone-torrent-inbox';
-const DEBUG_NAMESPACES = 'webtorrent*,bittorrent-tracker*,simple-peer*';
 const TRACKER_LIST_KEY = 'phone-torrent:trackerlist';
+const RD_OWED_KEY = 'phone-torrent:rd-owed';
+const IOS_HINT_KEY = 'phone-torrent:ios-hint';
+const TAB_LOCK = 'phone-torrent:open-tab';
+const LEAD_LOCK = 'phone-torrent:lead';
+const CHANNEL_NAME = 'phone-torrent';
+const streamChannel = (id) => `phone-torrent:stream:${id}`;
+const DEBUG_NAMESPACES = 'webtorrent*,bittorrent-tracker*,simple-peer*';
 const TRACKER_LIST_TTL = 6 * 60 * 60 * 1000;
 const DEFAULT_TRACKER_LIST_URL = 'https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_all_ws.txt';
 // Same list from other hosts, for networks that block GitHub's raw domain.
@@ -471,8 +485,6 @@ async function cleanOrphanStores(records) {
   } catch { /* ignore */ }
 }
 
-const TAB_LOCK = 'phone-torrent:open-tab';
-
 /**
  * A seed is never remembered, so to the housekeeping above the files another open tab is sharing
  * look orphaned. Every tab holds a shared lock for as long as it is open, and the cleanup only runs
@@ -494,16 +506,15 @@ async function cleanOrphanStoresIfAlone(records) {
  * list as it goes and hands it whatever is done there — an add, a pause, a tick, a removal — and a
  * file saved there streams over from it. Settings saved in any copy apply in all of them.
  *
- * Leading goes with a Web Lock. When the leading copy closes, the next one takes over and restores
+ * Leading goes with a Web Lock, LEAD_LOCK. When the leading copy closes, the next one takes over and restores
  * the torrents from storage; one being looked at while the leading copy no longer answers (a phone
  * freezes what it does not show) takes over at once. Without Web Locks every copy runs every
  * torrent, as it always did; with BroadcastChannel a removal or a delete-all is passed on, and
  * settings apply in every copy all the same.
  */
-const LEAD_LOCK = 'phone-torrent:lead';
 /** How long the leading copy may stay silent to a follower being looked at before that one takes over. */
 const LEAD_SILENCE_MS = 6000;
-const otherCopies = typeof BroadcastChannel === 'function' ? new BroadcastChannel('phone-torrent') : null;
+const otherCopies = typeof BroadcastChannel === 'function' ? new BroadcastChannel(CHANNEL_NAME) : null;
 const copyId = `${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
 /** This copy shows the torrents another one runs, instead of running them. */
 let follower = false;
@@ -545,9 +556,9 @@ async function probeOpfs() {
   if (!navigator.storage?.getDirectory) return false;
   try {
     const root = await navigator.storage.getDirectory();
-    const handle = await root.getFileHandle('.phone-torrent-probe', { create: true });
+    const handle = await root.getFileHandle('.swarmdeck-probe', { create: true });
     if (typeof handle.createSyncAccessHandle !== 'function' && typeof handle.createWritable !== 'function') throw new Error('no write API');
-    await root.removeEntry('.phone-torrent-probe').catch(() => {});
+    await root.removeEntry('.swarmdeck-probe').catch(() => {});
     return true;
   } catch {
     return false;
@@ -773,7 +784,7 @@ function confirmExternalAdd(label) {
     toast(IN_BROWSER_BLOCKED, { error: true, timeout: 9000 });
     return false;
   }
-  return askUser(() => confirm(`Add ${label} to Phone Torrent and start downloading it?`));
+  return askUser(() => confirm(`Add ${label} to Swarmdeck and start downloading it?`));
 }
 
 async function copyText(text) {
@@ -935,7 +946,7 @@ function unreachableReason(reach) {
   if (!reach || reach.webrtc) return '';
   let host = '';
   try { host = new URL(reach.trackers[0]).host; } catch { /* no usable tracker at all */ }
-  const cloud = ' Hand it to your cloud account with "Fetch it in the cloud": it downloads there and your phone saves it over HTTPS.';
+  const cloud = ' Hand it to your cloud account with "Fetch it in the cloud": it downloads there and this device saves it over HTTPS.';
   if (reach.private) {
     return `This torrent is marked private${host ? ` (${host})` : ''}: only that tracker may hand out peers, `
       + 'and a browser cannot announce to it, so nothing will download here.' + cloud;
@@ -1485,7 +1496,7 @@ const CLOUD_PROVIDERS = {
      */
     owedIds: null,
     owed(id, on) {
-      const key = 'phone-torrent:rd-owed';
+      const key = RD_OWED_KEY;
       if (!this.owedIds) {
         let saved = [];
         try { saved = JSON.parse(localStorage.getItem(key) || '[]'); } catch { /* none */ }
@@ -1627,7 +1638,7 @@ const CLOUD_PROVIDERS = {
 
     // Its key rides in the query string, and it wants to know who is calling.
     query(ctx, extra = {}) {
-      return new URLSearchParams({ agent: 'phone-torrent', apikey: ctx.key, ...extra }).toString();
+      return new URLSearchParams({ agent: 'swarmdeck', apikey: ctx.key, ...extra }).toString();
     },
 
     async check(ctx) {
@@ -2045,7 +2056,7 @@ function addCloudFiles(item, filesEl) {
           play.hidden = false;
           if (played || media.error?.code === MediaError.MEDIA_ERR_NETWORK) {
             resumeAt = media.currentTime || from;
-            toast(`Lost the connection while playing "${file.name}": tap Play to go on from where it stopped.`, { error: true, timeout: 9000 });
+            toast(`Lost the connection while playing "${file.name}": press Play to go on from where it stopped.`, { error: true, timeout: 9000 });
             return;
           }
           holder.hidden = true;
@@ -2280,7 +2291,7 @@ function startCloudPoll(view) {
         if (!view.cloudAnnounced) {
           view.cloudAnnounced = true;
           logEvent(view, `cloud download ready: ${cloud.files.length} file${cloud.files.length === 1 ? '' : 's'}`);
-          toast(`"${cloud.name || view.torrent.name}" is ready in the cloud: tap a file to download it.`, { timeout: 9000 });
+          toast(`"${cloud.name || view.torrent.name}" is ready in the cloud: pick a file to download it.`, { timeout: 9000 });
         }
       }
     } catch (err) {
@@ -2367,7 +2378,7 @@ function renderCloud(view, note) {
   $('.cloud-state', box).textContent = error
     ? `${ctx.api.label}: ${error}`
     : cloud.ready
-      ? `Ready on ${ctx.api.label} — tap a file to download it to your phone.`
+      ? `Ready on ${ctx.api.label} — pick a file to download it to this device.`
       : cloud.failed
         ? `${ctx.api.label}: failed (${cloud.state}).`
         : `${ctx.api.label}: ${cloud.state}${pct ? ` ${pct}%` : ''}…`;
@@ -3428,7 +3439,7 @@ async function shareNatively(torrent) {
   const url = appLinkFor(torrent);
   const title = torrent.name || 'Torrent';
   try {
-    await navigator.share({ title, text: `Download "${title}" with Phone Torrent`, url });
+    await navigator.share({ title, text: `Download "${title}" with Swarmdeck`, url });
   } catch (err) {
     if (err && err.name !== 'AbortError') toast(`Could not share: ${err.message}`, { error: true });
   }
@@ -3447,7 +3458,7 @@ async function removeTorrent(torrent) {
   const name = torrent.name || torrent.infoHash || 'this torrent';
   const message = view && view.seeding
     ? `Stop sharing "${name}"?`
-    : `Remove "${name}"?\n\nIts downloaded data will be deleted from the browser. Files you already saved to your phone are not affected.`;
+    : `Remove "${name}"?\n\nIts downloaded data will be deleted from the browser. Files you already saved to this device are not affected.`;
   if (!askUser(() => confirm(message))) return;
   if (torrent.remote) await tellLead({ op: 'remove', ...refOf(torrent) });
   else await dropTorrent(torrent);
@@ -3793,7 +3804,7 @@ function streamFromLead(torrent, what) {
       // What is asked for and what waits to be read make the window, never more.
       const credit = STREAM_WINDOW - asked - Math.max(0, -controller.desiredSize);
       if (!channel) {
-        channel = new BroadcastChannel(`phone-torrent:stream:${id}`);
+        channel = new BroadcastChannel(streamChannel(id));
         incoming.add(entry);
         channel.onmessage = ({ data }) => {
           if (data.type === 'chunk') {
@@ -4048,7 +4059,7 @@ function keepPaused(torrent, message) {
 
 /** Stream a file to the follower saving it: as many chunks as it has room for, and more as it asks. */
 function sendStream({ id, sid, infoHash, file, torrentFile, credit: first }) {
-  const channel = new BroadcastChannel(`phone-torrent:stream:${id}`);
+  const channel = new BroadcastChannel(streamChannel(id));
   let reader = null;
   let closed = false;
   let idle = null;
@@ -5265,7 +5276,7 @@ els.copyDiagBtn.addEventListener('click', async () => {
   ].filter((secret) => typeof secret === 'string' && secret.length >= 4);
   const scrub = (line) => secrets.reduce((text, secret) => text.split(secret).join('<hidden>'), line);
   const diag = {
-    app: 'phone-torrent',
+    app: 'swarmdeck',
     time: new Date().toISOString(),
     userAgent: navigator.userAgent,
     secureContext: window.isSecureContext,
@@ -5325,7 +5336,7 @@ window.addEventListener('offline', () => {
   refreshAll();
 });
 
-/* ---------- share target inbox (Android "Share to Phone Torrent") ---------- */
+/* ---------- share target inbox (Android "Share to Swarmdeck") ---------- */
 
 /**
  * A share hands over the page's title, its address and whatever text came with them, one per line:
@@ -5389,7 +5400,7 @@ window.addEventListener('beforeinstallprompt', (event) => {
 window.addEventListener('appinstalled', () => {
   installPrompt = null;
   els.installBtn.hidden = true;
-  toast('Installed. Open Phone Torrent from your home screen.');
+  toast('Installed. Open Swarmdeck from your home screen, dock or apps list.');
 });
 
 els.installBtn.addEventListener('click', async () => {
@@ -5406,8 +5417,8 @@ function maybeShowIosInstallHint() {
   const isIos = /iP(hone|ad|od)/.test(navigator.userAgent) && !window.MSStream;
   if (!isIos || isStandalone()) return;
   try {
-    if (localStorage.getItem('phone-torrent:ios-hint')) return;
-    localStorage.setItem('phone-torrent:ios-hint', '1');
+    if (localStorage.getItem(IOS_HINT_KEY)) return;
+    localStorage.setItem(IOS_HINT_KEY, '1');
   } catch { /* ignore */ }
   toast('Tip: tap Share, then "Add to Home Screen" to install this app.', { timeout: 9000 });
 }
@@ -5507,5 +5518,5 @@ async function restoreTorrents(records) {
 // Whatever became of the start, another copy's requests are not held up for ever.
 started.then(() => startupRestored(), () => startupRestored());
 
-// Expose for debugging and tests.
+// Expose for debugging and tests, under the name the tests have always used (see SETTINGS_KEY).
 window.__phoneTorrent = { editor, seedOptions, createTorrent, hashPieces, get follower() { return follower; }, get settings() { return settings; }, client, views, saver, started, addTorrent, askTrackersNow, seedFiles, torrentReach, unreachableReason, cloudCtx, CLOUD_PROVIDERS, cloudSend, refreshCloudLibrary, cloudRemoveItem, keyRefused, effectiveTrackers, refreshTrackerList, fetchMetadataFallback, verifyTorrentBytes, findInfoSpan, runNetworkCheck, cleanOrphanStores, isComplete, get opfsOk() { return opfsOk; } };

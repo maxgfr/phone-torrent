@@ -1,8 +1,8 @@
 {
-  "name": "phone-torrent",
+  "name": "swarmdeck",
   "version": "1.0.0",
   "private": true,
-  "description": "Download torrents from your phone's browser and save the files to your device. Static site, no backend.",
+  "description": "Torrents in the browser, on a phone or a computer: download, seed, edit and make .torrent files, with an optional server of your own. Static site.",
   "type": "module",
   "scripts": {
     "start": "node test/serve.mjs",

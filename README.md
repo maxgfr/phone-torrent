@@ -11,7 +11,7 @@ else is optional and yours: nothing is enabled until you give it a key or an add
 
 | | what you need | private and `http(s)` trackers | best for |
 |---|---|---|---|
-| **1. The page alone** — [maxgfr.github.io/phone-torrent](https://maxgfr.github.io/phone-torrent/) | nothing | no — a browser cannot reach those swarms | torrents with WebRTC peers, and seeding from your phone |
+| **1. The page alone** — [maxgfr.github.io/swarmdeck](https://maxgfr.github.io/swarmdeck/) | nothing | no — a browser cannot reach those swarms | torrents with WebRTC peers, and seeding from your phone |
 | **2. Your own server** | one `docker compose up -d` on a machine you own | yes — a real client, TCP, UDP and DHT | everything, with the files staying on your disk |
 | **3. A quick deploy** | one click or one command: Render, Fly, or Cloudflare | yes | a phone, from anywhere, with no machine at home |
 | **4. A cloud service** | a TorBox, put.io, Real‑Debrid or AllDebrid key | yes | no machine and no deploy at all |
@@ -167,13 +167,15 @@ That is the wall the other three ways exist to cross.
 ## 2. Your own server
 
 ```sh
-curl -fsSLO https://raw.githubusercontent.com/maxgfr/phone-torrent/main/docker-compose.yml
+curl -fsSLO https://raw.githubusercontent.com/maxgfr/swarmdeck/main/docker-compose.yml
 docker compose up -d          # then open http://localhost:8080
 ```
 
 The first line fetches the compose file, which `docker compose` runs; a clone of the repository has
 it too, and the tunnel below needs the clone. [`server/README.md`](server/README.md) has the same as
-one `docker run`, with no file at all.
+one `docker run`, with no file at all. A compose file fetched when the project was called Phone
+Torrent names its service `phone-torrent`: fetch it again and run `docker compose up -d --remove-orphans`,
+which replaces that service with this one and keeps the downloads, whose volume is still `downloads`.
 
 One container holds a real BitTorrent client, its HTTP API, and this app — on the same origin, so
 there is no CORS to configure and nothing else to deploy. Open it and the app already knows where
@@ -206,12 +208,12 @@ Every command about the tunnel takes both files, `down` included. That address i
 
 | | what it gives you | what it costs |
 |---|---|---|
-| [**Render**](https://render.com/deploy?repo=https://github.com/maxgfr/phone-torrent) | a disk that persists, an HTTPS address, a token it generates for you | a paid plan for the disk |
+| [**Render**](https://render.com/deploy?repo=https://github.com/maxgfr/swarmdeck) | a disk that persists, an HTTPS address, a token it generates for you | a paid plan for the disk |
 | **Fly** — `fly launch --no-deploy --copy-config --name <a-name-of-yours> && fly secrets set AUTH_TOKEN=… && fly deploy` (app names are global on Fly) | a disk that persists (10 GB, and it can grow) and a machine that never stops, so a download carries on and keeps seeding with the phone off; like Render, it reaches peers by connecting out to them | a card on file; the disk is billed by size |
 | **Cloudflare** — `cd cloudflare && npm install && npx wrangler secret put AUTH_TOKEN && npx wrangler deploy` | the quickest start, no server of your own (Docker, once, to build the image) | Workers paid plan; an ephemeral disk, emptied once half an hour passes with no download getting data and no request from the app, which stops asking once nothing is downloading, open or not; no UDP and no inbound port — [the details](cloudflare/README.md) |
 
 All three build the same `server/Dockerfile`. The image is also published for `amd64` and `arm64` at
-`ghcr.io/maxgfr/phone-torrent:latest`, which is what `docker compose` pulls.
+`ghcr.io/maxgfr/swarmdeck:latest`, which is what `docker compose` pulls.
 
 ## 4. A cloud service
 

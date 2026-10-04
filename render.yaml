@@ -1,11 +1,11 @@
-# One-click deploy: https://render.com/deploy?repo=https://github.com/maxgfr/phone-torrent
+# One-click deploy: https://render.com/deploy?repo=https://github.com/maxgfr/swarmdeck
 #
 # Render builds the Dockerfile and gives the service an HTTPS hostname, which is
 # what the app needs — a page served over HTTPS cannot call a plain-HTTP server,
 # so a bare IP or a LAN address will not do from the hosted page.
 services:
   - type: web
-    name: phone-torrent
+    name: swarmdeck
     runtime: docker
     dockerfilePath: ./server/Dockerfile
     dockerContext: .

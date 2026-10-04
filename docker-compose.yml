@@ -10,8 +10,8 @@
 #
 #   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 services:
-  phone-torrent:
-    image: ghcr.io/maxgfr/phone-torrent:latest
+  swarmdeck:
+    image: ghcr.io/maxgfr/swarmdeck:latest
     pull_policy: always
     ports:
       - "8080:8080"

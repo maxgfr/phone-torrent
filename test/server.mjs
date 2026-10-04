@@ -97,7 +97,7 @@ async function freePort() {
   }
 }
 
-const tmp = mkdtempSync(path.join(tmpdir(), 'phone-torrent-server-'));
+const tmp = mkdtempSync(path.join(tmpdir(), 'swarmdeck-server-'));
 const tracker = new TrackerServer({ udp: false, http: true, ws: false, stats: false });
 await new Promise((resolve) => tracker.listen(0, '127.0.0.1', resolve));
 const trackerUrl = `http://127.0.0.1:${tracker.http.address().port}/announce`;
@@ -320,7 +320,7 @@ try {
   // The app itself is served from the same origin: that is what makes one container a product.
   const page = await fetch(`${serverUrl}/`);
   assert.equal(page.status, 200);
-  assert.match(await page.text(), /Phone Torrent/);
+  assert.match(await page.text(), /Swarmdeck/);
   log('the app is served from the same origin');
 
   // Submit exactly as the app does: a magnet, as JSON.
@@ -483,7 +483,7 @@ try {
   // as the last part of the link: "0", with no name and no extension. The file is on the server's
   // disk already, so the transfer checks it and has it, with no peer.
   const quotedName = "Don't Look Up (2021).bin";
-  const quotedDir = mkdtempSync(path.join(tmpdir(), 'phone-torrent-quoted-'));
+  const quotedDir = mkdtempSync(path.join(tmpdir(), 'swarmdeck-quoted-'));
   const quotedBytes = randomBytes(20 * 1024);
   writeFileSync(path.join(quotedDir, quotedName), quotedBytes);
   const quoted = await new Promise((resolve) => {
@@ -504,7 +504,7 @@ try {
 
   // A torrent whose file is called transfers.json would write over the server's list of
   // transfers, and every transfer would be forgotten at the next start. It is refused.
-  const clashDir = mkdtempSync(path.join(tmpdir(), 'phone-torrent-clash-'));
+  const clashDir = mkdtempSync(path.join(tmpdir(), 'swarmdeck-clash-'));
   writeFileSync(path.join(clashDir, 'transfers.json'), randomBytes(4096));
   const clash = await new Promise((resolve) => {
     seeder.seed(path.join(clashDir, 'transfers.json'), { announce: [trackerUrl] }, resolve);
@@ -626,7 +626,7 @@ try {
   // A transfer that fails — a full disk, a write the disk refuses — stays listed with the
   // reason until it is deleted, rather than vanishing: the phone says why. A folder where its
   // second file must go makes every write to that file fail.
-  const blockedDir = path.join(mkdtempSync(path.join(tmpdir(), 'phone-torrent-blocked-')), 'Blocked');
+  const blockedDir = path.join(mkdtempSync(path.join(tmpdir(), 'swarmdeck-blocked-')), 'Blocked');
   mkdirSync(blockedDir);
   const alreadyThere = randomBytes(64 * 1024);
   writeFileSync(path.join(blockedDir, 'a-written.bin'), alreadyThere);
@@ -751,7 +751,7 @@ try {
   const web = path.join(tmp, 'web');
   const webDownloads = path.join(web, 'downloads');
   mkdirSync(path.join(webDownloads, 'Some.Movie'), { recursive: true });
-  writeFileSync(path.join(web, 'index.html'), '<!doctype html><title>Phone Torrent</title>');
+  writeFileSync(path.join(web, 'index.html'), '<!doctype html><title>Swarmdeck</title>');
   writeFileSync(path.join(webDownloads, 'Some.Movie', 'movie.mkv'), 'private bytes');
   // A list of transfers that does not read — a crash mid-write, a full disk — is not a first
   // run: it is kept aside, and said so, rather than written over with an empty list.
@@ -759,7 +759,7 @@ try {
   // The hosted app's origin written as the address of its page, the way it gets pasted; and the
   // names this server answers at written as the address bar shows them, as an address, and with the
   // final dot a full name may have. A Host header is compared without its port or that dot.
-  const tokenless = { AUTH_TOKEN: '', WEB_DIR: web, DOWNLOAD_DIR: webDownloads, ALLOWED_HOSTS: 'nas.local:8080, http://media.lan:8080/,files.lan.', ALLOWED_ORIGINS: 'https://hosted.example/phone-torrent/' };
+  const tokenless = { AUTH_TOKEN: '', WEB_DIR: web, DOWNLOAD_DIR: webDownloads, ALLOWED_HOSTS: 'nas.local:8080, http://media.lan:8080/,files.lan.', ALLOWED_ORIGINS: 'https://hosted.example/swarmdeck/' };
   await startServer(tokenless);
   const aside = readdirSync(webDownloads).find((name) => name.startsWith('transfers.json.corrupt-'));
   assert.ok(aside, 'an unreadable transfers.json is kept aside');
@@ -841,12 +841,12 @@ try {
   let started = 0;
   const TORRENT = { idFromName: (name) => name, get: () => ({ fetch: async () => { started++; return new Response('the container'); } }) };
   for (const env of [{ TORRENT }, { TORRENT, AUTH_TOKEN: '  ' }]) {
-    const res = await cfWorker.fetch(new Request('https://phone-torrent.example.workers.dev/api/transfers'), env);
+    const res = await cfWorker.fetch(new Request('https://swarmdeck.example.workers.dev/api/transfers'), env);
     assert.equal(res.status, 503, `the Cloudflare Worker refuses with ${JSON.stringify(env.AUTH_TOKEN)} as the token`);
     assert.match((await res.json()).error, /wrangler secret put AUTH_TOKEN/, 'and says how to set one');
   }
   assert.equal(started, 0, 'without ever starting the container');
-  const forwarded = await cfWorker.fetch(new Request('https://phone-torrent.example.workers.dev/'), { TORRENT, AUTH_TOKEN: 'k' });
+  const forwarded = await cfWorker.fetch(new Request('https://swarmdeck.example.workers.dev/'), { TORRENT, AUTH_TOKEN: 'k' });
   assert.equal(await forwarded.text(), 'the container', 'with a token, every request goes to the container');
   log('the Cloudflare Worker will not run the server without a token');
 
@@ -896,12 +896,12 @@ try {
     method: 'OPTIONS',
     headers: { Origin: origin, 'Access-Control-Request-Method': 'GET' },
   }), { ALLOWED_ORIGINS: allowed });
-  for (const allowed of ['https://me.example/', 'https://me.example/phone-torrent/', 'https://elsewhere.example, https://me.example/phone-torrent/']) {
+  for (const allowed of ['https://me.example/', 'https://me.example/swarmdeck/', 'https://elsewhere.example, https://me.example/swarmdeck/']) {
     const answer = await proxyPreflight('https://me.example', allowed);
     assert.equal(answer.status, 204, `the CORS proxy takes "${allowed}" as the origin it names`);
     assert.equal(answer.headers.get('access-control-allow-origin'), 'https://me.example');
   }
-  assert.equal((await proxyPreflight('https://other.example', 'https://me.example/phone-torrent/')).status, 403, 'and still refuses any other');
+  assert.equal((await proxyPreflight('https://other.example', 'https://me.example/swarmdeck/')).status, 403, 'and still refuses any other');
   log('the CORS proxy takes an allowed origin written as the address of the app');
 
   console.log('\nServer checks passed.');

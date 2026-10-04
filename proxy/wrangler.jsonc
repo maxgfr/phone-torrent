@@ -4,7 +4,9 @@
   //   cd proxy && wrangler deploy
   //
   // With this file, wrangler knows the Worker's name for `wrangler secret put`
-  // too, and has the compatibility date it refuses to deploy without.
+  // too, and has the compatibility date it refuses to deploy without. The name is the project's old
+  // one, on purpose: renamed, it would be a new Worker at a new address, and the proxy set in the
+  // app's Settings would stop answering.
   "name": "phone-torrent-proxy",
   "main": "cloudflare-worker.js",
   "compatibility_date": "2026-01-01"

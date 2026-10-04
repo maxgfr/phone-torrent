@@ -7,8 +7,8 @@
 # Every command about the tunnel needs both files, `down` included: without them
 # Compose reads docker-compose.yml alone, which has no cloudflared service.
 #
-# The second command prints the https address the tunnel got. Open it on the
-# phone: the app served there needs only Settings → Cloud fetch → service "My
+# The second command prints the https address the tunnel got. Open it on any
+# device: the app served there needs only Settings → Cloud fetch → service "My
 # own server" and the key, and its address field can stay empty. The app
 # installed from GitHub Pages needs the tunnel's address typed into that field,
 # and the page's origin named in docker-compose.yml, with no path after it:
@@ -26,7 +26,7 @@
 services:
   cloudflared:
     image: cloudflare/cloudflared:latest
-    command: tunnel --no-autoupdate --url http://phone-torrent:8080
+    command: tunnel --no-autoupdate --url http://swarmdeck:8080
     depends_on:
-      - phone-torrent
+      - swarmdeck
     restart: unless-stopped

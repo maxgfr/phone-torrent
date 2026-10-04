@@ -1,4 +1,4 @@
-/* Phone Torrent service worker.
+/* Swarmdeck service worker.
  *
  * Its only job is to turn a ReadableStream that lives in the page into a real
  * HTTP download. The page registers a stream under an id, then navigates a
@@ -12,7 +12,11 @@
 const ANSWER_TIMEOUT_MS = 8000;
 
 /* App shell cache so the installed app opens offline and loads instantly.
- * Network first, cache as fallback: a deploy is picked up on the next online load. */
+ * Network first, cache as fallback: a deploy is picked up on the next online load.
+ * The caches, and the message saver.js answers, keep the app's old name (Phone Torrent) on purpose:
+ * renamed, the old shell would stay on the device for good (activate clears only its own prefix), a
+ * share parked in the inbox by the old worker would never reach the new page, and a worker of one
+ * version would ask a page of the other for a download in words it does not recognise. */
 const SHELL_CACHE = 'phone-torrent-shell-v1';
 const SHELL_FILES = [
   './',
@@ -137,7 +141,7 @@ self.addEventListener('fetch', (event) => {
 /* Web Share Target: Android lets the user "share" a .torrent file or a magnet
  * link to this app. The browser POSTs it here; we park it in the Cache API and
  * redirect to the app, which picks it up (see app.js, takeSharedInbox). */
-const INBOX_CACHE = 'phone-torrent-inbox';
+const INBOX_CACHE = 'phone-torrent-inbox'; // the old name, kept: see SHELL_CACHE
 
 async function receiveShare(request, scope) {
   try {
@@ -186,7 +190,7 @@ async function serve(id) {
           }
         }
       };
-      client.postMessage({ type: 'phone-torrent:request', id }, [port2]);
+      client.postMessage({ type: 'phone-torrent:request', id }, [port2]); // the old name, kept: see SHELL_CACHE
     }
   });
 

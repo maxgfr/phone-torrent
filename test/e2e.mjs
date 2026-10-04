@@ -1414,7 +1414,7 @@ try {
   await new Promise((r) => setTimeout(r, 1000));
   assert.equal(await seeder.evaluate(() => window.__phoneTorrent.client.torrents.length), 0, 'a cancelled name seeds nothing');
   assert.equal((await seeder.$$('.torrent')).length, 0);
-  seeder.once('dialog', (d) => d.accept('Phone Torrent Test'));
+  seeder.once('dialog', (d) => d.accept('Swarmdeck Test'));
   await seeder.setInputFiles('#seed-file-input', files.map((f, i) => ({ name: f.name, mimeType: 'application/octet-stream', buffer: seedBuffers[i] })));
   await seeder.waitForSelector('.torrent.seeding .file', { timeout: 30000 });
   await waitFor(() => seeder.evaluate(() => window.__phoneTorrent.client.torrents[0]?.ready), { label: 'seeder ready' });
@@ -1464,7 +1464,7 @@ try {
 
   const torrentFile = await seeder.evaluate(() => Array.from(window.__phoneTorrent.client.torrents[0].torrentFile));
   assert.deepEqual(await seeder.evaluate(() => window.__phoneTorrent.client.torrents[0].announce), [trackerUrl], 'the seeded torrent names only the local tracker: the suite stays on this machine');
-  assert.equal(await seeder.$eval('.torrent .name', (e) => e.textContent), 'Phone Torrent Test');
+  assert.equal(await seeder.$eval('.torrent .name', (e) => e.textContent), 'Swarmdeck Test');
   // A seed is there to be shared: once it is ready, its card shows the link, selected, not the details.
   await seeder.waitForSelector('.torrent .share-panel:not([hidden])', { timeout: 10000 });
   assert.ok(await seeder.evaluate(() => document.activeElement?.classList.contains('share-app-link')), 'the seed opens on its link, selected');
@@ -1780,7 +1780,7 @@ try {
     phone.waitForEvent('download', { timeout: 30000 }),
     phone.click('.torrent .save-torrent-btn'),
   ]);
-  assert.equal(torrentDl.suggestedFilename(), 'Phone Torrent Test.torrent');
+  assert.equal(torrentDl.suggestedFilename(), 'Swarmdeck Test.torrent');
   const torrentDlPath = path.join(TMP, 'saved.torrent');
   await torrentDl.saveAs(torrentDlPath);
   const phoneTorrentFile = await phone.evaluate(() => Array.from(window.__phoneTorrent.client.torrents[0].torrentFile));
@@ -1818,11 +1818,11 @@ try {
   ]);
   const zipPath = path.join(TMP, 'all.zip');
   await zipDownload.saveAs(zipPath);
-  assert.equal(zipDownload.suggestedFilename(), 'Phone Torrent Test.zip');
+  assert.equal(zipDownload.suggestedFilename(), 'Swarmdeck Test.zip');
   const extractDir = path.join(TMP, 'unzipped');
   execFileSync('unzip', ['-q', zipPath, '-d', extractDir]);
   for (const f of files) {
-    const buf = readFileSync(path.join(extractDir, 'Phone Torrent Test', f.name));
+    const buf = readFileSync(path.join(extractDir, 'Swarmdeck Test', f.name));
     assert.equal(sha(buf), f.sha, `zip entry ${f.name} matches`);
   }
   log('zip save OK:', zipDownload.suggestedFilename());
@@ -1954,14 +1954,14 @@ try {
 
   /* ---------- Web Share Target: a .torrent shared to the installed app ---------- */
   await phone.setContent(`<form id="f" method="POST" enctype="multipart/form-data" action="${site.url}share">
-    <input type="file" name="torrents" id="file"><input name="title" value="Phone Torrent Test"></form>`);
+    <input type="file" name="torrents" id="file"><input name="title" value="Swarmdeck Test"></form>`);
   await phone.setInputFiles('#file', { name: 'shared.torrent', mimeType: 'application/x-bittorrent', buffer: Buffer.from(torrentFile) });
   const dialogsBeforeShare = dialogs;
   await Promise.all([phone.waitForNavigation(), phone.evaluate(() => document.getElementById('f').submit())]);
   assert.equal(new URL(phone.url()).pathname, new URL(site.url).pathname, 'share target redirects back to the app');
   await phone.waitForSelector('.torrent .file', { timeout: 15000 });
   assert.ok(dialogs > dialogsBeforeShare, 'shared torrent asked for confirmation before being added');
-  assert.equal(await phone.$eval('.torrent .name', (e) => e.textContent), 'Phone Torrent Test');
+  assert.equal(await phone.$eval('.torrent .name', (e) => e.textContent), 'Swarmdeck Test');
   await waitForFromSeeder(() => phone.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 'shared torrent download', timeout: 180000 });
   log('share target OK');
 
@@ -2096,7 +2096,7 @@ try {
     return { hasMetadata: Boolean(t.metadata), name: t.name, sourceType: r?.source?.type, peers: t.numPeers };
   });
   assert.deepEqual({ hasMetadata: magnetRestore.hasMetadata, name: magnetRestore.name, sourceType: magnetRestore.sourceType },
-    { hasMetadata: true, name: 'Phone Torrent Test', sourceType: 'magnet' }, 'magnet torrent restored from its stored metadata without peers');
+    { hasMetadata: true, name: 'Swarmdeck Test', sourceType: 'magnet' }, 'magnet torrent restored from its stored metadata without peers');
   if (opfs) {
     await waitFor(() => phone.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 'magnet torrent verified from disk', timeout: 30000 });
     assert.ok(await phone.evaluate(() => window.__phoneTorrent.client.torrents[0].received) < BLOCK, 'magnet torrent data came from OPFS');
@@ -2105,7 +2105,7 @@ try {
   await phone.click('.torrent .retry-btn');
   await waitFor(() => phone.$$eval('.torrent .log li', (els) => els.some((e) => /re-announced/.test(e.textContent))), { label: 'retry on magnet torrent', timeout: 15000 });
   assert.equal(await phone.evaluate(() => Boolean(window.__phoneTorrent.client.torrents[0].metadata)), true, 'retry keeps metadata on a magnet torrent');
-  assert.equal(await phone.$eval('.torrent .name', (e) => e.textContent), 'Phone Torrent Test');
+  assert.equal(await phone.$eval('.torrent .name', (e) => e.textContent), 'Swarmdeck Test');
   await seederPause(); // resume seeder
   log('magnet torrent restore + retry OK');
 
@@ -2286,7 +2286,7 @@ try {
     ios.waitForEvent('download', { timeout: 30000 }),
     ios.click('.torrent .zip-btn'),
   ]);
-  assert.equal(iosZip.suggestedFilename(), 'Phone Torrent Test.zip');
+  assert.equal(iosZip.suggestedFilename(), 'Swarmdeck Test.zip');
   await ios.screenshot({ path: path.join(TMP, 'ios.png'), fullPage: true });
   log('iOS-emulated save + zip OK');
 
@@ -2315,7 +2315,7 @@ try {
   await ios.fill('#magnet-input', `${site.url}test/.tmp/hosted.torrent`);
   await ios.click('#magnet-form button[type="submit"]');
   await ios.waitForSelector('.torrent .file', { timeout: 20000 });
-  assert.equal(await ios.$eval('.torrent .name', (e) => e.textContent), 'Phone Torrent Test');
+  assert.equal(await ios.$eval('.torrent .name', (e) => e.textContent), 'Swarmdeck Test');
   // Stored as bytes, so a reload restores it without fetching the URL again.
   assert.equal(await ios.evaluate(() => window.__phoneTorrent.views.values().next().value.source?.type), 'torrent');
   log('.torrent URL fetched and added');
@@ -3130,8 +3130,8 @@ try {
   await life.fill('#magnet-input', `magnet:?xt=urn:btih:${nobodyHasIt}&dn=nobody%20has%20it`);
   await life.click('#magnet-form button[type="submit"]');
   await lifeAdd('test.torrent', Buffer.from(torrentFile));
-  await waitForFromSeeder(() => lifeCard('Phone Torrent Test').locator('.pct').textContent().then((t) => t === '100%').catch(() => false), { label: 'the life page download', timeout: 180000 });
-  await waitFor(() => life.evaluate(() => window.__toasts.some((t) => /"Phone Torrent Test" finished downloading/.test(t))), { label: 'the finished toast for a download seen through', timeout: 5000 });
+  await waitForFromSeeder(() => lifeCard('Swarmdeck Test').locator('.pct').textContent().then((t) => t === '100%').catch(() => false), { label: 'the life page download', timeout: 180000 });
+  await waitFor(() => life.evaluate(() => window.__toasts.some((t) => /"Swarmdeck Test" finished downloading/.test(t))), { label: 'the finished toast for a download seen through', timeout: 5000 });
   await life.evaluate(() => Promise.all([...window.__phoneTorrent.views.values()].map((v) => v.persisted)));
   // On the next launch the pieces on disk are checked, and the check waits until the hashes are released.
   await life.evaluate(() => sessionStorage.setItem('hold-hashes', '1'));
@@ -3141,12 +3141,12 @@ try {
   await lifeCard('late metadata.bin').locator('.file').waitFor({ timeout: 10000 });
   if (opfs) {
     await waitFor(() => life.evaluate(() => {
-      const t = window.__phoneTorrent.client.torrents.find((x) => x.name === 'Phone Torrent Test');
+      const t = window.__phoneTorrent.client.torrents.find((x) => x.name === 'Swarmdeck Test');
       return Boolean(t?.metadata && !t.ready);
     }), { label: 'the restored download checking its pieces', timeout: 10000 });
     // A retry by hand would start the check over just the same: it waits for it instead.
-    await lifeCard('Phone Torrent Test').locator('.details-btn').click();
-    await lifeCard('Phone Torrent Test').locator('.retry-btn').click();
+    await lifeCard('Swarmdeck Test').locator('.details-btn').click();
+    await lifeCard('Swarmdeck Test').locator('.retry-btn').click();
     await waitFor(() => life.evaluate(() => window.__toasts.some((t) => /still being checked/.test(t))), { label: 'a retry during the check to wait for it', timeout: 5000 });
   }
   await life.click('.tab[data-tab="seed"]');
@@ -3171,7 +3171,7 @@ try {
       return Boolean(was && !was.destroyed && client.torrents.includes(was));
     };
     const byName = (name) => client.torrents.find((t) => t.name === name)?.infoHash;
-    return { seed: kept('seed'), checking: kept(byName('Phone Torrent Test')), nothingSelected: kept(byName('unwanted.bin')) };
+    return { seed: kept('seed'), checking: kept(byName('Swarmdeck Test')), nothingSelected: kept(byName('unwanted.bin')) };
   });
   assert.equal(afterReturn.seed, true, 'a seed still hashing is left to finish');
   if (opfs) assert.equal(afterReturn.checking, true, 'a restored torrent still checking its pieces is left to finish');
@@ -3180,9 +3180,9 @@ try {
   await life.evaluate(() => window.__releaseHashes());
   await waitFor(() => life.$$eval('.torrent.seeding .state', (els) => els.some((e) => /^seeding/.test(e.textContent))), { label: 'the seed to finish hashing', timeout: 20000 });
   // Without OPFS the pieces were in memory, and come from the seeder again.
-  await waitForFromSeeder(() => lifeCard('Phone Torrent Test').locator('.pct').textContent().then((t) => t === '100%'), { label: 'the restored download checked', timeout: 180000 });
+  await waitForFromSeeder(() => lifeCard('Swarmdeck Test').locator('.pct').textContent().then((t) => t === '100%'), { label: 'the restored download checked', timeout: 180000 });
   if (opfs) {
-    assert.ok(await life.evaluate(() => window.__phoneTorrent.client.torrents.find((t) => t.name === 'Phone Torrent Test').received) < BLOCK, 'restored from disk');
+    assert.ok(await life.evaluate(() => window.__phoneTorrent.client.torrents.find((t) => t.name === 'Swarmdeck Test').received) < BLOCK, 'restored from disk');
     // Finished before this launch: a check that finds it complete is no news.
     assert.deepEqual(await life.evaluate(() => window.__toasts.filter((t) => /finished downloading/.test(t))), [], 'no "finished downloading" for what finished before');
   }
@@ -3212,17 +3212,17 @@ try {
   await secondCard('nobody has it').locator('.pause-btn').click();
   await waitFor(() => pausedInFirst(nobodyHasIt).then((paused) => paused === false), { label: 'a resume in the second copy to resume it', timeout: 5000 });
 
-  const ticksInFirst = () => lifeCard('Phone Torrent Test').locator('.file input[type="checkbox"]').evaluateAll((boxes) => boxes.map((b) => b.checked));
-  await secondCard('Phone Torrent Test').locator('.file input[type="checkbox"]').first().uncheck();
+  const ticksInFirst = () => lifeCard('Swarmdeck Test').locator('.file input[type="checkbox"]').evaluateAll((boxes) => boxes.map((b) => b.checked));
+  await secondCard('Swarmdeck Test').locator('.file input[type="checkbox"]').first().uncheck();
   await waitFor(() => ticksInFirst().then((t) => t[0] === false && t.slice(1).every(Boolean)), { label: 'a file unticked in the second copy to be unticked in the first', timeout: 5000 });
-  assert.deepEqual(await life.evaluate(() => [...window.__phoneTorrent.views.values()].find((v) => v.torrent.name === 'Phone Torrent Test').record.deselected), [0], 'and remembered there');
-  await secondCard('Phone Torrent Test').locator('.file input[type="checkbox"]').first().check();
+  assert.deepEqual(await life.evaluate(() => [...window.__phoneTorrent.views.values()].find((v) => v.torrent.name === 'Swarmdeck Test').record.deselected), [0], 'and remembered there');
+  await secondCard('Swarmdeck Test').locator('.file input[type="checkbox"]').first().check();
   await waitFor(() => ticksInFirst().then((t) => t.every(Boolean)), { label: 'a file ticked again in the second copy to be ticked in the first', timeout: 5000 });
 
   // Saved in the second copy, a file streams over from the first, whole.
   const [fromSecond] = await Promise.all([
     secondCopy.waitForEvent('download', { timeout: 30000 }),
-    secondCard('Phone Torrent Test').locator('.file .save-btn').nth(saveIndex).click(),
+    secondCard('Swarmdeck Test').locator('.file .save-btn').nth(saveIndex).click(),
   ]);
   const fromSecondPath = path.join(TMP, 'saved-in-second-copy.bin');
   await fromSecond.saveAs(fromSecondPath);
@@ -3230,7 +3230,7 @@ try {
   assert.equal(sha(readFileSync(fromSecondPath)), files[0].sha, 'and its bytes');
   const [zipFromSecond] = await Promise.all([
     secondCopy.waitForEvent('download', { timeout: 60000 }),
-    secondCard('Phone Torrent Test').locator('.zip-btn').click(),
+    secondCard('Swarmdeck Test').locator('.zip-btn').click(),
   ]).catch(async (err) => {
     console.error('zip in the second copy:', await secondCopy.evaluate(() => JSON.stringify({
       button: document.querySelector('.torrent:not(.seeding) .zip-btn')?.outerHTML,
@@ -3242,7 +3242,7 @@ try {
   await zipFromSecond.saveAs(zipFromSecondPath);
   const unzippedFromSecond = path.join(TMP, 'unzipped-from-second-copy');
   execFileSync('unzip', ['-q', '-o', zipFromSecondPath, '-d', unzippedFromSecond]);
-  for (const f of files) assert.equal(sha(readFileSync(path.join(unzippedFromSecond, 'Phone Torrent Test', f.name))), f.sha, `zip entry ${f.name} from the second copy matches`);
+  for (const f of files) assert.equal(sha(readFileSync(path.join(unzippedFromSecond, 'Swarmdeck Test', f.name))), f.sha, `zip entry ${f.name} from the second copy matches`);
 
   const addedThere = createHash('sha1').update(`added in the second copy ${Math.random()}`).digest('hex');
   await secondCopy.fill('#magnet-input', `magnet:?xt=urn:btih:${addedThere}&dn=added%20in%20the%20second%20copy`);
@@ -3571,7 +3571,7 @@ try {
   // browser would say.
   await ownCtx.route((url) => url.pathname.endsWith('/files/1'), () => { /* never answers */ });
   const secondEpisode = seasonRow.locator('.cloud-file', { has: own.locator('.cloud-file-name', { hasText: 'Show.S01E02.mkv' }) });
-  const lostToasts = () => own.$$eval('.toast', (els) => els.filter((e) => /Lost the connection while playing "Show\.S01E02\.mkv": tap Play/.test(e.textContent)).length);
+  const lostToasts = () => own.$$eval('.toast', (els) => els.filter((e) => /Lost the connection while playing "Show\.S01E02\.mkv": press Play/.test(e.textContent)).length);
   await secondEpisode.locator('.cloud-play').click();
   await secondEpisode.locator('.cloud-player video').evaluate((v) => {
     Object.defineProperty(v, 'currentTime', { configurable: true, get: () => 42 });

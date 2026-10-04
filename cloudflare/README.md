@@ -30,7 +30,7 @@ Be clear-eyed about it before you rely on it:
   container sleeps once half an hour has passed with no request from the app
   and no download getting any data; the downloaded files go with it. An app
   left open does not keep it awake: it stops asking once nothing is
-  downloading. So a download carries on with the phone locked, and what it
+  downloading. So a download carries on with your device asleep, and what it
   finishes stays for at least half an hour after, not overnight. Save what you
   want to keep soon after it finishes. A torrent that gets nothing for half an
   hour does not keep it awake.

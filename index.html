@@ -6,14 +6,14 @@
   <meta name="color-scheme" content="light dark" />
   <meta name="theme-color" content="#0f172a" media="(prefers-color-scheme: dark)" />
   <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
-  <meta name="description" content="Download and share torrents straight from your phone's browser and save the files to your device. Runs entirely in the browser." />
+  <meta name="description" content="Download, share and edit torrents in your browser, on a phone or a computer, and save the files to your device. Runs entirely in the browser." />
   <meta name="mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <!-- The page reaches under the status bar, which iOS then always draws in white: styles.css keeps
        something dark under it in light mode too. -->
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-  <meta name="apple-mobile-web-app-title" content="Torrent" />
-  <title>Phone Torrent</title>
+  <meta name="apple-mobile-web-app-title" content="Swarmdeck" />
+  <title>Swarmdeck</title>
   <link rel="manifest" href="./manifest.webmanifest" />
   <link rel="icon" href="./icon.svg" type="image/svg+xml" />
   <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png" />
@@ -23,7 +23,7 @@
   <header class="topbar">
     <div class="brand">
       <img src="./icon.svg" alt="" width="28" height="28" />
-      <h1>Phone Torrent</h1>
+      <h1>Swarmdeck</h1>
     </div>
     <div class="topbar-right">
       <button id="install-btn" class="btn small primary" type="button" hidden>Install</button>
@@ -150,7 +150,7 @@
           <button class="btn" type="submit">Seed</button>
         </form>
         <p class="hint">
-          Turn files on your phone into a torrent and share the link. The files are sent directly from this
+          Turn files on this device into a torrent and share the link. The files are sent directly from this
           browser to whoever opens the link, so keep this page open while sharing. Remote URLs must allow
           cross-origin requests and are fetched into memory first.
         </p>
@@ -210,7 +210,7 @@
          read each change aloud. What deserves announcing (finished, errors) goes to the toasts. -->
     <section id="torrents" class="torrents" aria-label="Torrents"></section>
 
-    <p id="empty-state" class="empty">No torrents yet. Pick a .torrent file from your phone or paste a magnet link above.</p>
+    <p id="empty-state" class="empty">No torrents yet. Pick a .torrent file or paste a magnet link above.</p>
   </main>
 
   <template id="torrent-template">
@@ -396,7 +396,7 @@
         </label>
         <button id="netcheck-btn" class="btn small" type="button">Check tracker connectivity</button>
         <ul id="netcheck-results" class="netcheck" hidden></ul>
-        <p class="hint">A web page cannot change which DNS server your phone uses. If trackers show as
+        <p class="hint">A web page cannot change which DNS server this device uses. If trackers show as
           <strong>blocked by your network</strong>, set the DNS on the device: Android → Settings → Network →
           Private DNS → <code>one.one.one.one</code>; iPhone → install the 1.1.1.1 app or Cloudflare's encrypted DNS
           profile; or change the DNS on your router.</p>
@@ -421,7 +421,7 @@
 
       <label class="toggle">
         <input id="seed-after-toggle" type="checkbox" />
-        <span>Keep seeding after a download finishes (helps other phones)</span>
+        <span>Keep seeding after a download finishes (helps the other peers)</span>
       </label>
 
       <label class="field" data-expert>
@@ -448,7 +448,7 @@
         <span>Cloud fetch (TorBox, put.io, Real‑Debrid, AllDebrid, or your own server)</span>
         <p class="hint">A browser cannot reach a private tracker, an <code>http(s)://</code>‑only tracker or a
           swarm without WebRTC peers. With a key for one of these services — or the address of the server in
-          <code>server/</code>, which is the same thing on a machine you own — the torrent is handed to it — a real BitTorrent client in a data centre — and your phone then downloads the
+          <code>server/</code>, which is the same thing on a machine you own — the torrent is handed to it — a real BitTorrent client in a data centre — and this device then downloads the
           finished file over HTTPS, straight from the link, with no size limit. Your key is stored on this
           device only.</p>
         <label class="field">
@@ -509,7 +509,7 @@
       <div class="field" data-expert id="presets-field">
         <span>Presets</span>
         <p class="hint">What a tracker wants in every torrent for it — its announce address, source, private
-          flag and the rest — kept under a name, applied in one tap in the editor and when making a torrent.</p>
+          flag and the rest — kept under a name, applied at once in the editor and when making a torrent.</p>
         <ul id="preset-list" class="preset-list" hidden></ul>
         <button id="preset-add" class="btn small" type="button">Add a preset</button>
         <fieldset id="preset-form" class="preset-form" hidden>

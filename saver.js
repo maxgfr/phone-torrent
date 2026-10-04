@@ -83,6 +83,7 @@ function waitForActive(reg) {
 
 function onWorkerMessage(event) {
   const data = event.data;
+  // The app's old name, as sw.js asks it: kept, so a worker and a page of different versions still agree.
   if (!data || data.type !== 'phone-torrent:request') return;
   const port = event.ports[0];
   const job = pending.get(data.id);

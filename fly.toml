@@ -1,13 +1,13 @@
 # Deploy: fly launch --no-deploy --copy-config --name <a-name-of-yours> && fly secrets set AUTH_TOKEN=$(openssl rand -hex 16) && fly deploy
 #
-# App names are global on Fly: "phone-torrent" below belongs to whoever took it first, and --name
+# App names are global on Fly: "swarmdeck" below belongs to whoever took it first, and --name
 # writes yours in its place.
 #
 # A machine that keeps running and a disk that stays: downloads carry on and
-# keep seeding with the phone off. Like Render, it reaches peers by connecting
+# keep seeding with your own device off. Like Render, it reaches peers by connecting
 # out to them; see [[services]] below for why peers finding it is not to be
 # counted on.
-app = "phone-torrent"
+app = "swarmdeck"
 primary_region = "cdg"
 
 [build]
