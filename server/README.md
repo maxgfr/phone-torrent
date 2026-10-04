@@ -28,8 +28,9 @@ A container started when the project was called Phone Torrent keeps its
 downloads in the `phone-torrent` volume: keep `-v phone-torrent:/data` in the new
 command, or copy that volume into `swarmdeck` first
 (`docker run --rm -v phone-torrent:/from -v swarmdeck:/to alpine cp -a /from/. /to/`).
-With `docker compose` nothing moves, the volume is still `downloads`: run
-`docker compose up -d --remove-orphans` once, which also stops the old
+With `docker compose` nothing moves, the volume is still `downloads`: fetch the
+compose file again (it names `ghcr.io/maxgfr/swarmdeck`; the old image is gone)
+and run `docker compose up -d --remove-orphans` once, which also stops the old
 `phone-torrent` service.
 
 That is the whole thing: the API, the client, and the app on one origin — no

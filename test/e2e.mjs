@@ -67,7 +67,7 @@ function privateTorrent(body, name = 'private release.bin') {
  * moment later. "Test the key" no longer switches the app over before Save, so wait for Save itself.
  */
 function savedService(page, provider) {
-  return page.waitForFunction((p) => window.__phoneTorrent.cloudCtx().provider === p, provider, { timeout: 5000 });
+  return page.waitForFunction((p) => window.__swarmdeck.cloudCtx().provider === p, provider, { timeout: 5000 });
 }
 
 async function waitFor(fn, { timeout = 60000, interval = 250, label = 'condition' } = {}) {
@@ -826,10 +826,10 @@ try {
       const ctx = await context(options);
       const page = await ctx.newPage();
       page.on('pageerror', (e) => console.error('layout page error:', e));
-      await page.addInitScript(({ t, rtc }) => localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], trackerList: false, rtcConfig: rtc })), { t: trackerUrl, rtc: rtcConfig });
+      await page.addInitScript(({ t, rtc }) => localStorage.setItem('swarmdeck:settings', JSON.stringify({ trackers: [t], trackerList: false, rtcConfig: rtc })), { t: trackerUrl, rtc: rtcConfig });
       if (init) await page.addInitScript(init);
       await page.goto(site.url);
-      await page.waitForFunction(() => window.__phoneTorrent?.client);
+      await page.waitForFunction(() => window.__swarmdeck?.client);
       return { ctx, page };
     };
 
@@ -942,9 +942,9 @@ try {
     await waitFor(() => page.$$eval('.torrent .log li', (els) => els.some((e) => /re-announced/.test(e.textContent))), { label: 'a seed retried', timeout: 15000 });
     await waitFor(() => page.$eval('.torrent .state', (e) => /^seeding/.test(e.textContent)).catch(() => false), { label: 'the retried seed seeding again', timeout: 15000 });
     assert.equal(await page.$eval('.torrent', (e) => e.classList.contains('seeding')), true, 'still a seed');
-    await page.evaluate(() => Promise.all([...window.__phoneTorrent.views.values()].map((v) => v.persisted)));
+    await page.evaluate(() => Promise.all([...window.__swarmdeck.views.values()].map((v) => v.persisted)));
     const remembered = await page.evaluate(() => new Promise((resolve, reject) => {
-      const open = indexedDB.open('phone-torrent');
+      const open = indexedDB.open('swarmdeck');
       open.onerror = () => reject(open.error);
       open.onsuccess = () => {
         const all = open.result.transaction('torrents', 'readonly').objectStore('torrents').getAll();
@@ -956,8 +956,8 @@ try {
     }));
     assert.deepEqual(remembered, [], 'and not remembered');
     await page.reload();
-    await page.waitForFunction(() => window.__phoneTorrent?.client);
-    await page.evaluate(() => window.__phoneTorrent.started);
+    await page.waitForFunction(() => window.__swarmdeck?.client);
+    await page.evaluate(() => window.__swarmdeck.started);
     assert.equal((await page.$$('.torrent')).length, 0, 'so it does not come back with the page');
     await ctx.close();
     log('a seed retried with fresh trackers stays a seed, not remembered');
@@ -974,7 +974,7 @@ try {
       await iphone.setViewportSize({ width, height: 664 });
       await iphone.evaluate(() => {
         const item = { name: 'The.Show.S01E01.1080p.WEB.h264-GROUP.mkv', size: 3, stream: () => new Blob([new Uint8Array(3)]).stream() };
-        window.__saved = window.__phoneTorrent.saver.save(item).then(() => 'saved', (err) => err.message);
+        window.__saved = window.__swarmdeck.saver.save(item).then(() => 'saved', (err) => err.message);
       });
       await iphone.waitForSelector('.save-ready');
       const screen = await iphone.evaluate(() => document.documentElement.clientWidth);
@@ -1004,15 +1004,15 @@ try {
 
   /* ---------- a computer: the list beside the torrent open ---------- */
   {
-    const settingsFor = ({ t, rtc }) => { if (window === window.top) localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], trackerList: false, rtcConfig: rtc })); };
+    const settingsFor = ({ t, rtc }) => { if (window === window.top) localStorage.setItem('swarmdeck:settings', JSON.stringify({ trackers: [t], trackerList: false, rtcConfig: rtc })); };
     const deskCtx = await context({ viewport: { width: 1280, height: 800 } });
     const desk = await deskCtx.newPage();
     desk.on('pageerror', (e) => console.error('desktop page error:', e));
     desk.on('dialog', (d) => { if (d.type() === 'beforeunload') return; d.accept(d.type() === 'prompt' ? 'Holiday photos' : undefined); });
     await desk.addInitScript(settingsFor, { t: trackerUrl, rtc: rtcConfig });
     await desk.goto(site.url);
-    await desk.waitForFunction(() => window.__phoneTorrent?.client);
-    await desk.evaluate(() => window.__phoneTorrent.started);
+    await desk.waitForFunction(() => window.__swarmdeck?.client);
+    await desk.evaluate(() => window.__swarmdeck.started);
     assert.equal(await desk.isVisible('#list-tools'), false, 'no torrents: nothing to search');
     assert.equal(await desk.$eval('#torrent-list', (e) => e.getBoundingClientRect().height), 0, 'and no empty list drawn as a line under the card');
     // The pane beside holds what to do instead, square with the card and with the top bar, at every width.
@@ -1156,10 +1156,10 @@ try {
     assert.deepEqual(await selected(), ['notes.txt', 'The.Show.S01E01.mkv'], 'Ctrl-click: one less');
     assert.equal(await desk.$eval('.tl-row:has-text("Holiday") input', (e) => e.checked), false, 'its box unticked with it');
     await desk.click('#bulk-pause');
-    await waitFor(() => desk.evaluate(() => [...window.__phoneTorrent.views.values()].filter((v) => v.torrent.paused).map((v) => v.torrent.name).sort().join()).then((n) => n === 'The.Show.S01E01.mkv,notes.txt'), { label: 'the two selected paused', timeout: 5000 });
+    await waitFor(() => desk.evaluate(() => [...window.__swarmdeck.views.values()].filter((v) => v.torrent.paused).map((v) => v.torrent.name).sort().join()).then((n) => n === 'The.Show.S01E01.mkv,notes.txt'), { label: 'the two selected paused', timeout: 5000 });
     assert.equal(await desk.isDisabled('#bulk-pause'), true, 'nothing left to pause among them');
     await desk.click('#bulk-resume');
-    await waitFor(() => desk.evaluate(() => [...window.__phoneTorrent.views.values()].every((v) => !v.torrent.paused)), { label: 'and resumed', timeout: 5000 });
+    await waitFor(() => desk.evaluate(() => [...window.__swarmdeck.views.values()].every((v) => !v.torrent.paused)), { label: 'and resumed', timeout: 5000 });
     await desk.click('.tl-row:has-text("Holiday") input');
     const [bundle] = await Promise.all([desk.waitForEvent('download'), desk.click('#bulk-save')]);
     assert.equal(bundle.suggestedFilename(), '3 torrents.zip', 'their .torrent files, in one zip');
@@ -1175,15 +1175,15 @@ try {
     const follower = await deskCtx.newPage();
     follower.on('pageerror', (e) => console.error('desktop follower page error:', e));
     await follower.goto(site.url);
-    await follower.waitForFunction(() => window.__phoneTorrent?.follower === true, null, { timeout: 15000 });
+    await follower.waitForFunction(() => window.__swarmdeck?.follower === true, null, { timeout: 15000 });
     const followerTitles = () => follower.$$eval('.tl-row .tl-title', (els) => els.map((e) => e.textContent));
     await waitFor(async () => (await followerTitles()).join() === (await titles()).join(), { label: 'the follower to list the same rows', timeout: 15000 });
     await follower.click('.tl-row:has-text("notes.txt") input');
     await follower.click('.tl-row:has-text("Holiday") input');
     await follower.click('#bulk-pause');
-    await waitFor(() => desk.evaluate(() => [...window.__phoneTorrent.views.values()].filter((v) => v.torrent.paused).map((v) => v.torrent.name).sort().join()).then((n) => n === 'Holiday photos,notes.txt'), { label: 'the follower\'s bulk pause run here', timeout: 10000 });
+    await waitFor(() => desk.evaluate(() => [...window.__swarmdeck.views.values()].filter((v) => v.torrent.paused).map((v) => v.torrent.name).sort().join()).then((n) => n === 'Holiday photos,notes.txt'), { label: 'the follower\'s bulk pause run here', timeout: 10000 });
     await follower.click('#bulk-resume');
-    await waitFor(() => desk.evaluate(() => [...window.__phoneTorrent.views.values()].every((v) => !v.torrent.paused)), { label: 'and its resume', timeout: 10000 });
+    await waitFor(() => desk.evaluate(() => [...window.__swarmdeck.views.values()].every((v) => !v.torrent.paused)), { label: 'and its resume', timeout: 10000 });
     await follower.close();
     log('a follower lists the same rows, and its bulk pause and resume run in the copy that leads');
 
@@ -1196,7 +1196,7 @@ try {
       await desk.click('#magnet-form button[type="submit"]');
     }
     const stored = () => desk.evaluate(() => new Promise((resolve, reject) => {
-      const open = indexedDB.open('phone-torrent');
+      const open = indexedDB.open('swarmdeck');
       open.onerror = () => reject(open.error);
       open.onsuccess = () => {
         const all = open.result.transaction('torrents', 'readonly').objectStore('torrents').getAll();
@@ -1215,13 +1215,13 @@ try {
     // Cards or table, as left: after a reload too. At phone width there is no list to show either way.
     assert.equal(await desk.$eval('#torrent-list', (e) => e.classList.contains('table')), true);
     await desk.reload();
-    await desk.waitForFunction(() => window.__phoneTorrent?.client);
+    await desk.waitForFunction(() => window.__swarmdeck?.client);
     assert.equal(await desk.$eval('#torrent-list', (e) => e.classList.contains('table')), true, 'the table, after a reload');
     assert.equal(await desk.getAttribute('#view-table', 'aria-pressed'), 'true');
     assert.equal(await desk.$eval('#list-sort', (e) => e.value), 'size', 'and the order');
     await desk.setViewportSize({ width: 390, height: 844 });
     assert.equal(await desk.$eval('#torrent-list', (e) => getComputedStyle(e).display), 'none', 'at 390px, cards only');
-    await desk.evaluate(() => localStorage.removeItem('phone-torrent:list'));
+    await desk.evaluate(() => localStorage.removeItem('swarmdeck:list'));
     await deskCtx.close();
     log('cards or table, and the order, kept across a reload; cards at phone width');
   }
@@ -1230,7 +1230,7 @@ try {
   {
     const settingsFor = ({ t, rtc, base }) => {
       if (window !== window.top) return;
-      localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], trackerList: false, rtcConfig: rtc, metadataSources: [], cloud: { provider: 'torbox', apiKey: 'test-api-key', apiBase: base } }));
+      localStorage.setItem('swarmdeck:settings', JSON.stringify({ trackers: [t], trackerList: false, rtcConfig: rtc, metadataSources: [], cloud: { provider: 'torbox', apiKey: 'test-api-key', apiBase: base } }));
     };
     const waysCtx = await context({ viewport: { width: 1280, height: 800 } });
     // What the system would hand over: an installed app's file handler, and the magnet registration.
@@ -1250,8 +1250,8 @@ try {
     });
     await ways.addInitScript(settingsFor, { t: trackerUrl, rtc: rtcConfig, base: cloudApi.url });
     await ways.goto(site.url);
-    await ways.waitForFunction(() => window.__phoneTorrent?.client);
-    await ways.evaluate(() => window.__phoneTorrent.started);
+    await ways.waitForFunction(() => window.__swarmdeck?.client);
+    await ways.evaluate(() => window.__swarmdeck.started);
     const rows = () => ways.$$eval('.tl-row .tl-title', (els) => els.map((e) => e.textContent));
     const url = ways.url();
 
@@ -1308,15 +1308,15 @@ try {
     const seedFolder = (page) => page.evaluate(async (tree) => {
       const files = tree.map(([p, fill, n]) => Object.defineProperty(new File([new Uint8Array(n).fill(fill)], p.split('/').pop()), 'fullPath', { value: p }));
       document.querySelector('.tab[data-tab="seed"]').click();
-      await window.__phoneTorrent.routeDrop({ files });
+      await window.__swarmdeck.routeDrop({ files });
     }, tree);
-    const infoHashOf = (name) => ways.evaluate((name) => [...window.__phoneTorrent.views.keys()].find((t) => t.name === name && t.infoHash)?.infoHash || '', name);
+    const infoHashOf = (name) => ways.evaluate((name) => [...window.__swarmdeck.views.keys()].find((t) => t.name === name && t.infoHash)?.infoHash || '', name);
     const before = asked.length;
     await seedFolder(ways);
     await waitFor(async () => (await infoHashOf('Photos')) === expected, { label: 'the folder seeded with the info hash Node makes', timeout: 15000 });
     assert.equal(asked.length, before, 'a folder is named after itself: nothing asked');
     const removeFolderSeed = async () => {
-      await ways.evaluate(() => { for (const [t, v] of window.__phoneTorrent.views) if (t.name === 'Photos') v.el.querySelector('.remove-btn').click(); });
+      await ways.evaluate(() => { for (const [t, v] of window.__swarmdeck.views) if (t.name === 'Photos') v.el.querySelector('.remove-btn').click(); });
       await waitFor(async () => !(await infoHashOf('Photos')), { label: 'the folder seed removed', timeout: 10000 });
     };
     await removeFolderSeed();
@@ -1346,7 +1346,7 @@ try {
     const helper = await waysCtx.newPage();
     helper.on('pageerror', (e) => console.error('ways follower page error:', e));
     await helper.goto(site.url);
-    await helper.waitForFunction(() => window.__phoneTorrent?.follower === true, null, { timeout: 15000 });
+    await helper.waitForFunction(() => window.__swarmdeck?.follower === true, null, { timeout: 15000 });
     // What this window shows is its own: a seed started in the other one does not change its filter.
     await ways.selectOption('#list-filter', 'paused');
     await seedFolder(helper);
@@ -1406,9 +1406,9 @@ try {
     await ways.keyboard.press('ControlOrMeta+a');
     assert.equal(await ways.$$eval('.tl-row.selected', (r) => r.length), listed.length, 'Ctrl+A or Cmd+A: every torrent listed');
     await ways.keyboard.press('Space');
-    await waitFor(() => ways.evaluate(() => [...window.__phoneTorrent.views.keys()].every((t) => t.paused)), { label: 'Space pausing the selection', timeout: 5000 });
+    await waitFor(() => ways.evaluate(() => [...window.__swarmdeck.views.keys()].every((t) => t.paused)), { label: 'Space pausing the selection', timeout: 5000 });
     await ways.keyboard.press('Space');
-    await waitFor(() => ways.evaluate(() => [...window.__phoneTorrent.views.keys()].every((t) => !t.paused)), { label: 'and resuming it', timeout: 5000 });
+    await waitFor(() => ways.evaluate(() => [...window.__swarmdeck.views.keys()].every((t) => !t.paused)), { label: 'and resuming it', timeout: 5000 });
     await ways.keyboard.press('Escape');
     assert.equal(await ways.$$eval('.tl-row.selected', (r) => r.length), 0, 'Escape: the selection emptied');
     await ways.click('.tl-row:has-text("holiday.jpg")');
@@ -1423,7 +1423,7 @@ try {
     await ways.keyboard.press('Escape');
     assert.equal(await ways.isVisible('#keys-dialog'), false);
     // The list's keys are the list's: not a control's that has the focus, nor the page's own scrolling.
-    const pausedNow = () => ways.evaluate(() => [...window.__phoneTorrent.views.keys()].filter((t) => t.paused).length);
+    const pausedNow = () => ways.evaluate(() => [...window.__swarmdeck.views.keys()].filter((t) => t.paused).length);
     await ways.click('.tl-row >> nth=0');
     await ways.click('.tl-row >> nth=0 >> input');
     await ways.keyboard.press('ArrowDown');
@@ -1467,7 +1467,7 @@ try {
     log('keys: / and Escape for the search, ↑ ↓ Home End and Shift in the list, Ctrl+A, Space, Delete, ?, and the arrows on the tabs');
 
     // The editor's ⋯ menu closes as a menu does: Escape closes it and not the editor; so does a click away.
-    await ways.evaluate(() => { for (const [t, v] of window.__phoneTorrent.views) if (t.name === 'dropped beside.bin') v.el.querySelector('.share-edit-btn').click(); });
+    await ways.evaluate(() => { for (const [t, v] of window.__swarmdeck.views) if (t.name === 'dropped beside.bin') v.el.querySelector('.share-edit-btn').click(); });
     await ways.waitForSelector('#editor-dialog[open]');
     await ways.click('#ed-menu summary');
     assert.equal(await ways.$eval('#ed-menu', (m) => m.open), true);
@@ -1485,15 +1485,15 @@ try {
     const leaving = (page) => page.evaluate(() => !window.dispatchEvent(new Event('beforeunload', { cancelable: true })));
     await ways.waitForTimeout(1000);
     assert.equal(await leaving(ways), true, 'seeding here: the browser asks before closing');
-    await ways.evaluate(() => { for (const t of window.__phoneTorrent.views.keys()) if (!t.paused) t.pause(); });
+    await ways.evaluate(() => { for (const t of window.__swarmdeck.views.keys()) if (!t.paused) t.pause(); });
     await ways.waitForTimeout(1000);
     assert.equal(await leaving(ways), false, 'everything paused: nothing to ask');
-    await ways.evaluate(() => { for (const t of window.__phoneTorrent.views.keys()) t.resume(); });
+    await ways.evaluate(() => { for (const t of window.__swarmdeck.views.keys()) t.resume(); });
     await ways.waitForTimeout(1000);
     assert.equal(await leaving(ways), true, 'running again: asked again');
     const second = await waysCtx.newPage();
     await second.goto(site.url);
-    await second.waitForFunction(() => window.__phoneTorrent?.follower === true, null, { timeout: 15000 });
+    await second.waitForFunction(() => window.__swarmdeck?.follower === true, null, { timeout: 15000 });
     await second.waitForTimeout(1000);
     assert.equal(await leaving(second), false, 'a copy that follows runs nothing: it does not ask');
     await waitFor(() => leaving(ways).then((asks) => !asks), { label: 'the leading copy, with another waiting to take over, no longer asking', timeout: 5000 });
@@ -1538,6 +1538,77 @@ try {
     await waysCtx.close();
   }
 
+  /* ---------- upgrading from Phone Torrent: what a browser kept under the old name comes along ---------- */
+  {
+    const oldCtx = await context();
+    const old = await oldCtx.newPage();
+    old.on('pageerror', (e) => console.error('upgrade page error:', e));
+    const asked = [];
+    old.on('dialog', (d) => { if (d.type() === 'beforeunload') return; asked.push(d.message()); d.accept(); });
+    const kept = '7777777777777777777777777777777777777777';
+    const shared = '8888888888888888888888888888888888888888';
+    // The origin as Phone Torrent left it, prepared from a page of it that is not the app.
+    await old.goto(`${site.url}icon.svg`);
+    await old.evaluate(async ({ t, rtc, kept, shared }) => {
+      localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], trackerList: false, rtcConfig: rtc, metadataSources: [], downloadLimit: 321 }));
+      localStorage.setItem('phone-torrent:list', JSON.stringify({ filter: 'all', sort: 'name', dir: 'asc', view: 'table' }));
+      await new Promise((resolve, reject) => {
+        const req = indexedDB.open('phone-torrent', 1);
+        req.onupgradeneeded = () => req.result.createObjectStore('torrents', { keyPath: 'infoHash' });
+        req.onerror = () => reject(req.error);
+        req.onsuccess = () => {
+          const tx = req.result.transaction('torrents', 'readwrite');
+          tx.objectStore('torrents').put({
+            infoHash: kept, source: { type: 'magnet', uri: `magnet:?xt=urn:btih:${kept}&dn=kept-from-phone-torrent` },
+            torrentFile: null, deselected: [], paused: true, cloud: null, reach: null, webSeeds: [], addedAt: 1,
+          });
+          tx.oncomplete = () => { req.result.close(); resolve(); };
+        };
+      });
+      const inbox = await caches.open('phone-torrent-inbox');
+      await inbox.put(`${location.origin}/inbox/1`, new Response(`magnet:?xt=urn:btih:${shared}&dn=shared-before-the-update`, { headers: { 'X-Kind': 'text' } }));
+    }, { t: trackerUrl, rtc: rtcConfig, kept, shared });
+    await old.goto(site.url);
+    await old.waitForFunction(() => window.__swarmdeck?.client);
+    await old.evaluate(() => window.__swarmdeck.started);
+    const after = await old.evaluate(async () => ({
+      limit: window.__swarmdeck.settings.downloadLimit,
+      table: document.querySelector('#torrent-list').classList.contains('table'),
+      torrents: [...window.__swarmdeck.views.keys()].map((t) => ({ name: t.name, paused: Boolean(t.paused) })),
+      oldKeys: Object.keys(localStorage).filter((k) => k.startsWith('phone-torrent')),
+      newKeys: Object.keys(localStorage).filter((k) => k.startsWith('swarmdeck:')).sort(),
+      databases: indexedDB.databases ? (await indexedDB.databases()).map((d) => d.name).sort() : null,
+      oldInbox: await caches.has('phone-torrent-inbox'),
+      stored: await new Promise((resolve) => {
+        const req = indexedDB.open('swarmdeck');
+        req.onsuccess = () => {
+          const all = req.result.transaction('torrents', 'readonly').objectStore('torrents').getAll();
+          all.onsuccess = () => { resolve(all.result.map((r) => r.infoHash)); req.result.close(); };
+        };
+      }),
+    }));
+    assert.equal(after.limit, 321, 'the settings came along');
+    assert.equal(after.table, true, 'and the list as it was left');
+    assert.deepEqual(after.newKeys, ['swarmdeck:list', 'swarmdeck:settings'], 'under the new names');
+    assert.deepEqual(after.oldKeys, [], 'the old ones gone');
+    assert.deepEqual(after.torrents.find((t) => t.name === 'kept-from-phone-torrent'), { name: 'kept-from-phone-torrent', paused: true }, 'the torrent remembered, still paused');
+    assert.ok(after.stored.includes(kept), 'and remembered in the new database');
+    if (after.databases) assert.equal(after.databases.includes('phone-torrent'), false, `the old database gone (${after.databases})`);
+    assert.equal(after.oldInbox, false, 'the old inbox emptied and gone');
+    // The share target is Android's, so Chromium's: WebKit has none (iOS shares nothing to web apps), and
+    // in a test context it does not even keep a cache's entries from one page to the next.
+    if (BROWSER === 'chromium') {
+      assert.ok(asked.some((m) => /shared-before-the-update/.test(m)), 'a share left in the old inbox still asked about');
+      assert.ok(after.torrents.some((t) => t.name === 'shared-before-the-update'), 'and added');
+    }
+    await old.reload();
+    await old.waitForFunction(() => window.__swarmdeck?.client);
+    await old.evaluate(() => window.__swarmdeck.started);
+    assert.ok(await old.evaluate(() => [...window.__swarmdeck.views.keys()].some((t) => t.name === 'kept-from-phone-torrent')), 'and still there after a reload, from the new database alone');
+    await oldCtx.close();
+    log('upgrading from Phone Torrent: settings, list, remembered torrents and a waiting share moved to the new names, the old ones gone');
+  }
+
   /* ---------- the .torrent editor ---------- */
   // Its own page, no service worker (route() must see every request, in WebKit too), so saves are
   // ordinary downloads: what the editor saved is read back here, and its info hash worked out again.
@@ -1562,11 +1633,11 @@ try {
     await edCtx.route('https://lists.invalid/ws.txt', (route) => route.fulfill({ status: 200, contentType: 'text/plain', headers: { 'Access-Control-Allow-Origin': '*' }, body: 'wss://listed.example\n' }));
     const ed = await edCtx.newPage();
     ed.on('pageerror', (e) => console.error('editor page error:', e));
-    await ed.addInitScript(({ t, rtc, sources }) => localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], trackerList: true, trackerListUrl: 'https://lists.invalid/ws.txt', rtcConfig: rtc, metadataSources: sources })),
+    await ed.addInitScript(({ t, rtc, sources }) => localStorage.setItem('swarmdeck:settings', JSON.stringify({ trackers: [t], trackerList: true, trackerListUrl: 'https://lists.invalid/ws.txt', rtcConfig: rtc, metadataSources: sources })),
       { t: trackerUrl, rtc: rtcConfig, sources: [`${site.url}test/.tmp/meta-{infohash}.torrent`] });
     await ed.goto(site.url);
-    await ed.waitForFunction(() => window.__phoneTorrent?.client);
-    await ed.waitForFunction(() => window.__phoneTorrent.saver.mode === 'stream' || window.__phoneTorrent.saver.reason, null, { timeout: 15000 });
+    await ed.waitForFunction(() => window.__swarmdeck?.client);
+    await ed.waitForFunction(() => window.__swarmdeck.saver.mode === 'stream' || window.__swarmdeck.saver.reason, null, { timeout: 15000 });
     const savedFrom = async (page) => {
       const [download] = await Promise.all([page.waitForEvent('download', { timeout: 15000 }), page.click('#ed-save')]);
       const where = path.join(TMP, `edited-${Date.now()}.torrent`);
@@ -1690,7 +1761,7 @@ try {
     await ed.click('.tab[data-tab="seed"]');
     await ed.setInputFiles('#seed-file-input', { name: 'shared here.bin', mimeType: 'application/octet-stream', buffer: noise(30000, 73) });
     await ed.waitForSelector('.torrent .share-panel:not([hidden])', { timeout: 15000 });
-    const seededHash = await ed.evaluate(() => window.__phoneTorrent.client.torrents[0].infoHash);
+    const seededHash = await ed.evaluate(() => window.__swarmdeck.client.torrents[0].infoHash);
     await ed.click('.torrent .share-edit-btn');
     await ed.waitForSelector('#editor-dialog[open][data-mode="torrent"]');
     await waitFor(async () => (await hashShown()) === seededHash, { label: 'the card\'s torrent in the editor', timeout: 5000 });
@@ -1702,7 +1773,7 @@ try {
     // The seed goes with the page, as in the layout check above: a context closed under a live seed
     // left the swarm that follows unable to connect in Chromium.
     await ed.reload();
-    await ed.waitForFunction(() => window.__phoneTorrent?.client);
+    await ed.waitForFunction(() => window.__swarmdeck?.client);
     log('editor: "Edit .torrent" on a card opens that torrent, and making it private says the shared one stays public');
 
     // Several .torrent files at once: each field kept, set, added to or cleared in all of them, and
@@ -1768,7 +1839,7 @@ try {
     assert.equal(await ed.isVisible('#settings-dialog'), true, 'Enter in a preset keeps the preset, and leaves Settings open');
     assert.match(await ed.textContent('#preset-list'), /My tracker.*1 tracker · a comment/s);
     await ed.click('#settings-dialog button[value="save"]');
-    await ed.waitForFunction(() => window.__phoneTorrent.settings.presets?.[0]?.name === 'My tracker');
+    await ed.waitForFunction(() => window.__swarmdeck.settings.presets?.[0]?.name === 'My tracker');
     await ed.setInputFiles('#edit-file-input', { name: 'one.torrent', mimeType: 'application/x-bittorrent', buffer: one.buf });
     await ed.waitForSelector('#editor-dialog[open][data-mode="torrent"]');
     await ed.selectOption('#ed-preset', { label: 'My tracker' });
@@ -1783,7 +1854,7 @@ try {
     assert.equal(await ed.isVisible('#ed-rule-source'), false, 'and no longer offered once set');
     await ed.click('#ed-close');
     // Stored with the settings (the page's init script would write them over on a reload).
-    assert.deepEqual(await ed.evaluate(() => JSON.parse(localStorage.getItem('phone-torrent:settings')).presets.map((p) => [p.name, p.comment])), [['My tracker', 'from the preset']], 'the preset stored');
+    assert.deepEqual(await ed.evaluate(() => JSON.parse(localStorage.getItem('swarmdeck:settings')).presets.map((p) => [p.name, p.comment])), [['My tracker', 'from the preset']], 'the preset stored');
     log('editor: a preset made in Settings fills the trackers and comment; the PTP rule shown and its source one tap away');
 
     // Files checked against a torrent: whole, then with a byte changed, then with one missing.
@@ -1860,7 +1931,7 @@ try {
     // A preset applied to a hybrid torrent leaves its identity locked.
     const hybridPieces = createHash('sha1').update(noise(16384, 82)).digest();
     const hybrid = bencode({ info: { name: 'hybrid.bin', length: 16384, 'piece length': 16384, pieces: hybridPieces, 'meta version': 2 } });
-    await ed.evaluate(() => window.__phoneTorrent.settings.presets.push({ id: 'src', name: 'With a source', trackers: [], source: 'SRC', private: true, webSeeds: [], comment: '', maxPiece: 0 }));
+    await ed.evaluate(() => window.__swarmdeck.settings.presets.push({ id: 'src', name: 'With a source', trackers: [], source: 'SRC', private: true, webSeeds: [], comment: '', maxPiece: 0 }));
     await ed.setInputFiles('#edit-file-input', { name: 'hybrid.torrent', mimeType: 'application/x-bittorrent', buffer: hybrid });
     await ed.waitForSelector('#editor-dialog[open][data-mode="torrent"]');
     await ed.selectOption('#ed-preset', { label: 'With a source' });
@@ -1871,11 +1942,11 @@ try {
 
     // Options changed in another open copy: this one's line says so, and goes on from them.
     await ed.evaluate(() => {
-      const stored = JSON.parse(localStorage.getItem('phone-torrent:settings'));
+      const stored = JSON.parse(localStorage.getItem('swarmdeck:settings'));
       stored.createOptions = { ...stored.createOptions, private: true, source: 'ELSEWHERE' };
       const value = JSON.stringify(stored);
-      localStorage.setItem('phone-torrent:settings', value);
-      window.dispatchEvent(new StorageEvent('storage', { key: 'phone-torrent:settings', newValue: value }));
+      localStorage.setItem('swarmdeck:settings', value);
+      window.dispatchEvent(new StorageEvent('storage', { key: 'swarmdeck:settings', newValue: value }));
     });
     assert.match(await ed.textContent('#seed-options-summary'), /private.*source ELSEWHERE/, 'the options line follows another copy');
     assert.equal(await ed.inputValue('#so-source'), 'ELSEWHERE');
@@ -1896,14 +1967,14 @@ try {
     const content = made(200000, 76);
     // The top frame only: an init script runs in every frame, the saver's download frame included, and
     // writing the settings from there is another copy saving them — which this page now follows.
-    const settingsFor = ({ t, rtc }) => { if (window === window.top) localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], trackerList: false, rtcConfig: rtc })); };
+    const settingsFor = ({ t, rtc }) => { if (window === window.top) localStorage.setItem('swarmdeck:settings', JSON.stringify({ trackers: [t], trackerList: false, rtcConfig: rtc })); };
     const makerCtx = await context({ acceptDownloads: true });
     const maker = await makerCtx.newPage();
     maker.on('pageerror', (e) => console.error('maker page error:', e));
     await maker.addInitScript(settingsFor, { t: trackerUrl, rtc: rtcConfig });
     await maker.goto(site.url);
-    await maker.waitForFunction(() => window.__phoneTorrent?.client);
-    await maker.waitForFunction(() => window.__phoneTorrent.saver.mode === 'stream' || window.__phoneTorrent.saver.reason, null, { timeout: 15000 });
+    await maker.waitForFunction(() => window.__swarmdeck?.client);
+    await maker.waitForFunction(() => window.__swarmdeck.saver.mode === 'stream' || window.__swarmdeck.saver.reason, null, { timeout: 15000 });
     await maker.click('.tab[data-tab="seed"]');
     assert.equal(await maker.textContent('#seed-options-summary'), 'Auto pieces · public · app trackers', 'folded, and saying it makes torrents as always');
     assert.equal(await maker.isVisible('#so-trackers'), false, 'its options out of the way until asked for');
@@ -1934,10 +2005,10 @@ try {
     await maker.uncheck('#so-only');
     await maker.setInputFiles('#seed-file-input', { name: 'made here.bin', mimeType: 'application/octet-stream', buffer: content });
     await maker.waitForSelector('.torrent .share-panel:not([hidden])', { timeout: 30000 });
-    assert.equal(await maker.evaluate(() => window.__phoneTorrent.client.torrents[0].infoHash), madeHash, 'shared, the torrent "only the .torrent" saved');
+    assert.equal(await maker.evaluate(() => window.__swarmdeck.client.torrents[0].infoHash), madeHash, 'shared, the torrent "only the .torrent" saved');
     assert.equal(await maker.isVisible('.torrent .share-private'), true, 'its card treats it as private');
-    assert.deepEqual(await maker.evaluate(() => window.__phoneTorrent.client.torrents[0].announce), [trackerUrl], 'announced to its own tracker alone');
-    assert.equal(await maker.evaluate(() => JSON.parse(localStorage.getItem('phone-torrent:settings')).createOptions.source), 'MADE-HERE', 'the options kept for next time');
+    assert.deepEqual(await maker.evaluate(() => window.__swarmdeck.client.torrents[0].announce), [trackerUrl], 'announced to its own tracker alone');
+    assert.equal(await maker.evaluate(() => JSON.parse(localStorage.getItem('swarmdeck:settings')).createOptions.source), 'MADE-HERE', 'the options kept for next time');
 
     // A second page downloads it from the .torrent saved.
     const takerCtx = await context();
@@ -1945,11 +2016,11 @@ try {
     taker.on('pageerror', (e) => console.error('taker page error:', e));
     await taker.addInitScript(settingsFor, { t: trackerUrl, rtc: rtcConfig });
     await taker.goto(site.url);
-    await taker.waitForFunction(() => window.__phoneTorrent?.client);
+    await taker.waitForFunction(() => window.__swarmdeck?.client);
     await taker.setInputFiles('#torrent-file-input', { name: 'made here.torrent', mimeType: 'application/x-bittorrent', buffer: madeTorrent });
     await waitFor(() => taker.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 'the torrent made here downloaded by another page', timeout: 120000 });
     const got = await taker.evaluate(async () => {
-      const file = window.__phoneTorrent.client.torrents[0].files[0];
+      const file = window.__swarmdeck.client.torrents[0].files[0];
       return Array.from(new Uint8Array(await new Response(file.stream()).arrayBuffer()));
     });
     assert.equal(sha(Buffer.from(got)), sha(content), 'byte for byte');
@@ -1968,7 +2039,7 @@ try {
     stopper.on('dialog', (d) => { if (d.type() === 'beforeunload') return; d.accept(); });
     await stopper.addInitScript(({ t }) => {
       if (window !== window.top) return;
-      localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], trackerList: false }));
+      localStorage.setItem('swarmdeck:settings', JSON.stringify({ trackers: [t], trackerList: false }));
       Object.defineProperty(window, 'Worker', { value: undefined, configurable: true });
       const digest = crypto.subtle.digest.bind(crypto.subtle);
       const held = [];
@@ -1985,7 +2056,7 @@ try {
       };
     }, { t: trackerUrl });
     await stopper.goto(site.url);
-    await stopper.waitForFunction(() => window.__phoneTorrent?.client);
+    await stopper.waitForFunction(() => window.__swarmdeck?.client);
     await stopper.click('.tab[data-tab="seed"]');
     // 32 MiB in 32 KiB pieces: four windows of 8 MiB, 256 pieces each.
     await stopper.setInputFiles('#seed-file-input', { name: 'long to hash.bin', mimeType: 'application/octet-stream', buffer: Buffer.alloc(32 * 1024 * 1024, 5) });
@@ -2008,9 +2079,9 @@ try {
   // trackerList off, as for every page here: the suite's content is fixed, so is its info hash, and
   // on a public tracker it would meet every other run of this suite — the engine running beside it
   // included — and the crawlers that answer every offer, until WebRTC in WebKit gives out.
-  await seeder.addInitScript(({ t, rtc }) => localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], trackerList: false, rtcConfig: rtc })), { t: trackerUrl, rtc: rtcConfig });
+  await seeder.addInitScript(({ t, rtc }) => localStorage.setItem('swarmdeck:settings', JSON.stringify({ trackers: [t], trackerList: false, rtcConfig: rtc })), { t: trackerUrl, rtc: rtcConfig });
   await seeder.goto(site.url);
-  await seeder.waitForFunction(() => window.__phoneTorrent?.client);
+  await seeder.waitForFunction(() => window.__swarmdeck?.client);
 
   // What a restore must not fetch again. `received` counts every byte a peer sends, the BitTorrent
   // and extension handshakes included (WebTorrent counts at the throttle pipe, before the wire), so a
@@ -2040,12 +2111,12 @@ try {
   seeder.once('dialog', (d) => { if (d.type() === 'beforeunload') return; d.dismiss(); });
   await seeder.setInputFiles('#seed-file-input', files.map((f, i) => ({ name: f.name, mimeType: 'application/octet-stream', buffer: seedBuffers[i] })));
   await new Promise((r) => setTimeout(r, 1000));
-  assert.equal(await seeder.evaluate(() => window.__phoneTorrent.client.torrents.length), 0, 'a cancelled name seeds nothing');
+  assert.equal(await seeder.evaluate(() => window.__swarmdeck.client.torrents.length), 0, 'a cancelled name seeds nothing');
   assert.equal((await seeder.$$('.torrent')).length, 0);
   seeder.once('dialog', (d) => { if (d.type() === 'beforeunload') return; d.accept('Swarmdeck Test'); });
   await seeder.setInputFiles('#seed-file-input', files.map((f, i) => ({ name: f.name, mimeType: 'application/octet-stream', buffer: seedBuffers[i] })));
   await seeder.waitForSelector('.torrent.seeding .file', { timeout: 30000 });
-  await waitFor(() => seeder.evaluate(() => window.__phoneTorrent.client.torrents[0]?.ready), { label: 'seeder ready' });
+  await waitFor(() => seeder.evaluate(() => window.__swarmdeck.client.torrents[0]?.ready), { label: 'seeder ready' });
 
   /**
    * Wait for something that first needs a fresh connection to the seeder, nudging the seeder to
@@ -2059,8 +2130,8 @@ try {
       if (Date.now() - nudged > 15000) {
         nudged = Date.now();
         await seeder.evaluate(() => {
-          const t = window.__phoneTorrent.client.torrents[0];
-          try { if (t) window.__phoneTorrent.askTrackersNow(t); } catch { /* page may be gone */ }
+          const t = window.__swarmdeck.client.torrents[0];
+          try { if (t) window.__swarmdeck.askTrackersNow(t); } catch { /* page may be gone */ }
         }).catch(() => {});
       }
       return fn();
@@ -2071,27 +2142,27 @@ try {
    * bittorrent-tracker waits ten seconds plus up to five random minutes before reconnecting a
    * WebSocket that closed, and drops every announce in between — so update() alone does nothing,
    * and a peer nobody can find stays unfindable for longer than any wait below. */
-  const seederPeerId = await seeder.evaluate(() => window.__phoneTorrent.client.peerId);
+  const seederPeerId = await seeder.evaluate(() => window.__swarmdeck.client.peerId);
   const seederSocket = () => [...trackerSockets].find((ws) => ws.peerId === seederPeerId);
   const seederTracker = () => seeder.evaluate((url) => {
-    const tr = window.__phoneTorrent.client.torrents[0].discovery.tracker._trackers.find((t) => t.announceUrl === url);
+    const tr = window.__swarmdeck.client.torrents[0].discovery.tracker._trackers.find((t) => t.announceUrl === url);
     return { reconnecting: tr.reconnecting, open: !tr.destroyed && Boolean(tr.socket?.connected) };
   }, trackerUrl);
   await waitFor(() => Boolean(seederSocket()), { label: 'seeder on the tracker' });
   seederSocket().terminate();
   await waitFor(() => seederTracker().then((t) => t.reconnecting), { label: 'seeder to notice its tracker socket closed', timeout: 10000 });
-  await seeder.evaluate(() => window.__phoneTorrent.client.torrents[0].discovery.tracker.update());
+  await seeder.evaluate(() => window.__swarmdeck.client.torrents[0].discovery.tracker.update());
   assert.deepEqual(await seederTracker(), { reconnecting: true, open: false }, 'update() does not reopen a closed tracker socket, which is why asking has to');
   const askedAt = Date.now();
-  await seeder.evaluate(() => window.__phoneTorrent.askTrackersNow(window.__phoneTorrent.client.torrents[0]));
+  await seeder.evaluate(() => window.__swarmdeck.askTrackersNow(window.__swarmdeck.client.torrents[0]));
   await waitFor(() => seederTracker().then((t) => t.open && !t.reconnecting), { label: 'seeder tracker socket reopened once asked', timeout: 5000 });
   const reopenedIn = Date.now() - askedAt;
   // The announce itself waits for the WebRTC offers it carries, which is a few seconds at most.
   await waitFor(() => Boolean(seederSocket()), { label: 'seeder announced on the reopened socket', timeout: 20000 });
   log(`a dropped tracker socket reopens ${reopenedIn} ms after asking, and announces ${Date.now() - askedAt} ms after`);
 
-  const torrentFile = await seeder.evaluate(() => Array.from(window.__phoneTorrent.client.torrents[0].torrentFile));
-  assert.deepEqual(await seeder.evaluate(() => window.__phoneTorrent.client.torrents[0].announce), [trackerUrl], 'the seeded torrent names only the local tracker: the suite stays on this machine');
+  const torrentFile = await seeder.evaluate(() => Array.from(window.__swarmdeck.client.torrents[0].torrentFile));
+  assert.deepEqual(await seeder.evaluate(() => window.__swarmdeck.client.torrents[0].announce), [trackerUrl], 'the seeded torrent names only the local tracker: the suite stays on this machine');
   assert.equal(await seeder.$eval('.torrent .name', (e) => e.textContent), 'Swarmdeck Test');
   // A seed is there to be shared: once it is ready, its card shows the link, selected, not the details.
   await seeder.waitForSelector('.torrent .share-panel:not([hidden])', { timeout: 10000 });
@@ -2105,7 +2176,7 @@ try {
   // (seeds have no persisted record). Wait until the seed's pieces are on disk, run the cleanup,
   // then read them back and verify their hashes.
   const readPieces = () => seeder.evaluate(async () => {
-    const t = window.__phoneTorrent.client.torrents[0];
+    const t = window.__swarmdeck.client.torrents[0];
     for (const i of [0, t.pieces.length - 1]) {
       const buf = await new Promise((r) => t.store.get(i, (e, b) => r(e ? null : b)));
       if (!buf) return false;
@@ -2115,12 +2186,12 @@ try {
     return true;
   });
   await waitFor(readPieces, { label: 'seed pieces written to the store', timeout: 20000 });
-  await seeder.evaluate(() => window.__phoneTorrent.cleanOrphanStores([]));
+  await seeder.evaluate(() => window.__swarmdeck.cleanOrphanStores([]));
   assert.equal(await readPieces(), true, 'orphan cleanup leaves live seed data intact');
-  const opfs = await seeder.evaluate(() => window.__phoneTorrent.opfsOk);
+  const opfs = await seeder.evaluate(() => window.__swarmdeck.opfsOk);
   log('piece storage:', opfs ? 'OPFS' : 'memory (OPFS unavailable in this browser build)');
   assert.equal(await seeder.evaluate(() => {
-    const t = window.__phoneTorrent.client.torrents[0];
+    const t = window.__swarmdeck.client.torrents[0];
     return t.length % t.pieceLength;
   }), 0, 'the fixture ends on a piece boundary');
   if (opfs && await seeder.evaluate(() => Boolean(navigator.locks?.query))) {
@@ -2128,18 +2199,18 @@ try {
     // the app again (a link from a chat, the home-screen icon) must not delete what this one shares.
     const secondTab = await seederCtx.newPage();
     secondTab.on('pageerror', (e) => console.error('second tab page error:', e));
-    await secondTab.addInitScript(({ t, rtc }) => localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], trackerList: false, rtcConfig: rtc })), { t: trackerUrl, rtc: rtcConfig });
+    await secondTab.addInitScript(({ t, rtc }) => localStorage.setItem('swarmdeck:settings', JSON.stringify({ trackers: [t], trackerList: false, rtcConfig: rtc })), { t: trackerUrl, rtc: rtcConfig });
     await secondTab.goto(site.url);
-    await secondTab.waitForFunction(() => window.__phoneTorrent?.client);
+    await secondTab.waitForFunction(() => window.__swarmdeck?.client);
     // Both tabs hold the open-tab lock once the second one is past its housekeeping.
     await waitFor(() => secondTab.evaluate(async () => (await navigator.locks.query()).held
-      .filter((l) => l.name === 'phone-torrent:open-tab').length === 2), { label: 'second tab past its housekeeping', timeout: 15000 });
+      .filter((l) => l.name === 'swarmdeck:open-tab').length === 2), { label: 'second tab past its housekeeping', timeout: 15000 });
     const storeDirs = await secondTab.evaluate(async () => {
       const names = [];
       for await (const name of (await navigator.storage.getDirectory()).keys()) names.push(name);
       return names;
     });
-    const seedHash = await seeder.evaluate(() => window.__phoneTorrent.client.torrents[0].infoHash);
+    const seedHash = await seeder.evaluate(() => window.__swarmdeck.client.torrents[0].infoHash);
     assert.ok(storeDirs.some((n) => n.endsWith(` - ${seedHash.slice(0, 8)}`)), `a second tab leaves the seed's store alone (found: ${storeDirs.join(', ')})`);
     await secondTab.close();
   }
@@ -2169,8 +2240,8 @@ try {
     // which has no storage to read; only the app's own pages need the settings.
     if (!location.protocol.startsWith('http')) return;
     let current = {};
-    try { current = JSON.parse(localStorage.getItem('phone-torrent:settings') || '{}'); } catch { /* first load */ }
-    localStorage.setItem('phone-torrent:settings', JSON.stringify({
+    try { current = JSON.parse(localStorage.getItem('swarmdeck:settings') || '{}'); } catch { /* first load */ }
+    localStorage.setItem('swarmdeck:settings', JSON.stringify({
       ...current,
       trackers: ['ws://127.0.0.1:2/dead'], trackerList: true, trackerListUrl: listUrl,
       metadataSources: ['https://127.0.0.1:1/never/{INFOHASH}.torrent', metaUrl], fallbackDelay: 5,
@@ -2179,9 +2250,9 @@ try {
     }));
   }, { listUrl, metaUrl: `${site.url}test/.tmp/{infohash}.torrent`, rtc: rtcConfig });
   await phone.goto(site.url);
-  await phone.waitForFunction(() => window.__phoneTorrent?.client);
-  await waitFor(() => phone.evaluate((t) => window.__phoneTorrent.effectiveTrackers().includes(t), trackerUrl), { label: 'tracker list to be fetched and merged', timeout: 15000 });
-  const effective = await phone.evaluate(() => window.__phoneTorrent.effectiveTrackers());
+  await phone.waitForFunction(() => window.__swarmdeck?.client);
+  await waitFor(() => phone.evaluate((t) => window.__swarmdeck.effectiveTrackers().includes(t), trackerUrl), { label: 'tracker list to be fetched and merged', timeout: 15000 });
+  const effective = await phone.evaluate(() => window.__swarmdeck.effectiveTrackers());
   assert.deepEqual(effective, ['ws://127.0.0.1:2/dead', trackerUrl, 'wss://also-dead.example'], 'only ws(s) trackers are merged, deduplicated (a default port written out included), user list first');
   log('tracker list merged:', effective.length, 'trackers');
 
@@ -2195,10 +2266,10 @@ try {
     const oldSources = ['https://itorrents.org/torrent/{INFOHASH}.torrent', 'https://torrage.info/torrent.php?h={INFOHASH}'];
     const loaded = async (saved) => {
       const page = await oldCtx.newPage();
-      await page.addInitScript((s) => localStorage.setItem('phone-torrent:settings', JSON.stringify(s)), { trackerList: false, ...saved });
+      await page.addInitScript((s) => localStorage.setItem('swarmdeck:settings', JSON.stringify(s)), { trackerList: false, ...saved });
       await page.goto(site.url);
-      await page.waitForFunction(() => window.__phoneTorrent?.client);
-      const out = await page.evaluate(() => ({ trackers: window.__phoneTorrent.settings.trackers, sources: window.__phoneTorrent.settings.metadataSources, announce: window.__phoneTorrent.effectiveTrackers() }));
+      await page.waitForFunction(() => window.__swarmdeck?.client);
+      const out = await page.evaluate(() => ({ trackers: window.__swarmdeck.settings.trackers, sources: window.__swarmdeck.settings.metadataSources, announce: window.__swarmdeck.effectiveTrackers() }));
       await page.close();
       return out;
     };
@@ -2228,7 +2299,7 @@ try {
   assert.ok(manifest.icons.some((i) => i.purpose === 'maskable'), 'has a maskable icon');
   assert.ok(manifest.share_target && manifest.protocol_handlers, 'share target and protocol handler declared');
   await waitFor(() => phone.evaluate(async () => {
-    const cache = await caches.open('phone-torrent-shell-v1');
+    const cache = await caches.open('swarmdeck-shell-v1');
     return Boolean(await cache.match('./app.js') && await cache.match('./vendor/webtorrent.min.js') && await cache.match('./index.html'));
   }), { label: 'app shell precache', timeout: 15000 });
   log('PWA manifest + app shell cache OK');
@@ -2245,7 +2316,7 @@ try {
       const stalled = await phoneCtx.newPage();
       const started = Date.now();
       stalled.goto(site.url, { timeout: 30000 }).catch(() => {});
-      await stalled.waitForFunction(() => window.__phoneTorrent?.client, null, { timeout: 20000 });
+      await stalled.waitForFunction(() => window.__swarmdeck?.client, null, { timeout: 20000 });
       log(`stalled network: the app came up from the cache in ${Date.now() - started} ms`);
       await stalled.close();
     } finally {
@@ -2260,7 +2331,7 @@ try {
   }
 
   // Network check: live tracker reachable, dead hostname flagged as dead, unreachable IP flagged as blocked.
-  const netcheck = await phone.evaluate(() => window.__phoneTorrent.runNetworkCheck());
+  const netcheck = await phone.evaluate(() => window.__swarmdeck.runNetworkCheck());
   const byUrl = Object.fromEntries(netcheck.map((r) => [r.url, r]));
   assert.equal(byUrl[trackerUrl].level, 'ok', 'local tracker reachable');
   assert.equal(byUrl['wss://also-dead.example'].level, 'bad', 'non-existent host reported dead');
@@ -2271,12 +2342,12 @@ try {
   // sent people after their network for it. And a resolver that never answers must not hold the
   // check: it is run on networks that drop things.
   const checkWith = (overrides) => phone.evaluate(async (o) => {
-    const { settings } = window.__phoneTorrent;
+    const { settings } = window.__swarmdeck;
     const saved = Object.fromEntries(Object.keys(o).map((k) => [k, settings[k]]));
     Object.assign(settings, o);
     const started = Date.now();
     try {
-      return { results: await window.__phoneTorrent.runNetworkCheck(), ms: Date.now() - started, button: document.querySelector('#netcheck-btn').textContent };
+      return { results: await window.__swarmdeck.runNetworkCheck(), ms: Date.now() - started, button: document.querySelector('#netcheck-btn').textContent };
     } finally { Object.assign(settings, saved); }
   }, overrides);
   const refusing = `ws://127.0.0.1:${new URL(site.url).port}/not-a-tracker`;
@@ -2295,7 +2366,7 @@ try {
   const waitSaver = (page) => page.evaluate(() => new Promise((resolve) => {
     const started = Date.now();
     const t = setInterval(() => {
-      const s = window.__phoneTorrent.saver;
+      const s = window.__swarmdeck.saver;
       if (s.mode === 'stream' || s.reason || Date.now() - started > 15000) { clearInterval(t); resolve({ mode: s.mode, reason: s.reason }); }
     }, 50);
   }));
@@ -2333,16 +2404,16 @@ try {
   try {
     await waitForFromSeeder(() => phone.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 'download to finish', timeout: 180000 });
   } catch (err) {
-    const dump = (page) => page.evaluate(() => window.__phoneTorrent.client.torrents.map((t) => ({
+    const dump = (page) => page.evaluate(() => window.__swarmdeck.client.torrents.map((t) => ({
       name: t.name, peers: t.numPeers, progress: t.progress, paused: t.paused, ready: t.ready, done: t.done,
       downloaded: t.downloaded, uploaded: t.uploaded, received: t.received, selections: t._selections?._items?.length,
-      warnings: window.__phoneTorrent.views.get(t)?.log?.filter((l) => /warning|error|fail/i.test(l)),
+      warnings: window.__swarmdeck.views.get(t)?.log?.filter((l) => /warning|error|fail/i.test(l)),
       wires: t.wires.map((w) => ({ type: w.type, peerChoking: w.peerChoking, amChoking: w.amChoking, peerInterested: w.peerInterested, amInterested: w.amInterested, requests: w.requests.length, peerRequests: w.peerRequests.length, peerPieces: w.peerPieces?.buffer?.length, uploaded: w.uploaded, downloaded: w.downloaded })),
     })));
     console.error('phone:', JSON.stringify(await dump(phone), null, 1));
     console.error('seeder:', JSON.stringify(await dump(seeder), null, 1));
     console.error('seeder piece check:', JSON.stringify(await seeder.evaluate(async () => {
-      const t = window.__phoneTorrent.client.torrents[0];
+      const t = window.__swarmdeck.client.torrents[0];
       const out = { pieces: t.pieces.length, pieceLength: t.pieceLength, storeName: t.store?.store?.name || t.store?.name, results: [] };
       for (const i of [0, 1, t.pieces.length - 1]) {
         const buf = await new Promise((r) => t.store.get(i, (e, b) => r(e ? { err: String(e) } : b)));
@@ -2353,7 +2424,7 @@ try {
       }
       return out;
     })));
-    console.error('phone warnings:', JSON.stringify(await phone.evaluate(() => window.__phoneTorrent.views.values().next().value.log.filter((l) => /verif|warning/i.test(l)))));
+    console.error('phone warnings:', JSON.stringify(await phone.evaluate(() => window.__swarmdeck.views.values().next().value.log.filter((l) => /verif|warning/i.test(l)))));
     console.error('tracker server torrents:', Object.keys(tracker.torrents).length);
     throw err;
   }
@@ -2366,13 +2437,13 @@ try {
   await phone.click('.torrent .pause-btn');
   assert.ok(await phone.$('.torrent.paused'), 'torrent shows paused');
   assert.equal(await phone.$eval('.torrent .state', (e) => e.textContent), 'paused');
-  assert.equal(await phone.evaluate(() => window.__phoneTorrent.client.torrents[0].paused), true);
-  assert.equal(await phone.evaluate(() => window.__phoneTorrent.client.torrents[0].numPeers), 0, 'pause drops connections');
+  assert.equal(await phone.evaluate(() => window.__swarmdeck.client.torrents[0].paused), true);
+  assert.equal(await phone.evaluate(() => window.__swarmdeck.client.torrents[0].numPeers), 0, 'pause drops connections');
   await phone.click('.torrent .pause-btn');
-  assert.equal(await phone.evaluate(() => window.__phoneTorrent.client.torrents[0].paused), false);
+  assert.equal(await phone.evaluate(() => window.__swarmdeck.client.torrents[0].paused), false);
   assert.ok(!(await phone.$('.torrent.paused')), 'torrent resumed');
   const resumeStart = Date.now();
-  await waitForFromSeeder(() => phone.evaluate(() => window.__phoneTorrent.client.torrents[0].numPeers > 0), { label: 'peers reacquired after resume', timeout: 120000 });
+  await waitForFromSeeder(() => phone.evaluate(() => window.__swarmdeck.client.torrents[0].numPeers > 0), { label: 'peers reacquired after resume', timeout: 120000 });
   log(`pause/resume OK (peers reacquired in ${Math.round((Date.now() - resumeStart) / 1000)}s)`);
 
   // Sharing shows the links themselves: a toast saying "copied" is not a link.
@@ -2383,7 +2454,7 @@ try {
     magnet: document.querySelector('.share-magnet').value,
     selected: document.activeElement.classList.contains('share-app-link'),
   }));
-  const liveMagnet = await phone.evaluate(() => window.__phoneTorrent.client.torrents[0].magnetURI);
+  const liveMagnet = await phone.evaluate(() => window.__swarmdeck.client.torrents[0].magnetURI);
   assert.equal(shared.magnet, liveMagnet, 'the magnet shown is this torrent\'s');
   assert.ok(shared.app.includes(`#magnet:?xt=urn:btih:`), 'the app link carries the magnet in its fragment');
   assert.ok(shared.selected, 'the link is selected, so one tap copies it');
@@ -2411,8 +2482,8 @@ try {
   assert.equal(torrentDl.suggestedFilename(), 'Swarmdeck Test.torrent');
   const torrentDlPath = path.join(TMP, 'saved.torrent');
   await torrentDl.saveAs(torrentDlPath);
-  const phoneTorrentFile = await phone.evaluate(() => Array.from(window.__phoneTorrent.client.torrents[0].torrentFile));
-  assert.deepEqual(Array.from(readFileSync(torrentDlPath)), phoneTorrentFile, '.torrent file round-trips');
+  const fromPhone = await phone.evaluate(() => Array.from(window.__swarmdeck.client.torrents[0].torrentFile));
+  assert.deepEqual(Array.from(readFileSync(torrentDlPath)), fromPhone, '.torrent file round-trips');
   log('details + save .torrent OK');
 
   // Save one file: expect a real browser download whose bytes match the seed.
@@ -2482,7 +2553,7 @@ try {
   // list is redrawn every 750 ms meanwhile. Neither button may be offered again before its save is
   // over: a second tap was a second download (or, on iOS, a second copy in memory).
   await phone.evaluate(() => {
-    const s = window.__phoneTorrent.saver;
+    const s = window.__swarmdeck.saver;
     s.heldSaves = [];
     s.realSave = s.save;
     s.save = () => new Promise((resolve) => s.heldSaves.push(resolve));
@@ -2493,9 +2564,9 @@ try {
   await new Promise((r) => setTimeout(r, 1600)); // two redraws
   assert.deepEqual(await heldSaveBtn.evaluate((b) => [b.textContent, b.disabled]), ['Saving…', true], 'a save in progress keeps its button busy');
   assert.deepEqual(await phone.$eval('.torrent .zip-btn', (b) => [b.textContent, b.disabled]), ['Zipping…', true], 'and so does a zip');
-  assert.equal(await phone.evaluate(() => window.__phoneTorrent.saver.heldSaves.length), 2, 'one save each');
+  assert.equal(await phone.evaluate(() => window.__swarmdeck.saver.heldSaves.length), 2, 'one save each');
   await phone.evaluate(() => {
-    const s = window.__phoneTorrent.saver;
+    const s = window.__swarmdeck.saver;
     s.save = s.realSave;
     for (const done of s.heldSaves) done();
   });
@@ -2511,7 +2582,7 @@ try {
   await phone.waitForSelector('.torrent .file', { timeout: 15000 });
   await waitFor(() => phone.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 'restored torrent to verify', timeout: 180000 });
   if (opfs) {
-    assert.ok(await phone.evaluate(() => window.__phoneTorrent.client.torrents[0].received) < BLOCK, 'nothing re-downloaded: restored from OPFS');
+    assert.ok(await phone.evaluate(() => window.__swarmdeck.client.torrents[0].received) < BLOCK, 'nothing re-downloaded: restored from OPFS');
     await seederPause(); // resume
   }
   log(opfs ? 'restored after reload with all pieces intact (seeder was paused)' : 'restored after reload and re-downloaded (memory store)');
@@ -2538,7 +2609,7 @@ try {
 
   // The choice is a setting: it survives a reload like the others.
   await phone.reload();
-  await phone.waitForFunction(() => window.__phoneTorrent?.client);
+  await phone.waitForFunction(() => window.__swarmdeck?.client);
   await phone.click('#settings-btn');
   await phone.waitForSelector('#settings-dialog[open]');
   assert.equal(await phone.isVisible('#trackers-input'), true, 'Expert is remembered');
@@ -2555,8 +2626,8 @@ try {
   await phone.click('#settings-dialog button[value="save"]');
   await waitFor(() => phone.$eval('#settings-dialog', (e) => !e.open), { label: 'settings saved once the field is fixed', timeout: 5000 });
   // The dialog's 'close' event, where the settings are stored, is fired a task after it closes.
-  await waitFor(() => phone.evaluate(() => JSON.parse(localStorage.getItem('phone-torrent:settings')).wakeLock === false), { label: 'the dialog to store what was saved', timeout: 5000 }).catch(() => {});
-  assert.equal(await phone.evaluate(() => JSON.parse(localStorage.getItem('phone-torrent:settings')).wakeLock), false, 'and it is saved with the fix');
+  await waitFor(() => phone.evaluate(() => JSON.parse(localStorage.getItem('swarmdeck:settings')).wakeLock === false), { label: 'the dialog to store what was saved', timeout: 5000 }).catch(() => {});
+  assert.equal(await phone.evaluate(() => JSON.parse(localStorage.getItem('swarmdeck:settings')).wakeLock), false, 'and it is saved with the fix');
   await phone.click('#settings-btn');
   await phone.waitForSelector('#settings-dialog[open]');
   await phone.click('#mode-simple');
@@ -2567,11 +2638,11 @@ try {
   // Deselecting a file survives a reload.
   const notesIndex = names.indexOf(files[1].name);
   await phone.locator('.torrent .file input[type="checkbox"]').nth(notesIndex).uncheck();
-  assert.equal(await phone.evaluate((i) => window.__phoneTorrent.views.values().next().value.record.deselected.includes(i), notesIndex), true);
-  await phone.evaluate(() => Promise.race([window.__phoneTorrent.views.values().next().value.persisted, new Promise((r) => setTimeout(r, 5000))]));
+  assert.equal(await phone.evaluate((i) => window.__swarmdeck.views.values().next().value.record.deselected.includes(i), notesIndex), true);
+  await phone.evaluate(() => Promise.race([window.__swarmdeck.views.values().next().value.persisted, new Promise((r) => setTimeout(r, 5000))]));
   await phone.reload();
   await phone.waitForSelector('.torrent .file', { timeout: 15000 });
-  const restoredRecord = await phone.evaluate(() => { const r = window.__phoneTorrent.views.values().next().value.record; return { deselected: r?.deselected, source: r?.source?.type, paused: r?.paused }; });
+  const restoredRecord = await phone.evaluate(() => { const r = window.__swarmdeck.views.values().next().value.record; return { deselected: r?.deselected, source: r?.source?.type, paused: r?.paused }; });
   log('restored record:', JSON.stringify(restoredRecord));
   const namesAfter = await phone.$$eval('.torrent .file .file-name', (els) => els.map((e) => e.textContent));
   assert.equal(await phone.locator('.torrent .file input[type="checkbox"]').nth(namesAfter.indexOf(files[1].name)).isChecked(), false, 'deselection restored');
@@ -2587,7 +2658,7 @@ try {
   await phone.setInputFiles('#torrent-file-input', { name: 'test.torrent', mimeType: 'application/x-bittorrent', buffer: Buffer.from(torrentFile) });
   await phone.waitForSelector('.torrent .file', { timeout: 15000 });
   await waitForFromSeeder(() => phone.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 're-download after delete all', timeout: 180000 });
-  await waitFor(() => phone.evaluate(() => window.__phoneTorrent.views.values().next().value.record?.infoHash), { label: 'record persisted after delete all' });
+  await waitFor(() => phone.evaluate(() => window.__swarmdeck.views.values().next().value.record?.infoHash), { label: 'record persisted after delete all' });
   await phone.reload();
   await phone.waitForSelector('.torrent .file', { timeout: 15000 });
   await waitForFromSeeder(() => phone.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 'restore after delete-all cycle', timeout: 180000 });
@@ -2596,9 +2667,9 @@ try {
   // Removing deletes it from the list and from the persisted set.
   await phone.click('.torrent .remove-btn');
   await waitFor(() => phone.$$('.torrent').then((l) => l.length === 0), { label: 'torrent removal' });
-  await waitFor(() => phone.evaluate(() => window.__phoneTorrent.client.torrents.length === 0), { label: 'client to drop the torrent' });
+  await waitFor(() => phone.evaluate(() => window.__swarmdeck.client.torrents.length === 0), { label: 'client to drop the torrent' });
   await phone.reload();
-  await phone.waitForFunction(() => window.__phoneTorrent?.client);
+  await phone.waitForFunction(() => window.__swarmdeck?.client);
   await new Promise((r) => setTimeout(r, 800));
   assert.equal((await phone.$$('.torrent')).length, 0, 'removed torrent does not come back');
   log('remove OK');
@@ -2649,7 +2720,7 @@ try {
     const inputs = Object.entries(fields).map(([k, v]) => `<input name="${k}" value="${v}">`).join('');
     await phone.setContent(`<form id="f" method="POST" enctype="multipart/form-data" action="${site.url}share">${inputs}</form>`);
     await Promise.all([phone.waitForNavigation(), phone.evaluate(() => document.getElementById('f').submit())]);
-    await phone.waitForFunction(() => window.__phoneTorrent?.client);
+    await phone.waitForFunction(() => window.__swarmdeck?.client);
   };
   writeFileSync(path.join(TMP, 'shared-link.torrent'), makeTorrent(rnd(20000, 81), { name: 'shared link.bin', trackers: [trackerUrl] }).buf);
   const dialogsBeforeLink = dialogs;
@@ -2700,7 +2771,7 @@ try {
   ]) {
     await phone.fill('#magnet-input', text);
     await phone.click('#magnet-form button[type="submit"]');
-    const source = await waitFor(() => phone.evaluate((h) => [...window.__phoneTorrent.views.values()].find((v) => v.torrent.infoHash === h)?.source?.uri, hash), { label: `"${text}" added`, timeout: 5000 });
+    const source = await waitFor(() => phone.evaluate((h) => [...window.__swarmdeck.views.values()].find((v) => v.torrent.infoHash === h)?.source?.uri, hash), { label: `"${text}" added`, timeout: 5000 });
     assert.equal(source, kept, 'kept as the link alone');
   }
   log('a magnet that cannot be added says why, and stays to be fixed; a capital M, and a sentence around a link, are fine');
@@ -2708,7 +2779,7 @@ try {
   /* ---------- magnet-sourced torrent: restored from stored metadata, retry keeps it ---------- */
   for (const t of await phone.$$('.torrent .remove-btn')) await t.click();
   await waitFor(() => phone.$$('.torrent').then((l) => l.length === 0), { label: 'clean slate for magnet test' });
-  const mainHash = await seeder.evaluate(() => window.__phoneTorrent.client.torrents[0].infoHash);
+  const mainHash = await seeder.evaluate(() => window.__swarmdeck.client.torrents[0].infoHash);
   await phone.fill('#magnet-input', `magnet:?xt=urn:btih:${mainHash}`);
   await phone.click('#magnet-form button[type="submit"]');
   // A magnet has no metadata of its own: it comes from the seeder, so this waits like a download.
@@ -2719,8 +2790,8 @@ try {
     const swarm = tracker.torrents[mainHash];
     console.error('swarm:', JSON.stringify({ known: Boolean(swarm), complete: swarm?.complete, incomplete: swarm?.incomplete }));
     console.error('phone:', JSON.stringify(await phone.evaluate(() => {
-      const t = window.__phoneTorrent.client.torrents[0];
-      const view = window.__phoneTorrent.views.values().next().value;
+      const t = window.__swarmdeck.client.torrents[0];
+      const view = window.__swarmdeck.views.values().next().value;
       return {
         infoHash: t?.infoHash,
         peers: t?.numPeers,
@@ -2731,31 +2802,31 @@ try {
       };
     })));
     console.error('seeder:', JSON.stringify(await seeder.evaluate(() => {
-      const t = window.__phoneTorrent.client.torrents[0];
+      const t = window.__swarmdeck.client.torrents[0];
       return { infoHash: t?.infoHash, paused: t?.paused, peers: t?.numPeers, announce: t?.announce };
     })));
     throw err;
   }
   await waitForFromSeeder(() => phone.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 'magnet download', timeout: 180000 });
-  await phone.evaluate(() => Promise.race([window.__phoneTorrent.views.values().next().value.persisted, new Promise((r) => setTimeout(r, 5000))]));
+  await phone.evaluate(() => Promise.race([window.__swarmdeck.views.values().next().value.persisted, new Promise((r) => setTimeout(r, 5000))]));
   await seederPause(); // no peers available from here on
   await phone.reload();
   await phone.waitForSelector('.torrent .file', { timeout: 10000 });
   const magnetRestore = await phone.evaluate(() => {
-    const t = window.__phoneTorrent.client.torrents[0];
-    const r = window.__phoneTorrent.views.get(t).record;
+    const t = window.__swarmdeck.client.torrents[0];
+    const r = window.__swarmdeck.views.get(t).record;
     return { hasMetadata: Boolean(t.metadata), name: t.name, sourceType: r?.source?.type, peers: t.numPeers };
   });
   assert.deepEqual({ hasMetadata: magnetRestore.hasMetadata, name: magnetRestore.name, sourceType: magnetRestore.sourceType },
     { hasMetadata: true, name: 'Swarmdeck Test', sourceType: 'magnet' }, 'magnet torrent restored from its stored metadata without peers');
   if (opfs) {
     await waitFor(() => phone.$eval('.torrent .pct', (e) => e.textContent === '100%').catch(() => false), { label: 'magnet torrent verified from disk', timeout: 30000 });
-    assert.ok(await phone.evaluate(() => window.__phoneTorrent.client.torrents[0].received) < BLOCK, 'magnet torrent data came from OPFS');
+    assert.ok(await phone.evaluate(() => window.__swarmdeck.client.torrents[0].received) < BLOCK, 'magnet torrent data came from OPFS');
   }
   await phone.click('.torrent .details-btn');
   await phone.click('.torrent .retry-btn');
   await waitFor(() => phone.$$eval('.torrent .log li', (els) => els.some((e) => /re-announced/.test(e.textContent))), { label: 'retry on magnet torrent', timeout: 15000 });
-  assert.equal(await phone.evaluate(() => Boolean(window.__phoneTorrent.client.torrents[0].metadata)), true, 'retry keeps metadata on a magnet torrent');
+  assert.equal(await phone.evaluate(() => Boolean(window.__swarmdeck.client.torrents[0].metadata)), true, 'retry keeps metadata on a magnet torrent');
   assert.equal(await phone.$eval('.torrent .name', (e) => e.textContent), 'Swarmdeck Test');
   await seederPause(); // resume seeder
   log('magnet torrent restore + retry OK');
@@ -2770,14 +2841,14 @@ try {
   const orphanCtx = await context();
   const orphanPage = await orphanCtx.newPage();
   orphanPage.on('pageerror', (e) => console.error('orphan page error:', e));
-  await orphanPage.addInitScript(({ t, rtc }) => localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], trackerList: false, rtcConfig: rtc })), { t: trackerUrl, rtc: rtcConfig });
+  await orphanPage.addInitScript(({ t, rtc }) => localStorage.setItem('swarmdeck:settings', JSON.stringify({ trackers: [t], trackerList: false, rtcConfig: rtc })), { t: trackerUrl, rtc: rtcConfig });
   await orphanPage.goto(site.url);
-  await orphanPage.waitForFunction(() => window.__phoneTorrent?.client);
+  await orphanPage.waitForFunction(() => window.__swarmdeck?.client);
   const orphan = await orphanPage.evaluate(async (bytes) => {
     const timeout = (ms, what) => new Promise((_, rej) => setTimeout(() => rej(new Error(`timed out: ${what}`)), ms));
     const f = new File([new Uint8Array(bytes)], 'orphan.bin');
     // Use the app's own seeding path so it picks the same piece store the app would (OPFS or memory).
-    const t = await window.__phoneTorrent.seedFiles([f], { name: 'Fallback Test' });
+    const t = await window.__swarmdeck.seedFiles([f], { name: 'Fallback Test' });
     await Promise.race([
       new Promise((resolve) => (t.ready ? resolve() : t.once('ready', resolve))),
       timeout(20000, 'seed orphan'),
@@ -2792,7 +2863,7 @@ try {
 
   // The info-hash check must reject: another valid torrent, a corrupted info dict, and a duplicate info key.
   const verify = (bytes, hash) => phone.evaluate(async ({ bytes, hash }) => {
-    try { await window.__phoneTorrent.verifyTorrentBytes(new Uint8Array(bytes), hash); return 'accepted'; } catch (e) { return e.message; }
+    try { await window.__swarmdeck.verifyTorrentBytes(new Uint8Array(bytes), hash); return 'accepted'; } catch (e) { return e.message; }
   }, { bytes: Array.from(bytes), hash });
   assert.match(await verify(Buffer.from(torrentFile), orphan.infoHash), /info hash mismatch/, 'a different valid torrent is rejected by hash');
   const tampered = Buffer.from(orphan.torrentFile);
@@ -2803,8 +2874,8 @@ try {
   const duplicated = await phone.evaluate(({ real, other }) => {
     const enc = new TextEncoder();
     const a = new Uint8Array(real); const b = new Uint8Array(other);
-    const [as, ae] = window.__phoneTorrent.findInfoSpan(a);
-    const [bs, be] = window.__phoneTorrent.findInfoSpan(b);
+    const [as, ae] = window.__swarmdeck.findInfoSpan(a);
+    const [bs, be] = window.__swarmdeck.findInfoSpan(b);
     // d 4:info <real info> 4:info <other info> e  → a decoder keeps the last one, a naive check hashes the first
     const parts = [enc.encode('d4:info'), a.subarray(as, ae), enc.encode('4:info'), b.subarray(bs, be), enc.encode('e')];
     const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
@@ -2813,7 +2884,7 @@ try {
   }, { real: orphan.torrentFile, other: torrentFile });
   assert.match(await verify(Buffer.from(duplicated), orphan.infoHash), /duplicate|malformed/, 'duplicate info key is rejected');
   const accepted = await phone.evaluate(async ({ bytes, hash }) => {
-    await window.__phoneTorrent.verifyTorrentBytes(new Uint8Array(bytes), hash); return true;
+    await window.__swarmdeck.verifyTorrentBytes(new Uint8Array(bytes), hash); return true;
   }, { bytes: orphan.torrentFile, hash: orphan.infoHash });
   assert.ok(accepted, 'genuine .torrent passes the info-hash check');
 
@@ -2827,17 +2898,17 @@ try {
   await phone.click('.torrent .pause-btn');
   await waitFor(() => phone.$eval('.torrent .name', (e) => e.textContent === 'Fallback Test').catch(() => false), { label: 'metadata via fallback source, while paused', timeout: 30000 });
   const pausedSwap = await phone.evaluate(async () => {
-    const view = window.__phoneTorrent.views.values().next().value;
+    const view = window.__swarmdeck.views.values().next().value;
     await view.persisted;
     return { paused: view.torrent.paused, state: view.el.querySelector('.state').textContent, remembered: view.record.paused };
   });
   assert.deepEqual(pausedSwap, { paused: true, state: 'paused', remembered: true }, 'a paused magnet stays paused when a cache hands over its metadata');
   // A retry waits for the check of the pieces already here, which a paused torrent runs too.
-  await waitFor(() => phone.evaluate(() => window.__phoneTorrent.client.torrents[0].ready), { label: 'the swapped-in torrent checked', timeout: 10000 });
+  await waitFor(() => phone.evaluate(() => window.__swarmdeck.client.torrents[0].ready), { label: 'the swapped-in torrent checked', timeout: 10000 });
   await phone.click('.torrent .details-btn');
   await phone.click('.torrent .retry-btn');
   await waitFor(() => phone.$$eval('.torrent .log li', (els) => els.some((e) => /re-announced/.test(e.textContent))), { label: 'retry of a paused torrent', timeout: 15000 });
-  assert.equal(await phone.evaluate(() => window.__phoneTorrent.client.torrents[0].paused), true, 'and a retry keeps it paused');
+  assert.equal(await phone.evaluate(() => window.__swarmdeck.client.torrents[0].paused), true, 'and a retry keeps it paused');
   log('a paused magnet stays paused through a metadata fallback and a retry');
 
   // Add by bare info hash: no peer can send metadata, so it must come from the fallback source.
@@ -2861,7 +2932,7 @@ try {
   } catch (err) {
     // The hint only appears while the torrent has no peer at all: say what the app saw instead.
     console.error('no-peers state:', JSON.stringify(await phone.evaluate(() => {
-      const view = window.__phoneTorrent.views.values().next().value;
+      const view = window.__swarmdeck.views.values().next().value;
       const t = view.torrent;
       return {
         cards: document.querySelectorAll('.torrent').length,
@@ -2898,7 +2969,7 @@ try {
   await waitFor(() => phone.$$eval('.torrent .log li', (els) => els.some((e) => /back after .*asking the trackers again/.test(e.textContent))),
     { label: 'the return to wake the torrent', timeout: 15000 });
   assert.equal(await phone.$eval('.torrent .state', (e) => e.textContent), 'reconnecting', 'and says so while it does');
-  assert.equal(await phone.evaluate(() => window.__phoneTorrent.client.torrents[0].paused), false, 'coming back pauses nothing');
+  assert.equal(await phone.evaluate(() => window.__swarmdeck.client.torrents[0].paused), false, 'coming back pauses nothing');
   log('coming back goes looking for peers by itself');
 
   /* ---------- iOS (Safari / Brave / Chrome on iPhone all report a WebKit iPhone UA) ---------- */
@@ -2911,11 +2982,11 @@ try {
   // tracker choice into whatever is stored instead of replacing it on every navigation.
   await ios.addInitScript(({ t, rtc }) => {
     let current = {};
-    try { current = JSON.parse(localStorage.getItem('phone-torrent:settings') || '{}'); } catch { /* first load */ }
-    localStorage.setItem('phone-torrent:settings', JSON.stringify({ ...current, trackers: [t], trackerList: false, rtcConfig: rtc }));
+    try { current = JSON.parse(localStorage.getItem('swarmdeck:settings') || '{}'); } catch { /* first load */ }
+    localStorage.setItem('swarmdeck:settings', JSON.stringify({ ...current, trackers: [t], trackerList: false, rtcConfig: rtc }));
   }, { t: trackerUrl, rtc: rtcConfig });
   await ios.goto(site.url);
-  await ios.waitForFunction(() => window.__phoneTorrent?.client);
+  await ios.waitForFunction(() => window.__swarmdeck?.client);
   const iosSaver = await waitSaver(ios);
   assert.equal(iosSaver.mode, 'blob', 'iOS saves through memory, not the streaming worker');
   assert.match(iosSaver.reason, /iOS/);
@@ -2968,7 +3039,7 @@ try {
   await ios.waitForSelector('.torrent .file', { timeout: 20000 });
   assert.equal(await ios.$eval('.torrent .name', (e) => e.textContent), 'Swarmdeck Test');
   // Stored as bytes, so a reload restores it without fetching the URL again.
-  assert.equal(await ios.evaluate(() => window.__phoneTorrent.views.values().next().value.source?.type), 'torrent');
+  assert.equal(await ios.evaluate(() => window.__swarmdeck.views.values().next().value.source?.type), 'torrent');
   log('.torrent URL fetched and added');
 
   // An unreachable .torrent URL explains itself instead of failing silently.
@@ -3005,7 +3076,7 @@ try {
   assert.equal(privateHint.hidden, false, 'private torrent explains itself immediately');
   assert.match(privateHint.text, /marked private \(private\.example\)/);
   assert.equal(privateHint.retry, true, 'no "retry with fresh trackers" for a private torrent');
-  const privateAnnounce = await ios.evaluate(() => window.__phoneTorrent.client.torrents.find((t) => t.name === 'private release.bin').announce);
+  const privateAnnounce = await ios.evaluate(() => window.__swarmdeck.client.torrents.find((t) => t.name === 'private release.bin').announce);
   assert.deepEqual(privateAnnounce, ['https://private.example/announce/passkey'], 'a private torrent is announced to its own tracker only');
   // Nor handed out to be announced by someone else. Its magnet names its own tracker, passkey and all,
   // and has no private flag: the copy of the app that opened its link added the public trackers and
@@ -3084,13 +3155,13 @@ try {
   // The transfer survives a reload: the app picks the cloud id back up from storage. Wait for the
   // write to land first — WebKit's IndexedDB is slow enough that a reload can outrun it.
   const cloudPersisted = await ios.evaluate(async () => {
-    const view = [...window.__phoneTorrent.views.values()].find((v) => v.torrent.name === 'private release.bin');
+    const view = [...window.__swarmdeck.views.values()].find((v) => v.torrent.name === 'private release.bin');
     await Promise.race([view.persisted, new Promise((r) => setTimeout(r, 10000))]);
     return Boolean(view.record && view.record.cloud && view.record.cloud.id !== undefined);
   });
   assert.ok(cloudPersisted, 'the cloud transfer id is stored with the torrent');
   await ios.reload();
-  await ios.waitForFunction(() => window.__phoneTorrent?.client);
+  await ios.waitForFunction(() => window.__swarmdeck?.client);
   const restoredCard = ios.locator('.torrent', { has: ios.locator('.name', { hasText: 'private release.bin' }) }).first();
   try {
     await waitFor(() => restoredCard.locator('.cloud-state').textContent().then((t) => /Ready on TorBox/.test(t)).catch(() => false), { label: 'cloud transfer restored', timeout: 30000 });
@@ -3099,8 +3170,8 @@ try {
     console.error('restore state:', JSON.stringify(await ios.evaluate(() => ({
       cards: [...document.querySelectorAll('.torrent .name')].map((e) => e.textContent),
       cloudStates: [...document.querySelectorAll('.cloud-state')].map((e) => e.textContent),
-      views: [...window.__phoneTorrent.views.values()].map((v) => ({ name: v.torrent.name, cloud: v.cloud, record: v.record && v.record.cloud })),
-      key: Boolean(JSON.parse(localStorage.getItem('phone-torrent:settings') || '{}').cloud?.apiKey), // no key → nothing polls
+      views: [...window.__swarmdeck.views.values()].map((v) => ({ name: v.torrent.name, cloud: v.cloud, record: v.record && v.record.cloud })),
+      key: Boolean(JSON.parse(localStorage.getItem('swarmdeck:settings') || '{}').cloud?.apiKey), // no key → nothing polls
     }))));
     throw err;
   }
@@ -3151,7 +3222,7 @@ try {
   // And across a reload, which is where it used to be lost: only the id was stored, so the
   // TorBox transfer came back polling put.io — with put.io's key.
   await ios.reload();
-  await ios.waitForFunction(() => window.__phoneTorrent?.client);
+  await ios.waitForFunction(() => window.__swarmdeck?.client);
   const torboxAgain = ios.locator('.torrent', { has: ios.locator('.name', { hasText: 'private release.bin' }) }).first();
   const putioAgain = ios.locator('.torrent', { has: ios.locator('.name', { hasText: 'putio release.bin' }) }).first();
   await waitFor(() => torboxAgain.locator('.cloud-state').textContent().then((t) => /Ready on TorBox/.test(t)).catch(() => false), { label: 'TorBox transfer restored on TorBox after a switch and a reload', timeout: 30000 });
@@ -3165,7 +3236,7 @@ try {
   // becomes an ordinary torrent id once it starts. Neither step may read as a lost transfer.
   cloudApi.state.queueNext = true;
   const queued = await ios.evaluate(async (base) => {
-    const ctx = window.__phoneTorrent.cloudCtx({ provider: 'torbox', base, key: 'test-api-key' });
+    const ctx = window.__swarmdeck.cloudCtx({ provider: 'torbox', base, key: 'test-api-key' });
     const id = await ctx.api.submit(ctx, { magnet: `magnet:?xt=urn:btih:${'5'.repeat(40)}` });
     const waiting = await ctx.api.status(ctx, id);
     const listed = (await ctx.api.list(ctx)).find((t) => t.id === id);
@@ -3180,7 +3251,7 @@ try {
   cloudApi.state.queued = false;
   cloudApi.state.started = true;
   const started = await ios.evaluate(async ({ base, id }) => {
-    const ctx = window.__phoneTorrent.cloudCtx({ provider: 'torbox', base, key: 'test-api-key' });
+    const ctx = window.__swarmdeck.cloudCtx({ provider: 'torbox', base, key: 'test-api-key' });
     return ctx.api.status(ctx, id);
   }, { base: cloudApi.url, id: queued.id });
   assert.equal(started.id, 78, 'once started, the transfer carries the torrent id TorBox gave it');
@@ -3223,12 +3294,12 @@ try {
   await undoIphone();
 
   // Sending a magnet from here never creates a local torrent: it is the account that downloads it.
-  const localBefore = await ios.evaluate(() => window.__phoneTorrent.client.torrents.length);
+  const localBefore = await ios.evaluate(() => window.__swarmdeck.client.torrents.length);
   await ios.fill('#cloud-input', `magnet:?xt=urn:btih:${'3'.repeat(40)}&dn=cloud-only`);
   await ios.click('#cloud-form button[type="submit"]');
   await waitFor(() => Boolean(putioApi.state.added), { label: 'magnet handed to the cloud', timeout: 15000 });
   assert.match(putioApi.state.added, /magnet/, 'the magnet reached transfers/add');
-  assert.equal(await ios.evaluate(() => window.__phoneTorrent.client.torrents.length), localBefore, 'nothing was added locally');
+  assert.equal(await ios.evaluate(() => window.__swarmdeck.client.torrents.length), localBefore, 'nothing was added locally');
 
   // Delete removes it from the account: its file dropped, the transfer cancelled, and removed — a
   // seeding one is only stopped by a cancel, and stays listed (put.io's docs).
@@ -3263,7 +3334,7 @@ try {
 
   // An iPhone has no Escape key and no back button, so the dialog has a Cancel of its own — which
   // also gets out of a field that cannot be saved, where Save only says why it will not close.
-  const rtcStored = () => ios.evaluate(() => JSON.parse(localStorage.getItem('phone-torrent:settings')).rtcConfig);
+  const rtcStored = () => ios.evaluate(() => JSON.parse(localStorage.getItem('swarmdeck:settings')).rtcConfig);
   const rtcBefore = await rtcStored();
   await ios.click('#settings-btn');
   await ios.waitForSelector('#settings-dialog[open]');
@@ -3294,7 +3365,7 @@ try {
   await ios.click('#settings-dialog button[value="cancel"]');
   await ios.waitForSelector('#settings-dialog[open]', { state: 'detached', timeout: 5000 }).catch(() => {});
   const after = await ios.evaluate(() => {
-    const ctx = window.__phoneTorrent.cloudCtx();
+    const ctx = window.__swarmdeck.cloudCtx();
     return { provider: ctx.provider, key: ctx.key, base: ctx.base };
   });
   assert.deepEqual(after, { provider: 'putio', key: 'putio-token', base: putioApi.url }, 'a tested, cancelled key changes nothing');
@@ -3308,7 +3379,7 @@ try {
     await ios.fill('#cloud-key', key);
     await ios.press('#cloud-key', 'Enter');
     // Saved on the dialog's close event, which comes a moment after it closes.
-    await waitFor(() => ios.evaluate((k) => window.__phoneTorrent.cloudCtx().key === k, key), { label: `the key "${key}", typed and entered, to be kept`, timeout: 5000 });
+    await waitFor(() => ios.evaluate((k) => window.__swarmdeck.cloudCtx().key === k, key), { label: `the key "${key}", typed and entered, to be kept`, timeout: 5000 });
     assert.equal(await ios.$eval('#settings-dialog', (e) => e.returnValue), 'save', 'by Save');
   };
   await enterKey('putio-token-typed');
@@ -3343,7 +3414,7 @@ try {
 
     const proxyCalls = corsProxy.state.methods.length;
     const result = await ios.evaluate(async (torrentB64) => {
-      const ctx = window.__phoneTorrent.cloudCtx();
+      const ctx = window.__swarmdeck.cloudCtx();
       const who = await ctx.api.check(ctx);
       const bytes = Uint8Array.from(atob(torrentB64), (c) => c.charCodeAt(0));
       const fromFile = await ctx.api.submit(ctx, { bytes, name: 'debrid' });
@@ -3379,7 +3450,7 @@ try {
   // `docker compose up`, open it, and there is nothing to type in settings. Compared
   // against the address the test itself served from, so the page cannot agree with itself.
   const serverFallback = await ios.evaluate(() => {
-    const api = window.__phoneTorrent.CLOUD_PROVIDERS.server;
+    const api = window.__swarmdeck.CLOUD_PROVIDERS.server;
     return typeof api.defaultBase === 'function' ? api.defaultBase() : api.defaultBase;
   });
   assert.equal(serverFallback, new URL(site.url).origin, 'with no address of its own, the server provider means this page — which is where a server that serves the app is');
@@ -3387,7 +3458,7 @@ try {
 
   // A server that signs its links hands one per file, used as it is: no token added to it.
   const serverLinks = await ios.evaluate(() => {
-    const ctx = window.__phoneTorrent.cloudCtx({ provider: 'server', base: 'https://box.example', key: 'secret' });
+    const ctx = window.__swarmdeck.cloudCtx({ provider: 'server', base: 'https://box.example', key: 'secret' });
     return [
       ctx.api.fileLink(ctx, 'ab', { id: 0, link: '/api/transfers/ab/files/0?expires=1&sig=x' }),
       ctx.api.fileLink(ctx, 'ab', { id: 0 }),
@@ -3430,12 +3501,12 @@ try {
   const trouble = await troubleCtx.newPage();
   trouble.on('pageerror', (e) => console.error('trouble page error:', e));
   trouble.on('dialog', (d) => { if (d.type() === 'beforeunload') return; d.accept(); });
-  await trouble.addInitScript(({ t, rtc, base, key, putio }) => localStorage.setItem('phone-torrent:settings', JSON.stringify({
+  await trouble.addInitScript(({ t, rtc, base, key, putio }) => localStorage.setItem('swarmdeck:settings', JSON.stringify({
     trackers: [t], trackerList: false, rtcConfig: rtc, metadataSources: [],
     cloud: { provider: 'torbox', apiKey: key, apiBase: base, viaProxy: false, accounts: { putio: { apiKey: 'putio-token', apiBase: putio } } },
   })), { t: trackerUrl, rtc: rtcConfig, base: scriptedTorbox.url, key: tb.key, putio: putioApi.url });
   await trouble.goto(site.url);
-  await trouble.waitForFunction(() => window.__phoneTorrent?.client);
+  await trouble.waitForFunction(() => window.__swarmdeck?.client);
   const troubleCard = (name) => trouble.locator('.torrent', { has: trouble.locator('.name', { hasText: name }) }).first();
   const sendPrivate = async (name) => {
     await trouble.setInputFiles('#torrent-file-input', { name: `${name}.torrent`, mimeType: 'application/x-bittorrent', buffer: privateTorrent(Buffer.from(`the bytes of ${name}`), name) });
@@ -3454,7 +3525,7 @@ try {
   const uploadedTo = await trouble.evaluate(async () => {
     const urls = [];
     for (const base of ['https://api.put.io', 'https://api.example.test']) {
-      const ctx = { ...window.__phoneTorrent.cloudCtx({ provider: 'putio', base, key: 'k' }), json: async (url) => { urls.push(url); return { transfer: { id: 1 } }; } };
+      const ctx = { ...window.__swarmdeck.cloudCtx({ provider: 'putio', base, key: 'k' }), json: async (url) => { urls.push(url); return { transfer: { id: 1 } }; } };
       await ctx.api.submit(ctx, { bytes: new Uint8Array([1]), name: 'x' });
     }
     return urls;
@@ -3540,9 +3611,9 @@ try {
   // Deleted on TorBox's own site instead, the transfer is found gone after a reload: the card says
   // so, and can send it again.
   tb.torrents.delete(90);
-  await trouble.evaluate(() => Promise.all([...window.__phoneTorrent.views.values()].map((v) => v.persisted)));
+  await trouble.evaluate(() => Promise.all([...window.__swarmdeck.views.values()].map((v) => v.persisted)));
   await trouble.reload();
-  await trouble.waitForFunction(() => window.__phoneTorrent?.client);
+  await trouble.waitForFunction(() => window.__swarmdeck?.client);
   await waitFor(() => cloudLine('blip.bin', /TorBox: Torrent not found/), { label: 'a transfer TorBox no longer has', timeout: 15000 });
   await troubleCard('blip.bin').locator('.cloud-again-btn').waitFor({ timeout: 5000 });
   assert.deepEqual(await offersFetch(), { box: false, fetch: true }, 'the transfer deleted in the library stays forgotten after a reload');
@@ -3584,7 +3655,7 @@ try {
   const rdCtx = await context();
   const rd = await rdCtx.newPage();
   rd.on('pageerror', (e) => console.error('rd page error:', e));
-  await rd.addInitScript(({ t, rtc, base }) => localStorage.setItem('phone-torrent:settings', JSON.stringify({
+  await rd.addInitScript(({ t, rtc, base }) => localStorage.setItem('swarmdeck:settings', JSON.stringify({
     trackers: [t], trackerList: false, rtcConfig: rtc, metadataSources: [],
     cloud: { provider: 'realdebrid', apiKey: 'debrid-key', apiBase: base, viaProxy: false, accounts: {} },
   })), { t: trackerUrl, rtc: rtcConfig, base: debridApi.url });
@@ -3593,7 +3664,7 @@ try {
   const theirs = { id: 'THEIRS', filename: 'their pack', bytes: 8192, progress: 0, status: 'waiting_files_selection', files: [1, 2].map((id) => ({ id, path: `/their ${id}.mkv`, bytes: 4096, selected: 0 })), links: [] };
   debridApi.state.rd.set('THEIRS', theirs);
   await rd.goto(site.url);
-  await rd.waitForFunction(() => window.__phoneTorrent?.client);
+  await rd.waitForFunction(() => window.__swarmdeck?.client);
 
   // Added, but RD refused the call that chooses its files: it is sent all the same — once — and
   // started when the library next sees it waiting.
@@ -3614,7 +3685,7 @@ try {
   // others nothing, and a link already had is not asked for again.
   debridApi.state.rdRefuseOnce.add('https://real-debrid.example/restricted/pack7');
   const packFiles = () => rd.evaluate(async () => {
-    const ctx = window.__phoneTorrent.cloudCtx();
+    const ctx = window.__swarmdeck.cloudCtx();
     return (await ctx.api.status(ctx, 'RD3')).files.map((f) => ({ name: f.name, url: f.url || '', error: f.error || '' }));
   });
   const unrestrictedBefore = debridApi.state.rdUnrestrictTimes.length;
@@ -3631,7 +3702,7 @@ try {
   // An account of more torrents than RD lists at once: all of them, not the first page.
   debridApi.state.rdMany = 120;
   const rdListed = await rd.evaluate(async () => {
-    const ctx = window.__phoneTorrent.cloudCtx();
+    const ctx = window.__swarmdeck.cloudCtx();
     return (await ctx.api.list(ctx)).length;
   });
   assert.equal(rdListed, debridApi.state.rdTotal, `every torrent on the account listed (${rdListed} of ${debridApi.state.rdTotal})`);
@@ -3646,15 +3717,15 @@ try {
   const untickCtx = await context();
   const untick = await untickCtx.newPage();
   untick.on('pageerror', (e) => console.error('untick page error:', e));
-  await untick.addInitScript(({ t, rtc }) => localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], trackerList: false, rtcConfig: rtc, downloadLimit: 1000 })), { t: trackerUrl, rtc: rtcConfig });
+  await untick.addInitScript(({ t, rtc }) => localStorage.setItem('swarmdeck:settings', JSON.stringify({ trackers: [t], trackerList: false, rtcConfig: rtc, downloadLimit: 1000 })), { t: trackerUrl, rtc: rtcConfig });
   await untick.goto(site.url);
-  await untick.waitForFunction(() => window.__phoneTorrent?.client);
+  await untick.waitForFunction(() => window.__swarmdeck?.client);
   await untick.setInputFiles('#torrent-file-input', { name: 'test.torrent', mimeType: 'application/x-bittorrent', buffer: Buffer.from(torrentFile) });
   await untick.waitForSelector('.torrent .file', { timeout: 15000 });
   const untickNames = await untick.$$eval('.torrent .file .file-name', (els) => els.map((e) => e.textContent));
   await untick.locator('.torrent .file input[type="checkbox"]').nth(untickNames.indexOf(files[1].name)).uncheck();
   const fileState = (name) => untick.evaluate((n) => {
-    const f = window.__phoneTorrent.client.torrents[0].files.find((x) => x.name === n);
+    const f = window.__swarmdeck.client.torrents[0].files.find((x) => x.name === n);
     return { done: f.done, progress: f.progress };
   }, name);
   await waitForFromSeeder(() => fileState(files[0].name).then((s) => s.done), { label: 'the file still ticked to arrive', timeout: 180000 });
@@ -3688,7 +3759,7 @@ try {
   await life.addInitScript(stubWakeLock);
   await life.addInitScript(({ t, rtc }) => {
     // No metadata caches: a magnet here waits for peers, and only for peers.
-    localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], trackerList: false, rtcConfig: rtc, metadataSources: [] }));
+    localStorage.setItem('swarmdeck:settings', JSON.stringify({ trackers: [t], trackerList: false, rtcConfig: rtc, metadataSources: [] }));
     // Every toast, kept: they leave the screen after a few seconds.
     window.__toasts = [];
     document.addEventListener('DOMContentLoaded', () => new MutationObserver((changes) => changes.forEach((c) => c.addedNodes.forEach((n) => window.__toasts.push(n.textContent))))
@@ -3711,7 +3782,7 @@ try {
     };
   }, { t: trackerUrl, rtc: rtcConfig });
   await life.goto(site.url);
-  await life.waitForFunction(() => window.__phoneTorrent?.client);
+  await life.waitForFunction(() => window.__swarmdeck?.client);
   const lifeCard = (name) => life.locator('.torrent', { has: life.locator('.name', { hasText: name }) }).first();
   const lockHeld = () => life.evaluate(() => window.__lock.held);
   const lifeAdd = (name, buffer) => life.setInputFiles('#torrent-file-input', { name, mimeType: 'application/x-bittorrent', buffer });
@@ -3732,11 +3803,11 @@ try {
   await waitFor(() => lockHeld().then((held) => !held), { label: 'nothing selected to let the screen lock go', timeout: 5000 });
   // Nor do its peers keep it on — a magnet's are still there once they have sent the metadata — for
   // a torrent that wants nothing from them. (No peer here: one is said to be connected.)
-  await life.evaluate((h) => Object.defineProperty(window.__phoneTorrent.client.torrents.find((t) => t.infoHash === h), 'numPeers', { configurable: true, get: () => 1 }), unwanted.infoHash);
+  await life.evaluate((h) => Object.defineProperty(window.__swarmdeck.client.torrents.find((t) => t.infoHash === h), 'numPeers', { configurable: true, get: () => 1 }), unwanted.infoHash);
   await lifeCard('unwanted.bin').locator('.select-none-btn').click();
   await new Promise((r) => setTimeout(r, 500)); // time for the lock to be asked for, if it were
   assert.equal(await lockHeld(), false, 'a peer connected to a torrent with nothing selected does not keep the screen on');
-  await life.evaluate((h) => { delete window.__phoneTorrent.client.torrents.find((t) => t.infoHash === h).numPeers; }, unwanted.infoHash);
+  await life.evaluate((h) => { delete window.__swarmdeck.client.torrents.find((t) => t.infoHash === h).numPeers; }, unwanted.infoHash);
 
   // Trackers that are all udp:// or http:// are not the end of it: the app's own wss:// trackers may
   // still find a WebRTC peer, so this one keeps the screen on — and explains itself.
@@ -3751,9 +3822,9 @@ try {
   // The explanation is about the .torrent's own trackers. A reload and a retry rebuild the torrent from
   // the file WebTorrent keeps, which has the app's wss:// trackers merged in; they must not change it.
   await life.reload();
-  await life.waitForFunction(() => window.__phoneTorrent?.client);
+  await life.waitForFunction(() => window.__swarmdeck?.client);
   await udpExplained();
-  await waitFor(() => life.evaluate((h) => window.__phoneTorrent.client.torrents.find((t) => t.infoHash === h)?.ready, udpOnly.infoHash), { label: 'the restored udp-only torrent checked', timeout: 10000 });
+  await waitFor(() => life.evaluate((h) => window.__swarmdeck.client.torrents.find((t) => t.infoHash === h)?.ready, udpOnly.infoHash), { label: 'the restored udp-only torrent checked', timeout: 10000 });
   await lifeCard('udp only.bin').locator('.details-btn').click();
   await lifeCard('udp only.bin').locator('.retry-btn').click();
   await waitFor(() => lifeCard('udp only.bin').locator('.log li').allTextContents().then((l) => l.some((t) => /re-announced/.test(t))), { label: 'retry of the udp-only torrent', timeout: 15000 });
@@ -3770,7 +3841,7 @@ try {
   await lifeCard('late metadata.bin').locator('.file').waitFor({ timeout: 10000 });
   assert.equal(await life.locator('.torrent', { has: life.locator('.name', { hasText: 'late metadata.bin' }) }).count(), 1, 'one card, filled in');
   assert.deepEqual((await life.evaluate((n) => window.__toasts.slice(n), toastsBefore)).filter((t) => /already in the list/.test(t)), [], 'not turned away as a duplicate');
-  assert.equal(await life.evaluate((h) => [...window.__phoneTorrent.views.values()].find((v) => v.torrent.infoHash === h)?.source?.type, late.infoHash), 'torrent', 'and restored from the .torrent from now on');
+  assert.equal(await life.evaluate((h) => [...window.__swarmdeck.views.values()].find((v) => v.torrent.infoHash === h)?.source?.type, late.infoHash), 'torrent', 'and restored from the .torrent from now on');
   log('the .torrent for a magnet waiting on its metadata fills that card in');
 
   /* Coming back to the app, or the network coming back, rebuilds what is waiting for peers — and only
@@ -3783,16 +3854,16 @@ try {
   await lifeAdd('test.torrent', Buffer.from(torrentFile));
   await waitForFromSeeder(() => lifeCard('Swarmdeck Test').locator('.pct').textContent().then((t) => t === '100%').catch(() => false), { label: 'the life page download', timeout: 180000 });
   await waitFor(() => life.evaluate(() => window.__toasts.some((t) => /"Swarmdeck Test" finished downloading/.test(t))), { label: 'the finished toast for a download seen through', timeout: 5000 });
-  await life.evaluate(() => Promise.all([...window.__phoneTorrent.views.values()].map((v) => v.persisted)));
+  await life.evaluate(() => Promise.all([...window.__swarmdeck.views.values()].map((v) => v.persisted)));
   // On the next launch the pieces on disk are checked, and the check waits until the hashes are released.
   await life.evaluate(() => sessionStorage.setItem('hold-hashes', '1'));
   await life.reload();
-  await life.waitForFunction(() => window.__phoneTorrent?.client);
-  await waitFor(() => life.evaluate(() => window.__phoneTorrent.client.torrents.length === 6), { label: 'every torrent restored', timeout: 15000 });
+  await life.waitForFunction(() => window.__swarmdeck?.client);
+  await waitFor(() => life.evaluate(() => window.__swarmdeck.client.torrents.length === 6), { label: 'every torrent restored', timeout: 15000 });
   await lifeCard('late metadata.bin').locator('.file').waitFor({ timeout: 10000 });
   if (opfs) {
     await waitFor(() => life.evaluate(() => {
-      const t = window.__phoneTorrent.client.torrents.find((x) => x.name === 'Swarmdeck Test');
+      const t = window.__swarmdeck.client.torrents.find((x) => x.name === 'Swarmdeck Test');
       return Boolean(t?.metadata && !t.ready);
     }), { label: 'the restored download checking its pieces', timeout: 10000 });
     // A retry by hand would start the check over just the same: it waits for it instead.
@@ -3804,19 +3875,19 @@ try {
   await life.setInputFiles('#seed-file-input', { name: 'fresh seed.bin', mimeType: 'application/octet-stream', buffer: rnd(300 * 1024, 65) });
   await waitFor(() => life.$$eval('.torrent.seeding .state', (els) => els.some((e) => e.textContent === 'hashing')), { label: 'a seed hashing', timeout: 10000 });
   const toastsAtReturn = await life.evaluate(() => {
-    const { client, views } = window.__phoneTorrent;
+    const { client, views } = window.__swarmdeck;
     window.__before = new Map(client.torrents.map((t) => [views.get(t)?.seeding ? 'seed' : t.infoHash, t]));
     window.dispatchEvent(new Event('online'));
     return window.__toasts.length;
   });
   // Twelve seconds of grace, then whatever is still alone and waiting for peers is rebuilt.
   await waitFor(() => life.evaluate((h) => {
-    const t = window.__phoneTorrent.client.torrents.find((x) => x.infoHash === h);
+    const t = window.__swarmdeck.client.torrents.find((x) => x.infoHash === h);
     return Boolean(t && t !== window.__before.get(h));
   }, nobodyHasIt), { label: 'the magnet waiting for peers to be rebuilt', timeout: 20000 });
   await new Promise((r) => setTimeout(r, 1000));
   const afterReturn = await life.evaluate(() => {
-    const { client } = window.__phoneTorrent;
+    const { client } = window.__swarmdeck;
     const kept = (key) => {
       const was = window.__before.get(key);
       return Boolean(was && !was.destroyed && client.torrents.includes(was));
@@ -3833,7 +3904,7 @@ try {
   // Without OPFS the pieces were in memory, and come from the seeder again.
   await waitForFromSeeder(() => lifeCard('Swarmdeck Test').locator('.pct').textContent().then((t) => t === '100%'), { label: 'the restored download checked', timeout: 180000 });
   if (opfs) {
-    assert.ok(await life.evaluate(() => window.__phoneTorrent.client.torrents.find((t) => t.name === 'Swarmdeck Test').received) < BLOCK, 'restored from disk');
+    assert.ok(await life.evaluate(() => window.__swarmdeck.client.torrents.find((t) => t.name === 'Swarmdeck Test').received) < BLOCK, 'restored from disk');
     // Finished before this launch: a check that finds it complete is no news.
     assert.deepEqual(await life.evaluate(() => window.__toasts.filter((t) => /finished downloading/.test(t))), [], 'no "finished downloading" for what finished before');
   }
@@ -3848,15 +3919,15 @@ try {
   secondCopy.on('pageerror', (e) => console.error('second copy page error:', e));
   secondCopy.on('dialog', (d) => { if (d.type() === 'beforeunload') return; d.accept(); });
   await secondCopy.goto(site.url);
-  await secondCopy.waitForFunction(() => window.__phoneTorrent?.client);
+  await secondCopy.waitForFunction(() => window.__swarmdeck?.client);
   const secondCard = (name) => secondCopy.locator('.torrent', { has: secondCopy.locator('.name', { hasText: name }) }).first();
   const shownNames = (page) => page.$$eval('.torrent .name', (els) => els.map((e) => e.textContent).join('\n'));
   await secondCard('udp only.bin').locator('.file').waitFor({ timeout: 15000 });
-  assert.equal(await secondCopy.evaluate(() => window.__phoneTorrent.follower), true, 'the second copy follows the first');
-  assert.equal(await secondCopy.evaluate(() => window.__phoneTorrent.client.torrents.length), 0, 'and runs no torrent of its own');
+  assert.equal(await secondCopy.evaluate(() => window.__swarmdeck.follower), true, 'the second copy follows the first');
+  assert.equal(await secondCopy.evaluate(() => window.__swarmdeck.client.torrents.length), 0, 'and runs no torrent of its own');
   await waitFor(async () => (await shownNames(secondCopy)) === (await shownNames(life)), { label: 'the second copy to show the same torrents, in the same order', timeout: 5000 });
 
-  const pausedInFirst = (h) => life.evaluate((hash) => window.__phoneTorrent.client.torrents.find((t) => t.infoHash === hash)?.paused, h);
+  const pausedInFirst = (h) => life.evaluate((hash) => window.__swarmdeck.client.torrents.find((t) => t.infoHash === hash)?.paused, h);
   await secondCard('nobody has it').locator('.pause-btn').click();
   await waitFor(() => pausedInFirst(nobodyHasIt), { label: 'a pause in the second copy to pause the torrent in the first', timeout: 5000 });
   await waitFor(() => secondCard('nobody has it').locator('.state').textContent().then((t) => t === 'paused'), { label: 'the second copy to say it is paused', timeout: 5000 });
@@ -3866,7 +3937,7 @@ try {
   const ticksInFirst = () => lifeCard('Swarmdeck Test').locator('.file input[type="checkbox"]').evaluateAll((boxes) => boxes.map((b) => b.checked));
   await secondCard('Swarmdeck Test').locator('.file input[type="checkbox"]').first().uncheck();
   await waitFor(() => ticksInFirst().then((t) => t[0] === false && t.slice(1).every(Boolean)), { label: 'a file unticked in the second copy to be unticked in the first', timeout: 5000 });
-  assert.deepEqual(await life.evaluate(() => [...window.__phoneTorrent.views.values()].find((v) => v.torrent.name === 'Swarmdeck Test').record.deselected), [0], 'and remembered there');
+  assert.deepEqual(await life.evaluate(() => [...window.__swarmdeck.views.values()].find((v) => v.torrent.name === 'Swarmdeck Test').record.deselected), [0], 'and remembered there');
   await secondCard('Swarmdeck Test').locator('.file input[type="checkbox"]').first().check();
   await waitFor(() => ticksInFirst().then((t) => t.every(Boolean)), { label: 'a file ticked again in the second copy to be ticked in the first', timeout: 5000 });
 
@@ -3905,7 +3976,7 @@ try {
   const addedThere = createHash('sha1').update(`added in the second copy ${Math.random()}`).digest('hex');
   await secondCopy.fill('#magnet-input', `magnet:?xt=urn:btih:${addedThere}&dn=added%20in%20the%20second%20copy`);
   await secondCopy.click('#magnet-form button[type="submit"]');
-  await waitFor(() => life.evaluate((h) => window.__phoneTorrent.client.torrents.some((t) => t.infoHash === h), addedThere), { label: 'a magnet added in the second copy to run in the first', timeout: 5000 });
+  await waitFor(() => life.evaluate((h) => window.__swarmdeck.client.torrents.some((t) => t.infoHash === h), addedThere), { label: 'a magnet added in the second copy to run in the first', timeout: 5000 });
   await lifeCard('added in the second copy').waitFor({ timeout: 5000 });
   await secondCard('added in the second copy').waitFor({ timeout: 5000 });
   await lifeCard('added in the second copy').locator('.remove-btn').click();
@@ -3913,35 +3984,35 @@ try {
 
   await secondCopy.click('.tab[data-tab="seed"]');
   await secondCopy.setInputFiles('#seed-file-input', { name: 'picked in the second copy.bin', mimeType: 'application/octet-stream', buffer: rnd(40 * 1024, 66) });
-  await waitFor(() => life.evaluate(() => window.__phoneTorrent.client.torrents.some((t) => t.name === 'picked in the second copy.bin')), { label: 'files picked in the second copy to be seeded by the first', timeout: 15000 });
+  await waitFor(() => life.evaluate(() => window.__swarmdeck.client.torrents.some((t) => t.name === 'picked in the second copy.bin')), { label: 'files picked in the second copy to be seeded by the first', timeout: 15000 });
   await secondCard('picked in the second copy.bin').locator('.share-panel:not([hidden])').waitFor({ timeout: 15000 });
 
   await secondCopy.evaluate(() => {
-    const saved = JSON.parse(localStorage.getItem('phone-torrent:settings'));
-    localStorage.setItem('phone-torrent:settings', JSON.stringify({ ...saved, uploadLimit: 321 }));
+    const saved = JSON.parse(localStorage.getItem('swarmdeck:settings'));
+    localStorage.setItem('swarmdeck:settings', JSON.stringify({ ...saved, uploadLimit: 321 }));
   });
-  await waitFor(() => life.evaluate(() => window.__phoneTorrent.settings.uploadLimit === 321), { label: 'settings saved in the second copy to apply in the first', timeout: 5000 });
+  await waitFor(() => life.evaluate(() => window.__swarmdeck.settings.uploadLimit === 321), { label: 'settings saved in the second copy to apply in the first', timeout: 5000 });
 
   await secondCard('udp only.bin').locator('.remove-btn').click();
-  await waitFor(() => life.evaluate((h) => !window.__phoneTorrent.client.torrents.some((t) => t.infoHash === h), udpOnly.infoHash), { label: 'the first copy to drop the torrent removed in the second', timeout: 5000 });
+  await waitFor(() => life.evaluate((h) => !window.__swarmdeck.client.torrents.some((t) => t.infoHash === h), udpOnly.infoHash), { label: 'the first copy to drop the torrent removed in the second', timeout: 5000 });
   assert.equal(await lifeCard('udp only.bin').count(), 0, 'its card is gone there');
   await waitFor(() => secondCard('udp only.bin').count().then((n) => n === 0), { label: 'and from the second copy', timeout: 5000 });
   log('a second open copy shows what the first runs, and hands it adds, pauses, ticks, saves, seeds, removals and settings');
 
   // Paused, a seed stays paused wherever it goes.
   await secondCard('picked in the second copy.bin').locator('.pause-btn').click();
-  await waitFor(() => life.evaluate(() => window.__phoneTorrent.client.torrents.find((t) => t.name === 'picked in the second copy.bin')?.paused), { label: 'a seed paused from the second copy', timeout: 5000 });
+  await waitFor(() => life.evaluate(() => window.__swarmdeck.client.torrents.find((t) => t.name === 'picked in the second copy.bin')?.paused), { label: 'a seed paused from the second copy', timeout: 5000 });
   await life.close();
-  await waitFor(() => secondCopy.evaluate((h) => !window.__phoneTorrent.follower && window.__phoneTorrent.client.torrents.some((t) => t.infoHash === h), unwanted.infoHash), { label: 'the second copy to take over when the first closes', timeout: 15000 });
+  await waitFor(() => secondCopy.evaluate((h) => !window.__swarmdeck.follower && window.__swarmdeck.client.torrents.some((t) => t.infoHash === h), unwanted.infoHash), { label: 'the second copy to take over when the first closes', timeout: 15000 });
   await secondCard('unwanted.bin').waitFor({ timeout: 5000 });
-  assert.equal(await secondCopy.evaluate((h) => window.__phoneTorrent.client.torrents.some((t) => t.infoHash === h), udpOnly.infoHash), false, 'and what was removed does not come back');
+  assert.equal(await secondCopy.evaluate((h) => window.__swarmdeck.client.torrents.some((t) => t.infoHash === h), udpOnly.infoHash), false, 'and what was removed does not come back');
   assert.equal(await secondCard('udp only.bin').count(), 0, 'nor its card');
   // A seed is never remembered: the copy that closed handed it over, and it goes on being shared.
   await waitFor(() => secondCopy.evaluate(() => {
-    const { client, views } = window.__phoneTorrent;
+    const { client, views } = window.__swarmdeck;
     return client.torrents.some((t) => t.name === 'picked in the second copy.bin' && views.get(t)?.seeding);
   }), { label: 'the seed picked in the second copy to go on in it once the first closes', timeout: 15000 });
-  await waitFor(() => secondCopy.evaluate(() => window.__phoneTorrent.client.torrents.find((t) => t.name === 'picked in the second copy.bin')?.paused), { label: 'and to stay paused there', timeout: 5000 });
+  await waitFor(() => secondCopy.evaluate(() => window.__swarmdeck.client.torrents.find((t) => t.name === 'picked in the second copy.bin')?.paused), { label: 'and to stay paused there', timeout: 5000 });
   log('closing the copy that runs the torrents hands them to the next one, from storage, and its seeds');
 
   // A phone freezes the copy it does not show. One looked at while the running one does not answer
@@ -3949,9 +4020,9 @@ try {
   const thirdCopy = await lifeCtx.newPage();
   thirdCopy.on('pageerror', (e) => console.error('third copy page error:', e));
   await thirdCopy.goto(site.url);
-  await thirdCopy.waitForFunction(() => window.__phoneTorrent?.client);
+  await thirdCopy.waitForFunction(() => window.__swarmdeck?.client);
   await thirdCopy.locator('.torrent .name', { hasText: 'unwanted.bin' }).waitFor({ timeout: 15000 });
-  assert.equal(await thirdCopy.evaluate(() => window.__phoneTorrent.follower), true, 'a third copy follows the second');
+  assert.equal(await thirdCopy.evaluate(() => window.__swarmdeck.follower), true, 'a third copy follows the second');
   // A seed is not remembered: the copy that loses the lead hands it to the one that took it.
   await secondCopy.click('.tab[data-tab="seed"]');
   await secondCopy.setInputFiles('#seed-file-input', { name: 'handed over.bin', mimeType: 'application/octet-stream', buffer: rnd(40 * 1024, 67) });
@@ -3962,12 +4033,12 @@ try {
   const asked = Date.now();
   await thirdCopy.evaluate(() => 1);
   if (Date.now() - asked < 2000) {
-    await waitFor(() => thirdCopy.evaluate((h) => !window.__phoneTorrent.follower && window.__phoneTorrent.client.torrents.some((t) => t.infoHash === h), unwanted.infoHash), { label: 'the third copy to take over from one that stopped answering', timeout: 20000 });
+    await waitFor(() => thirdCopy.evaluate((h) => !window.__swarmdeck.follower && window.__swarmdeck.client.torrents.some((t) => t.infoHash === h), unwanted.infoHash), { label: 'the third copy to take over from one that stopped answering', timeout: 20000 });
     await stuck;
-    await waitFor(() => secondCopy.evaluate(() => window.__phoneTorrent.follower && window.__phoneTorrent.client.torrents.length === 0), { label: 'the copy that stopped answering to follow once it answers again', timeout: 10000 });
+    await waitFor(() => secondCopy.evaluate(() => window.__swarmdeck.follower && window.__swarmdeck.client.torrents.length === 0), { label: 'the copy that stopped answering to follow once it answers again', timeout: 10000 });
     await secondCard('unwanted.bin').waitFor({ timeout: 10000 });
     await waitFor(() => thirdCopy.evaluate(() => {
-      const { client, views } = window.__phoneTorrent;
+      const { client, views } = window.__swarmdeck;
       return client.torrents.some((t) => t.name === 'handed over.bin' && views.get(t)?.seeding);
     }), { label: 'the seed handed over to the copy that took over', timeout: 15000 });
     const handedCard = thirdCopy.locator('.torrent', { has: thirdCopy.locator('.name', { hasText: 'handed over.bin' }) }).first();
@@ -3988,12 +4059,12 @@ try {
   const handed = await handedCtx.newPage();
   handed.on('pageerror', (e) => console.error('handed page error:', e));
   await handed.addInitScript(stubWakeLock);
-  await handed.addInitScript(({ t, rtc, api }) => localStorage.setItem('phone-torrent:settings', JSON.stringify({
+  await handed.addInitScript(({ t, rtc, api }) => localStorage.setItem('swarmdeck:settings', JSON.stringify({
     trackers: [t], trackerList: false, rtcConfig: rtc, metadataSources: [],
     cloud: { provider: 'torbox', apiKey: 'test-api-key', apiBase: api, viaProxy: false, accounts: {} },
   })), { t: trackerUrl, rtc: rtcConfig, api: cloudApi.url });
   await handed.goto(site.url);
-  await handed.waitForFunction(() => window.__phoneTorrent?.client);
+  await handed.waitForFunction(() => window.__swarmdeck?.client);
   await handed.setInputFiles('#torrent-file-input', { name: 'udp-only.torrent', mimeType: 'application/x-bittorrent', buffer: udpOnly.buf });
   await waitFor(() => handed.evaluate(() => window.__lock.held), { label: 'a torrent with no peers yet to hold the screen lock', timeout: 10000 });
   await handed.click('.torrent .nopeers-cloud-btn');
@@ -4011,11 +4082,11 @@ try {
   let webSeedUrl = '';
   web.on('dialog', (d) => { if (d.type() === 'beforeunload') return; d.accept(d.type() === 'prompt' ? webSeedUrl : undefined); });
   await web.addInitScript(stubWakeLock);
-  await web.addInitScript(({ t, rtc }) => localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], trackerList: false, rtcConfig: rtc, metadataSources: [], seedAfterDone: false })), { t: trackerUrl, rtc: rtcConfig });
+  await web.addInitScript(({ t, rtc }) => localStorage.setItem('swarmdeck:settings', JSON.stringify({ trackers: [t], trackerList: false, rtcConfig: rtc, metadataSources: [], seedAfterDone: false })), { t: trackerUrl, rtc: rtcConfig });
   await web.goto(site.url);
-  await web.waitForFunction(() => window.__phoneTorrent?.client);
+  await web.waitForFunction(() => window.__swarmdeck?.client);
   const webCard = (name) => web.locator('.torrent', { has: web.locator('.name', { hasText: name }) }).first();
-  const webProgress = (name) => web.evaluate((n) => window.__phoneTorrent.client.torrents.find((t) => t.name === n)?.progress || 0, name);
+  const webProgress = (name) => web.evaluate((n) => window.__swarmdeck.client.torrents.find((t) => t.name === n)?.progress || 0, name);
   const webAdd = (name, buffer) => web.setInputFiles('#torrent-file-input', { name, mimeType: 'application/x-bittorrent', buffer });
 
   // A private torrent this page cannot announce can still come from a web seed, its own url-list here.
@@ -4061,9 +4132,9 @@ try {
   await waitFor(() => byHandLog().then((l) => l.filter((t) => /web seed added/.test(t)).length >= 2 || l.some((t) => /web seed added.*\(×2\)$/.test(t))), { label: 'the same web seed added again', timeout: 5000 });
   assert.deepEqual((await byHandLog()).filter((t) => /duplicate web seed/.test(t)), [], 'without a warning naming its address');
   await webCard('by hand.bin').locator('.pause-btn').click();
-  await web.evaluate(() => Promise.all([...window.__phoneTorrent.views.values()].map((v) => v.persisted)));
+  await web.evaluate(() => Promise.all([...window.__swarmdeck.views.values()].map((v) => v.persisted)));
   await web.reload();
-  await web.waitForFunction(() => window.__phoneTorrent?.client);
+  await web.waitForFunction(() => window.__swarmdeck?.client);
   await waitFor(() => webCard('by hand.bin').locator('.state').textContent().then((t) => t === 'paused').catch(() => false), { label: 'restored paused', timeout: 15000 });
   const byHandAsked = mirror.state.asked.get('/by hand.bin');
   await webCard('by hand.bin').locator('.pause-btn').click();
@@ -4111,7 +4182,7 @@ try {
   const lanDialogs = [];
   lan.on('dialog', (d) => { if (d.type() === 'beforeunload') return; lanDialogs.push(d.message()); d.accept(); });
   await lan.goto(`http://phone.lan/#magnet:?xt=urn:btih:${'6'.repeat(40)}&dn=from%20a%20link`);
-  await lan.waitForFunction(() => window.__phoneTorrent?.client);
+  await lan.waitForFunction(() => window.__swarmdeck?.client);
   assert.equal(await lan.evaluate(() => window.isSecureContext), false, 'plain http at a name that is not localhost');
   await waitFor(() => lan.$$eval('.toast', (els) => els.some((e) => /need a secure page, HTTPS or localhost/.test(e.textContent))), { label: 'a linked magnet to say why it cannot be added here', timeout: 10000 });
   assert.equal((await lan.$$('.torrent')).length, 0, 'and nothing is added that could only fail');
@@ -4136,8 +4207,8 @@ try {
   assert.deepEqual(await lan.$$eval('.toast', (els) => els.map((e) => /need a secure page, HTTPS or localhost/.test(e.textContent))), [true], 'a drop there says why, not a script error');
   await lan.click('.tab[data-tab="cloud"]');
   assert.equal(await lan.$eval('#cloud-input', (e) => e.disabled), false, 'the Cloud tab is the one that works here');
-  await assert.rejects(lan.evaluate(() => window.__phoneTorrent.addTorrent(`magnet:?xt=urn:btih:${'7'.repeat(40)}`)), /HTTPS or localhost/);
-  assert.match(await lan.evaluate(() => window.__phoneTorrent.saver.reason), /HTTPS/, 'and saves blame the page, not the browser');
+  await assert.rejects(lan.evaluate(() => window.__swarmdeck.addTorrent(`magnet:?xt=urn:btih:${'7'.repeat(40)}`)), /HTTPS or localhost/);
+  assert.match(await lan.evaluate(() => window.__swarmdeck.saver.reason), /HTTPS/, 'and saves blame the page, not the browser');
   await lanCtx.close();
   log('a page that is not secure: the Cloud tab works, the other three say why they do not, a drop on Edit included');
 
@@ -4170,11 +4241,11 @@ try {
   own.on('pageerror', (e) => console.error('own server page error:', e));
   // Only the trackers are set, which leaves the service as untouched as it is on a first visit: a
   // torrent added below announces here, not to the public ones.
-  await own.addInitScript(({ t, rtc }) => localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], trackerList: false, rtcConfig: rtc, metadataSources: [] })), { t: trackerUrl, rtc: rtcConfig });
+  await own.addInitScript(({ t, rtc }) => localStorage.setItem('swarmdeck:settings', JSON.stringify({ trackers: [t], trackerList: false, rtcConfig: rtc, metadataSources: [] })), { t: trackerUrl, rtc: rtcConfig });
   await own.goto(site.url);
-  await own.waitForFunction(() => window.__phoneTorrent?.client);
-  await own.evaluate(() => window.__phoneTorrent.started);
-  assert.deepEqual(await own.evaluate(() => { const c = window.__phoneTorrent.cloudCtx(); return { provider: c.provider, base: c.base }; }),
+  await own.waitForFunction(() => window.__swarmdeck?.client);
+  await own.evaluate(() => window.__swarmdeck.started);
+  assert.deepEqual(await own.evaluate(() => { const c = window.__swarmdeck.cloudCtx(); return { provider: c.provider, base: c.base }; }),
     { provider: 'server', base: new URL(site.url).origin }, 'the server serving the page is the service, at this very address');
   await own.click('.tab[data-tab="cloud"]');
   await waitFor(() => own.$eval('#cloud-account', (e) => e.textContent === 'My own server · your server · 0 transfers · 30 GB free'), { label: 'the Cloud tab to show the server', timeout: 5000 });
@@ -4189,7 +4260,7 @@ try {
   const episode = (i) => ({ id: i, name: `Show.S01E0${i + 1}.mkv`, size: 1000 + i, link: `/api/transfers/${'9'.repeat(40)}/files/${i}?expires=1&sig=x` });
   const season = { id: '9'.repeat(40), name: 'Show.S01', size: 3003, progress: 0.1, state: 'downloading', ready: false, peers: 3, files: [] };
   ownTransfers.push(season);
-  const relist = () => own.evaluate(() => window.__phoneTorrent.refreshCloudLibrary({ quiet: true }));
+  const relist = () => own.evaluate(() => window.__swarmdeck.refreshCloudLibrary({ quiet: true }));
   await relist();
   // The account line counts the transfers: it said "0 transfers" beside one the library listed,
   // until the Cloud tab was tapped again.
@@ -4308,12 +4379,12 @@ try {
   const dialectCtx = await context({ serviceWorkers: 'block' });
   const dialect = await dialectCtx.newPage();
   dialect.on('pageerror', (e) => console.error('dialect page error:', e));
-  await dialect.addInitScript(({ t }) => localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], trackerList: false, metadataSources: [] })), { t: trackerUrl });
+  await dialect.addInitScript(({ t }) => localStorage.setItem('swarmdeck:settings', JSON.stringify({ trackers: [t], trackerList: false, metadataSources: [] })), { t: trackerUrl });
   await dialect.goto(site.url);
-  await dialect.waitForFunction(() => window.__phoneTorrent?.client);
+  await dialect.waitForFunction(() => window.__swarmdeck?.client);
   // One provider method, with a context of its own: what came back, or what was thrown.
   const ask = (provider, method, ...args) => dialect.evaluate(async ({ provider, method, args, base }) => {
-    const pt = window.__phoneTorrent;
+    const pt = window.__swarmdeck;
     const ctx = pt.cloudCtx({ provider, base: `${base}/${provider}`, key: 'k' });
     try {
       return { value: await ctx.api[method](ctx, ...args) };
@@ -4355,7 +4426,7 @@ try {
 
   // Real-Debrid: a choice of files refused for good left the torrent waiting, and its card asking
   // after it every five seconds for ever.
-  await dialect.evaluate(() => window.__phoneTorrent.CLOUD_PROVIDERS.realdebrid.owed('LOCKED', true));
+  await dialect.evaluate(() => window.__swarmdeck.CLOUD_PROVIDERS.realdebrid.owed('LOCKED', true));
   answer('GET /realdebrid/rest/1.0/torrents/info/LOCKED', { id: 'LOCKED', filename: 'locked.mkv', bytes: 10, progress: 0, status: 'waiting_files_selection', files: [{ id: 1, path: '/locked.mkv', bytes: 10, selected: 0 }], links: [] });
   answer('POST /realdebrid/rest/1.0/torrents/selectFiles/LOCKED', { error: 'permission_denied', error_code: 9 }, 403);
   const rdLocked = await ask('realdebrid', 'status', 'LOCKED');
@@ -4377,7 +4448,7 @@ try {
   // Deleting one the service no longer has (deleted on its site, or from another device): done all the same.
   answer('DELETE /realdebrid/rest/1.0/torrents/delete/GONE', { error: 'unknown_ressource', error_code: 7 }, 404);
   dialect.once('dialog', (d) => { if (d.type() === 'beforeunload') return; d.accept(); });
-  await dialect.evaluate((base) => window.__phoneTorrent.cloudRemoveItem({ id: 'GONE', name: 'gone', provider: 'realdebrid', base: `${base}/realdebrid` }), dialectBase);
+  await dialect.evaluate((base) => window.__swarmdeck.cloudRemoveItem({ id: 'GONE', name: 'gone', provider: 'realdebrid', base: `${base}/realdebrid` }), dialectBase);
   await waitFor(() => dialect.$$eval('.toast', (l) => l.some((t) => /Deleted from the cloud/.test(t.textContent))), { label: 'a transfer already gone to count as deleted', timeout: 5000 });
 
   // TorBox: an account with no torrent at all answers ITEM_NOT_FOUND, as a 404.
@@ -4399,9 +4470,9 @@ try {
   const elsewhereCtx = await context();
   const elsewhere = await elsewhereCtx.newPage();
   await elsewhere.goto(site.url);
-  await elsewhere.waitForFunction(() => window.__phoneTorrent?.client);
-  await elsewhere.evaluate(() => window.__phoneTorrent.started);
-  assert.equal(await elsewhere.evaluate(() => window.__phoneTorrent.cloudCtx().provider), 'torbox', 'a page no server serves keeps its default');
+  await elsewhere.waitForFunction(() => window.__swarmdeck?.client);
+  await elsewhere.evaluate(() => window.__swarmdeck.started);
+  assert.equal(await elsewhere.evaluate(() => window.__swarmdeck.cloudCtx().provider), 'torbox', 'a page no server serves keeps its default');
   await elsewhereCtx.close();
   // A server deployed on Render, Fly or behind a tunnel has an AUTH_TOKEN; its health answers all
   // the same, and the page takes it as the service. Settings then asks for that token, rather than
@@ -4415,8 +4486,8 @@ try {
   const tokened = await tokenCtx.newPage();
   tokened.on('pageerror', (e) => console.error('token server page error:', e));
   await tokened.goto(site.url);
-  await tokened.waitForFunction(() => window.__phoneTorrent?.client);
-  await tokened.evaluate(() => window.__phoneTorrent.started);
+  await tokened.waitForFunction(() => window.__swarmdeck?.client);
+  await tokened.evaluate(() => window.__swarmdeck.started);
   await waitFor(() => tokened.$eval('#cloud-account', (e) => /bad or missing token/.test(e.textContent)), { label: 'the server to turn the page away for want of its token', timeout: 5000 });
   // The library, which is on the Download tab too, says why it shows nothing: it used to say the
   // account was empty.
@@ -4447,8 +4518,8 @@ try {
   const down = await downCtx.newPage();
   down.on('pageerror', (e) => console.error('server down page error:', e));
   await down.goto(site.url);
-  await down.waitForFunction(() => window.__phoneTorrent?.client);
-  await down.evaluate(() => window.__phoneTorrent.started);
+  await down.waitForFunction(() => window.__swarmdeck?.client);
+  await down.evaluate(() => window.__swarmdeck.started);
   await waitFor(() => down.$eval('#cloud-empty', (e) => /your server is not answering/.test(e.textContent)), { label: 'the library to say the server is not answering', timeout: 10000 });
   const downSaid = await down.evaluate(() => ['#cloud-empty', '#cloud-error', '#cloud-account'].map((s) => document.querySelector(s).textContent));
   assert.doesNotMatch(downSaid[0], /Nothing in your cloud account/, 'not that the account is empty');
@@ -4486,13 +4557,13 @@ try {
   await httpsCtx.route('https://phone.test/**', servePhoneTest);
   const secure = await httpsCtx.newPage();
   secure.on('pageerror', (e) => console.error('https page error:', e));
-  const httpServerSettings = ({ t, proxy }) => localStorage.setItem('phone-torrent:settings', JSON.stringify({
+  const httpServerSettings = ({ t, proxy }) => localStorage.setItem('swarmdeck:settings', JSON.stringify({
     trackers: [t], trackerList: false, metadataSources: [], ...(proxy ? { corsProxy: proxy } : {}),
     cloud: { provider: 'server', apiKey: '', apiBase: 'http://192.0.2.1:8080', viaProxy: false, accounts: {} },
   }));
   await secure.addInitScript(httpServerSettings, { t: trackerUrl });
   await secure.goto('https://phone.test/');
-  await secure.waitForFunction(() => window.__phoneTorrent?.client);
+  await secure.waitForFunction(() => window.__swarmdeck?.client);
   assert.equal(await secure.evaluate(() => window.isSecureContext && location.protocol), 'https:', 'an https page');
   await secure.click('.tab[data-tab="cloud"]');
   const mixedSaid = await waitFor(() => secure.$eval('#cloud-account', (e) => (/this page is https/.test(e.textContent) ? e.textContent : '')), { label: 'the https page to say why it cannot call an http:// address', timeout: 10000 });
@@ -4506,7 +4577,7 @@ try {
   await secure.click('.tab[data-tab="download"]');
   await secure.fill('#magnet-input', `magnet:?xt=urn:btih:${'b'.repeat(40)}&dn=ws%20tracker&tr=${encodeURIComponent('ws://tracker.example:8000/announce')}`);
   await secure.click('#magnet-form button[type="submit"]');
-  await waitFor(() => secure.evaluate((h) => Boolean(window.__phoneTorrent.client.torrents.find((t) => t.infoHash === h)?.discovery?.tracker), 'b'.repeat(40)), { label: 'the torrent to ask its trackers', timeout: 10000 });
+  await waitFor(() => secure.evaluate((h) => Boolean(window.__swarmdeck.client.torrents.find((t) => t.infoHash === h)?.discovery?.tracker), 'b'.repeat(40)), { label: 'the torrent to ask its trackers', timeout: 10000 });
   await new Promise((r) => setTimeout(r, 1000));
   const wsLog = await secure.$$eval('.torrent .log li', (els) => els.map((e) => e.textContent));
   assert.deepEqual(wsLog.filter((l) => /Unsupported tracker protocol/.test(l)), [], 'no warning for a ws:// tracker on an https page');
@@ -4532,7 +4603,7 @@ try {
   relayedPage.on('pageerror', (e) => console.error('https page with a proxy error:', e));
   await relayedPage.addInitScript(httpServerSettings, { t: trackerUrl, proxy: 'https://proxy.test/?url={url}' });
   await relayedPage.goto('https://phone.test/');
-  await relayedPage.waitForFunction(() => window.__phoneTorrent?.client);
+  await relayedPage.waitForFunction(() => window.__swarmdeck?.client);
   await relayedPage.click('.tab[data-tab="cloud"]');
   await waitFor(() => relayedPage.$eval('#cloud-account', (e) => /your server · 1 transfer/.test(e.textContent)), { label: 'the account of an http:// server, through the proxy', timeout: 10000 });
   await relayedPage.locator('.cloud-item', { hasText: 'Some.Transfer' }).waitFor({ timeout: 10000 });
@@ -4545,11 +4616,11 @@ try {
   const offCtx = await context();
   const off = await offCtx.newPage();
   off.on('pageerror', (e) => console.error('offline page error:', e));
-  await off.addInitScript(({ t, rtc, meta }) => localStorage.setItem('phone-torrent:settings', JSON.stringify({
+  await off.addInitScript(({ t, rtc, meta }) => localStorage.setItem('swarmdeck:settings', JSON.stringify({
     trackers: [t], trackerList: false, rtcConfig: rtc, metadataSources: [meta], fallbackDelay: 5,
   })), { t: trackerUrl, rtc: rtcConfig, meta: `${site.url}test/.tmp/{infohash}.torrent` });
   await off.goto(site.url);
-  await off.waitForFunction(() => window.__phoneTorrent?.client);
+  await off.waitForFunction(() => window.__swarmdeck?.client);
   await offCtx.setOffline(true);
   await off.fill('#magnet-input', `magnet:?xt=urn:btih:${'8'.repeat(40)}&dn=offline`);
   await off.click('#magnet-form button[type="submit"]');
@@ -4575,7 +4646,7 @@ try {
   diag.on('dialog', (d) => { if (d.type() === 'beforeunload') return; d.accept(); });
   const secrets = ['TORBOX-SECRET-KEY', 'PUTIO-SECRET-TOKEN', 'myproxy-secret', 'turn-user-secret', 'turn-pass-secret', 'PASSKEY-SECRET'];
   await diag.addInitScript(({ t, rtc }) => {
-    localStorage.setItem('phone-torrent:settings', JSON.stringify({
+    localStorage.setItem('swarmdeck:settings', JSON.stringify({
       trackers: [t], trackerList: false, metadataSources: [], expert: true,
       rtcConfig: { ...rtc, iceServers: [...rtc.iceServers, { urls: 'turn:turn.invalid:3478', username: 'turn-user-secret', credential: 'turn-pass-secret' }] },
       corsProxy: 'https://myproxy-secret.workers.dev/?url={url}',
@@ -4590,8 +4661,8 @@ try {
     }
   }, { t: trackerUrl, rtc: rtcConfig });
   await diag.goto(site.url);
-  await diag.waitForFunction(() => window.__phoneTorrent?.client);
-  await diag.evaluate(() => window.__phoneTorrent.started);
+  await diag.waitForFunction(() => window.__swarmdeck?.client);
+  await diag.evaluate(() => window.__swarmdeck.started);
   // What the browser stores is best-effort unless the page asks to keep it, which it did not: gigabytes
   // of pieces could go, and the list with them, when the device ran low on space. Asked once, on adding.
   assert.equal(await diag.evaluate(() => window.__keepAsked), 0, 'nothing asked of the storage on opening the page');
@@ -4602,7 +4673,7 @@ try {
   assert.equal(await diag.evaluate(() => window.__keepAsked), 1, 'and asked once, when a torrent is first added');
   await diag.click('#settings-btn');
   await diag.waitForSelector('#settings-dialog[open]');
-  if (await diag.evaluate(() => window.__phoneTorrent.opfsOk)) {
+  if (await diag.evaluate(() => window.__swarmdeck.opfsOk)) {
     await waitFor(() => diag.$eval('#storage-info', (e) => /The browser keeps it until you delete it/.test(e.textContent)), { label: 'Settings to say the storage is kept', timeout: 5000 });
   }
   log('the page asks once, on adding, to keep what it stores, and Settings says whether it may');
@@ -4610,7 +4681,7 @@ try {
   // Copy diagnostics is made to be pasted into a bug report, in public: the cloud keys, the proxy, TURN
   // credentials and a private tracker's passkey are not in it. The proxy reaches the log filled in, as
   // proxied() writes it and never as its {url} template: in WebTorrent's warning for a web seed added twice.
-  await diag.evaluate(() => window.__phoneTorrent.client.torrents.find((t) => t.name === 'second.bin')
+  await diag.evaluate(() => window.__swarmdeck.client.torrents.find((t) => t.name === 'second.bin')
     .emit('warning', new Error('ignoring duplicate web seed: https://myproxy-secret.workers.dev/?url=https%3A%2F%2Fmirror.example%2Fsecond.bin')));
   await diag.click('#copy-diag-btn');
   const copied = await waitFor(() => diag.evaluate(() => window.__copied), { label: 'the diagnostics copied', timeout: 5000 });
@@ -4655,8 +4726,8 @@ try {
   await diag.click('#settings-dialog button[value="save"]');
   assert.match(await diag.textContent('#settings-error'), /needs http:\/\/ or https:\/\/. It now reads http:\/\/nas\.local:8080/, 'an address without its scheme is mended, and says so');
   await diag.click('#settings-dialog button[value="save"]');
-  await waitFor(() => diag.evaluate(() => JSON.parse(localStorage.getItem('phone-torrent:settings')).cloud.provider === 'server'), { label: 'the mended settings saved', timeout: 5000 });
-  const mended = await diag.evaluate(() => JSON.parse(localStorage.getItem('phone-torrent:settings')));
+  await waitFor(() => diag.evaluate(() => JSON.parse(localStorage.getItem('swarmdeck:settings')).cloud.provider === 'server'), { label: 'the mended settings saved', timeout: 5000 });
+  const mended = await diag.evaluate(() => JSON.parse(localStorage.getItem('swarmdeck:settings')));
   assert.equal(mended.corsProxy, 'https://phone-torrent-proxy.me.workers.dev/?url={url}', 'the proxy saved as mended');
   assert.deepEqual(mended.metadataSources, ['https://itorrents.org/torrent/{INFOHASH}.torrent'], 'the sources as they read');
   assert.equal(mended.cloud.apiBase, 'http://nas.local:8080', 'and the address with its scheme');
@@ -4672,10 +4743,10 @@ try {
   noRtc.on('pageerror', (e) => console.error('no WebRTC page error:', e));
   await noRtc.addInitScript(({ t }) => {
     for (const name of ['RTCPeerConnection', 'webkitRTCPeerConnection', 'mozRTCPeerConnection']) delete window[name];
-    localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], trackerList: false, metadataSources: [] }));
+    localStorage.setItem('swarmdeck:settings', JSON.stringify({ trackers: [t], trackerList: false, metadataSources: [] }));
   }, { t: trackerUrl });
   await noRtc.goto(site.url);
-  await noRtc.waitForFunction(() => window.__phoneTorrent?.client);
+  await noRtc.waitForFunction(() => window.__swarmdeck?.client);
   assert.match(await noRtc.$eval('#tab-download .insecure-note', (e) => (e.hidden ? '' : e.textContent)), /WebRTC is turned off in this browser/, 'the Download tab says WebRTC is off');
   assert.equal(await noRtc.$eval('#magnet-input', (e) => e.disabled), false, 'and switches nothing off');
   assert.equal(await noRtc.isVisible('#tab-edit .insecure-note'), false, 'the Edit tab, which talks to no peer, has nothing to say');
@@ -4695,12 +4766,12 @@ try {
   const relayCtx = await context();
   const relay = await relayCtx.newPage();
   relay.on('pageerror', (e) => console.error('relay page error:', e));
-  await relay.addInitScript(({ t, api, proxy }) => localStorage.setItem('phone-torrent:settings', JSON.stringify({
+  await relay.addInitScript(({ t, api, proxy }) => localStorage.setItem('swarmdeck:settings', JSON.stringify({
     trackers: [t], trackerList: false, metadataSources: [], corsProxy: proxy,
     cloud: { provider: 'torbox', apiKey: 'test-api-key', apiBase: api, viaProxy: true, accounts: {} },
   })), { t: trackerUrl, api: cloudApi.url, proxy: `${corsProxy.url}/?url={url}` });
   await relay.goto(site.url);
-  await relay.waitForFunction(() => window.__phoneTorrent?.client);
+  await relay.waitForFunction(() => window.__swarmdeck?.client);
   await relay.click('.tab[data-tab="cloud"]');
   await relay.fill('#cloud-input', `magnet:?xt=urn:btih:${'d'.repeat(40)}`);
   await relay.click('#cloud-form button[type="submit"]');
@@ -4724,14 +4795,14 @@ try {
   const clocked = await clockCtx.newPage();
   clocked.on('pageerror', (e) => console.error('clock page error:', e));
   await clocked.clock.install();
-  await clocked.addInitScript(({ t }) => localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], trackerList: true, trackerListUrl: 'https://lists.invalid/trackers.txt', metadataSources: [] })), { t: trackerUrl });
+  await clocked.addInitScript(({ t }) => localStorage.setItem('swarmdeck:settings', JSON.stringify({ trackers: [t], trackerList: true, trackerListUrl: 'https://lists.invalid/trackers.txt', metadataSources: [] })), { t: trackerUrl });
   await clocked.goto(site.url);
-  await clocked.waitForFunction(() => window.__phoneTorrent?.client);
+  await clocked.waitForFunction(() => window.__swarmdeck?.client);
   await waitFor(() => listFetches === 1, { label: 'the tracker list fetched at start', timeout: 10000 });
   // Answered is not taken in: the page stamps the list once it has read it, and start() sets its timer
   // after that. A jump before either and the list looked fresh, or the timer began six hours late.
-  await clocked.waitForFunction(() => localStorage.getItem('phone-torrent:trackerlist'), null, { timeout: 10000 });
-  await clocked.evaluate(() => window.__phoneTorrent.started);
+  await clocked.waitForFunction(() => localStorage.getItem('swarmdeck:trackerlist'), null, { timeout: 10000 });
+  await clocked.evaluate(() => window.__swarmdeck.started);
   await clocked.clock.fastForward('06:30:00');
   await waitFor(() => listFetches === 2, { label: 'the tracker list fetched again, six hours on', timeout: 10000 });
   await clockCtx.close();
@@ -4745,19 +4816,19 @@ try {
   const legacy = await legacyCtx.newPage();
   legacy.on('pageerror', (e) => console.error('legacy page error:', e));
   await legacy.addInitScript(({ t, rtc }) => {
-    localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], trackerList: false, rtcConfig: rtc, seedAfterDone: false, downloadLimit: 1000 }));
+    localStorage.setItem('swarmdeck:settings', JSON.stringify({ trackers: [t], trackerList: false, rtcConfig: rtc, seedAfterDone: false, downloadLimit: 1000 }));
     delete StorageManager.prototype.getDirectory;
   }, { t: trackerUrl, rtc: rtcConfig });
   await legacy.goto(site.url);
-  await legacy.waitForFunction(() => window.__phoneTorrent?.client);
+  await legacy.waitForFunction(() => window.__swarmdeck?.client);
   const legacyMode = (await waitSaver(legacy)).mode;
   assert.equal(legacyMode, 'blob', 'falls back to in-memory saving without a service worker');
-  assert.equal(await legacy.evaluate(() => window.__phoneTorrent.opfsOk), false, 'and keeps the pieces in memory without OPFS');
+  assert.equal(await legacy.evaluate(() => window.__swarmdeck.opfsOk), false, 'and keeps the pieces in memory without OPFS');
   await legacy.setInputFiles('#torrent-file-input', { name: 'test.torrent', mimeType: 'application/x-bittorrent', buffer: Buffer.from(torrentFile) });
   await legacy.waitForSelector('.torrent .file', { timeout: 15000 });
   const legacyNames = await legacy.$$eval('.torrent .file .file-name', (els) => els.map((e) => e.textContent));
   const legacyNotes = legacy.locator('.torrent .file input[type="checkbox"]').nth(legacyNames.indexOf(files[1].name));
-  const legacyPaused = () => legacy.evaluate(() => window.__phoneTorrent.client.torrents[0].paused);
+  const legacyPaused = () => legacy.evaluate(() => window.__swarmdeck.client.torrents[0].paused);
 
   // Only the video for now: once it is in, "keep seeding" being off stops the torrent.
   await legacyNotes.uncheck();

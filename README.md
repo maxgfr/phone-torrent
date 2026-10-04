@@ -405,19 +405,21 @@ or the page does without:
 
 ## Upgrading from Phone Torrent
 
-Swarmdeck was called Phone Torrent. Nothing has to be done to keep what you had:
+Swarmdeck was called Phone Torrent.
 
-- **What the browser holds stays.** The torrents, their pieces, the settings and the presets live
-  under names this app keeps on purpose (`phone-torrent:settings`, the `phone-torrent` IndexedDB, the
-  caches), so the new version finds them; a tab still open on the old one and one on the new agree on
-  which runs the torrents. The address of the page changed, from `maxgfr.github.io/phone-torrent/` to
-  `maxgfr.github.io/swarmdeck/` (the old one sends you on, links shared before included). Both are on
-  the same origin, so the new page finds everything the old one kept; an app installed from the old
-  address is that address's, though: install it again from the new one, and remove the old.
+- **What the browser holds comes along.** The first time Swarmdeck opens where Phone Torrent ran, it
+  moves the settings, the presets, the list's layout, the remembered torrents (their pieces stay where
+  they are) and a share still waiting, from the old names to the new ones, then drops the old ones.
+  Close every tab of the old version first: the two do not share the lead, and would run the same
+  torrents side by side until the old one is closed.
+- **The page** is at `maxgfr.github.io/swarmdeck/`; `maxgfr.github.io/phone-torrent/` is gone, and links
+  shared with that address with it. An app installed from the old address goes on opening its last
+  cached copy: remove it, and install Swarmdeck from the new address. Both are on the same origin, so
+  the new page finds what the old one kept.
 - **`docker compose`**: fetch `docker-compose.yml` again, then run `docker compose up -d
   --remove-orphans`. The service is called `swarmdeck` now and the old `phone-torrent` one goes; the
-  downloads stay, in the same `downloads` volume. The old image name keeps receiving updates for a
-  while, so a compose file not fetched again still works.
+  downloads stay, in the same `downloads` volume. The image is `ghcr.io/maxgfr/swarmdeck`: the old
+  `ghcr.io/maxgfr/phone-torrent` is gone, and a compose file still naming it no longer pulls.
 - **`docker run`**: the new command names a `swarmdeck` volume. Keep `-v phone-torrent:/data` to go on
   with the old one, or copy it over first (see [`server/README.md`](server/README.md)).
 - **The Cloudflare Workers** keep their names (`phone-torrent`, `phone-torrent-proxy`): a renamed
@@ -455,7 +457,10 @@ its filters, a sort that keeps ties in place either way and puts ep9 before ep10
 its settings read back, and read as the defaults from storage that throws; folders dropped, read in
 batches all the way down, an empty one giving nothing, their paths put back after crossing to another
 open copy and making the same info hash; and files written into a folder, with names any system takes,
-and a stream that comes up short refused without leaving a file cut short behind.
+and a stream that comes up short refused without leaving a file cut short behind. And the upgrade from
+Phone Torrent (in `test/e2e.mjs`): an origin prepared as the old version left it — its settings, the
+list's layout, a paused torrent in its database, a share in its inbox — opened by Swarmdeck, which
+moves all of it to the new names, removes the old ones, and finds it all again after a reload.
 
 `test/e2e.mjs` boots a WebSocket tracker and a static server, seeds a two‑file torrent through the
 UI of one browser context and downloads it in a second, phone‑sized one — the real UI throughout. It

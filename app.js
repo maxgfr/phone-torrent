@@ -28,25 +28,42 @@ const OLD_DEFAULT_TRACKERS = [
 ];
 const RETIRED_TRACKERS = ['wss://tracker.btorrent.xyz', 'wss://tracker.files.fm:7073/announce'];
 
-/*
- * Where this app keeps things in the browser, under the name it had before Swarmdeck: Phone Torrent.
- * Kept on purpose. Renamed, the settings, the presets and the list of torrents would start empty, and
- * cleanOrphanStores, finding no record for the pieces in OPFS, would delete every one of them. The
- * locks and the channel are shared by every open copy, and a tab still on the old version and one on
- * this one must keep agreeing on which of them runs the torrents (see LEAD_LOCK). sw.js and saver.js
- * keep their own the same way, as does window.__phoneTorrent below, which the tests read.
- */
-const SETTINGS_KEY = 'phone-torrent:settings';
-const DB_NAME = 'phone-torrent';
+/* Where this app keeps things in the browser. */
+const SETTINGS_KEY = 'swarmdeck:settings';
+const DB_NAME = 'swarmdeck';
 const DB_STORE = 'torrents';
-const INBOX_CACHE = 'phone-torrent-inbox';
-const TRACKER_LIST_KEY = 'phone-torrent:trackerlist';
-const RD_OWED_KEY = 'phone-torrent:rd-owed';
-const IOS_HINT_KEY = 'phone-torrent:ios-hint';
-const TAB_LOCK = 'phone-torrent:open-tab';
-const LEAD_LOCK = 'phone-torrent:lead';
-const CHANNEL_NAME = 'phone-torrent';
-const streamChannel = (id) => `phone-torrent:stream:${id}`;
+const INBOX_CACHE = 'swarmdeck-inbox';
+const TRACKER_LIST_KEY = 'swarmdeck:trackerlist';
+const RD_OWED_KEY = 'swarmdeck:rd-owed';
+const IOS_HINT_KEY = 'swarmdeck:ios-hint';
+const TAB_LOCK = 'swarmdeck:open-tab';
+const LEAD_LOCK = 'swarmdeck:lead';
+const CHANNEL_NAME = 'swarmdeck';
+const streamChannel = (id) => `swarmdeck:stream:${id}`;
+
+/*
+ * Before Swarmdeck the app was Phone Torrent, and kept all this under that name. What a browser still
+ * holds there is moved over once, as the app starts, so nothing is lost: the keys of localStorage here,
+ * synchronously, before the settings are read; the list of torrents as the database is first opened
+ * (openDb), before cleanOrphanStores could take their pieces in OPFS for orphans; a share still waiting
+ * in the old inbox as the inbox is read. Each old name goes once it is moved.
+ */
+const OLD_KEY_PREFIX = 'phone-torrent:';
+const OLD_DB_NAME = 'phone-torrent';
+const OLD_INBOX_CACHE = 'phone-torrent-inbox';
+
+try {
+  const old = [];
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i);
+    if (key?.startsWith(OLD_KEY_PREFIX)) old.push(key);
+  }
+  for (const key of old) {
+    const renamed = `swarmdeck:${key.slice(OLD_KEY_PREFIX.length)}`;
+    if (localStorage.getItem(renamed) === null) localStorage.setItem(renamed, localStorage.getItem(key));
+    localStorage.removeItem(key);
+  }
+} catch { /* no storage here: nothing to move either */ }
 const DEBUG_NAMESPACES = 'webtorrent*,bittorrent-tracker*,simple-peer*';
 const TRACKER_LIST_TTL = 6 * 60 * 60 * 1000;
 const DEFAULT_TRACKER_LIST_URL = 'https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_all_ws.txt';
@@ -447,18 +464,69 @@ let dbPromise = null;
 function openDb() {
   if (!dbPromise) {
     dbPromise = new Promise((resolve, reject) => {
+      let created = false;
       const req = indexedDB.open(DB_NAME, 1);
-      req.onupgradeneeded = () => req.result.createObjectStore(DB_STORE, { keyPath: 'infoHash' });
-      req.onsuccess = () => {
+      req.onupgradeneeded = () => {
+        created = true;
+        req.result.createObjectStore(DB_STORE, { keyPath: 'infoHash' });
+      };
+      req.onsuccess = async () => {
         const db = req.result;
         db.onversionchange = () => { db.close(); dbPromise = null; };
         db.onclose = () => { dbPromise = null; };
+        // Made just now: the torrents Phone Torrent remembered come into it before anything reads it.
+        if (created) await adoptOldDb(db);
         resolve(db);
       };
       req.onerror = () => { dbPromise = null; reject(req.error); };
     });
   }
   return dbPromise;
+}
+
+/** The records of Phone Torrent's database, or [] when there is none: never makes one by asking. */
+function oldDbRecords() {
+  return new Promise((resolve) => {
+    let req;
+    try {
+      req = indexedDB.open(OLD_DB_NAME);
+    } catch {
+      resolve([]);
+      return;
+    }
+    // Asked to be made: there was none. Called off, so none is made.
+    req.onupgradeneeded = () => req.transaction.abort();
+    req.onerror = (event) => {
+      event.preventDefault?.();
+      resolve([]);
+    };
+    req.onsuccess = () => {
+      const old = req.result;
+      if (!old.objectStoreNames.contains(DB_STORE)) {
+        old.close();
+        resolve([]);
+        return;
+      }
+      const all = old.transaction(DB_STORE, 'readonly').objectStore(DB_STORE).getAll();
+      all.onsuccess = () => { old.close(); resolve(all.result || []); };
+      all.onerror = () => { old.close(); resolve([]); };
+    };
+  });
+}
+
+/** Phone Torrent's list of torrents, moved into this database; then its own goes. */
+async function adoptOldDb(db) {
+  const records = await oldDbRecords();
+  if (records.length) {
+    await new Promise((resolve) => {
+      const tx = db.transaction(DB_STORE, 'readwrite');
+      for (const record of records) tx.objectStore(DB_STORE).put(record);
+      tx.oncomplete = resolve;
+      tx.onerror = resolve;
+      tx.onabort = resolve;
+    });
+  }
+  try { indexedDB.deleteDatabase(OLD_DB_NAME); } catch { /* it stays, and is harmless */ }
 }
 
 function runTx(mode, fn) {
@@ -5964,22 +6032,27 @@ async function takeSharedInbox() {
   let usable = 0;
   if (!('caches' in window)) return usable;
   try {
-    const cache = await caches.open(INBOX_CACHE);
-    const keys = await cache.keys();
-    for (const req of keys) {
-      const res = await cache.match(req);
-      await cache.delete(req);
-      if (!res) continue;
-      if (res.headers.get('X-Kind') === 'torrent') {
-        usable += 1;
-        const name = safeDecode(res.headers.get('X-Name') || 'shared.torrent');
-        if (confirmExternalAdd(`the shared file "${name}"`)) await addTorrentFiles([new File([await res.blob()], name)]);
-      } else {
-        const id = parseSharedText(await res.text());
-        if (!id) continue;
-        usable += 1;
-        if (confirmExternalAdd(describeTorrentId(id))) await tryAddTorrent(id);
+    // A share parked by Phone Torrent's worker, before it was replaced, is still a share.
+    const inboxes = [INBOX_CACHE, ...(await caches.has(OLD_INBOX_CACHE) ? [OLD_INBOX_CACHE] : [])];
+    for (const inbox of inboxes) {
+      const cache = await caches.open(inbox);
+      const keys = await cache.keys();
+      for (const req of keys) {
+        const res = await cache.match(req);
+        await cache.delete(req);
+        if (!res) continue;
+        if (res.headers.get('X-Kind') === 'torrent') {
+          usable += 1;
+          const name = safeDecode(res.headers.get('X-Name') || 'shared.torrent');
+          if (confirmExternalAdd(`the shared file "${name}"`)) await addTorrentFiles([new File([await res.blob()], name)]);
+        } else {
+          const id = parseSharedText(await res.text());
+          if (!id) continue;
+          usable += 1;
+          if (confirmExternalAdd(describeTorrentId(id))) await tryAddTorrent(id);
+        }
       }
+      if (inbox === OLD_INBOX_CACHE) await caches.delete(OLD_INBOX_CACHE);
     }
   } catch { /* ignore */ }
   return usable;
@@ -6181,5 +6254,5 @@ if ('launchQueue' in window && typeof window.launchQueue?.setConsumer === 'funct
   });
 }
 
-// Expose for debugging and tests, under the name the tests have always used (see SETTINGS_KEY).
-window.__phoneTorrent = { editor, seedOptions, routeDrop, createTorrent, hashPieces, get follower() { return follower; }, get settings() { return settings; }, client, views, saver, started, addTorrent, askTrackersNow, seedFiles, torrentReach, unreachableReason, cloudCtx, CLOUD_PROVIDERS, cloudSend, refreshCloudLibrary, cloudRemoveItem, keyRefused, effectiveTrackers, refreshTrackerList, fetchMetadataFallback, verifyTorrentBytes, findInfoSpan, runNetworkCheck, cleanOrphanStores, isComplete, get opfsOk() { return opfsOk; } };
+// Expose for debugging and tests.
+window.__swarmdeck = { editor, seedOptions, routeDrop, createTorrent, hashPieces, get follower() { return follower; }, get settings() { return settings; }, client, views, saver, started, addTorrent, askTrackersNow, seedFiles, torrentReach, unreachableReason, cloudCtx, CLOUD_PROVIDERS, cloudSend, refreshCloudLibrary, cloudRemoveItem, keyRefused, effectiveTrackers, refreshTrackerList, fetchMetadataFallback, verifyTorrentBytes, findInfoSpan, runNetworkCheck, cleanOrphanStores, isComplete, get opfsOk() { return opfsOk; } };
