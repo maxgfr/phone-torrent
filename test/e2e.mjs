@@ -1015,6 +1015,27 @@ try {
     await desk.evaluate(() => window.__phoneTorrent.started);
     assert.equal(await desk.isVisible('#list-tools'), false, 'no torrents: nothing to search');
     assert.equal(await desk.$eval('#torrent-list', (e) => e.getBoundingClientRect().height), 0, 'and no empty list drawn as a line under the card');
+    // The pane beside holds what to do instead, square with the card and with the top bar, at every width.
+    for (const width of [1024, 1280, 1700]) {
+      await desk.setViewportSize({ width, height: 800 });
+      const edges = await desk.evaluate(() => {
+        const box = (sel) => document.querySelector(sel).getBoundingClientRect();
+        return { card: box('#drop-zone'), pane: box('#detail-empty'), logo: box('.brand img'), gear: box('#settings-btn'), sentence: box('#empty-state').height };
+      });
+      assert.ok(Math.abs(edges.pane.top - edges.card.top) <= 1 && Math.abs(edges.pane.bottom - edges.card.bottom) <= 1, `${width}px: the empty pane (${edges.pane.top}–${edges.pane.bottom}) as tall as the card (${edges.card.top}–${edges.card.bottom})`);
+      assert.ok(Math.abs(edges.card.left - edges.logo.left) <= 1 && Math.abs(edges.pane.right - edges.gear.right) <= 1, `${width}px: the card under the logo, the pane's edge under Settings`);
+      assert.equal(edges.sentence, 0, `${width}px: no sentence left under the card, the pane says it`);
+    }
+    for (const colorScheme of ['light', 'dark']) {
+      await desk.emulateMedia({ colorScheme });
+      const [text, background] = await desk.evaluate(() => [getComputedStyle(document.querySelector('.detail-empty-text')).color, getComputedStyle(document.body).backgroundColor]);
+      assert.ok(contrast(text, background) >= 4.5, `${colorScheme}: the empty pane's text at ${contrast(text, background).toFixed(2)}:1`);
+    }
+    await desk.emulateMedia({ colorScheme: 'light' });
+    await desk.setViewportSize({ width: 390, height: 800 });
+    assert.equal(await desk.$eval('#detail-empty', (e) => getComputedStyle(e).display), 'none', 'on a phone, the sentence under the card as before');
+    assert.equal(await desk.isVisible('#empty-state'), true);
+    await desk.setViewportSize({ width: 1280, height: 800 });
     await desk.click('.tab[data-tab="seed"]');
     const seeds = [
       [{ name: 'The.Show.S01E01.mkv', mimeType: 'video/x-matroska', buffer: Buffer.alloc(30000, 1) }],
@@ -1033,7 +1054,8 @@ try {
     assert.equal(await desk.$eval('.tl-row.focused .tl-title', (e) => e.textContent), 'Holiday photos', 'and marked in the list');
     await desk.click('.tl-row:has-text("notes.txt")');
     assert.deepEqual(await openCards(), ['notes.txt'], 'a row clicked opens its torrent');
-    log('a computer: the list beside one open torrent, the newest on top, a click to open another');
+    assert.equal(await desk.isVisible('#detail-empty'), false, 'with torrents, the pane shows the one open, not the empty state');
+    log('a computer: the list beside one open torrent, the newest on top, a click to open another; before any, a pane square with the card saying what to do');
 
     // The two panes side by side at every common width, nothing scrolling sideways; under 1024px, one
     // column again, with every card and no list.

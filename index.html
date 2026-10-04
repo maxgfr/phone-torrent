@@ -249,7 +249,13 @@
     </div>
 
     <section class="detail-pane" id="detail-pane" aria-label="The torrent open">
-      <p id="detail-empty" class="empty detail-empty" hidden>Pick a torrent in the list to see its files, its links and its details here.</p>
+      <!-- On a computer, with no torrent yet: where they will open, and the ways in a computer adds. -->
+      <div id="detail-empty" class="detail-empty" hidden>
+        <svg class="detail-empty-icon" viewBox="0 0 24 24" width="28" height="28" aria-hidden="true"><path fill="currentColor" d="M19 9h-4V3H9v6H5l7 7 7-7ZM5 18v2h14v-2H5Z"/></svg>
+        <h2 class="detail-empty-title">No torrents yet</h2>
+        <p class="detail-empty-text">Drop a .torrent file, a magnet link, or files and folders to share anywhere on this window, paste a magnet, or start from the card on the left.</p>
+        <p class="detail-empty-keys"><kbd>?</kbd> keyboard shortcuts</p>
+      </div>
       <!-- Not a live region: its speeds and percentages change every 750 ms, and a screen reader would
            read each change aloud. What deserves announcing (finished, errors) goes to the toasts. -->
       <section id="torrents" class="torrents" aria-label="Torrents"></section>

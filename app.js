@@ -3218,7 +3218,8 @@ function renderList() {
   els.listTools.hidden = all.length === 0;
   // Nothing to list: no list either, or its border alone is drawn as a line under the card.
   els.torrentList.hidden = all.length === 0;
-  els.detailEmpty.hidden = all.length === 0 || Boolean(focusedKey);
+  // On a computer, the pane beside the list says what to do while it has no torrent to show.
+  els.detailEmpty.hidden = all.length > 0 && Boolean(focusedKey);
   renderBulkBar();
   for (const option of els.listFilter.options) {
     const filter = FILTERS.find((f) => f.key === option.value);
