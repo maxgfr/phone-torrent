@@ -224,6 +224,15 @@
       </span>
     </section>
 
+    <div class="bulk-bar" id="bulk-bar" role="toolbar" aria-label="The torrents selected" hidden>
+      <span id="bulk-count" class="bulk-count" role="status"></span>
+      <button id="bulk-pause" class="btn small" type="button">Pause</button>
+      <button id="bulk-resume" class="btn small" type="button">Resume</button>
+      <button id="bulk-save" class="btn small" type="button">Save .torrent</button>
+      <button id="bulk-remove" class="btn small danger" type="button">Remove</button>
+      <button id="bulk-clear" class="btn small ghost" type="button">Clear</button>
+    </div>
+
     <!-- The speeds in it change every 750 ms: not a live region, like the cards. -->
     <div id="torrent-list" class="torrent-list" role="grid" aria-label="Torrent list" aria-multiselectable="true"></div>
 

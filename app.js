@@ -6,7 +6,7 @@ import { parseMagnet, createTorrent, ruleFor, ruleProblems } from './lib/torrent
 import { hashPieces } from './lib/torrent-hash.js';
 import { createOptionsUI, creationOptions, normalizeCreate } from './lib/create-options.js';
 import { createPresetsUI, normalizePresets } from './lib/presets.js';
-import { FILTERS, SORTS, rowMatches, sortRows, loadListPrefs, saveListPrefs, createTorrentList } from './lib/torrent-list.js';
+import { FILTERS, SORTS, rowMatches, sortRows, rangeKeys, loadListPrefs, saveListPrefs, createTorrentList } from './lib/torrent-list.js';
 
 const DEFAULT_CLOUD_PROVIDER = 'torbox';
 const CLOUD_POLL_MS = 5000;
@@ -170,6 +170,13 @@ const els = {
   viewTable: $('#view-table'),
   torrentList: $('#torrent-list'),
   detailEmpty: $('#detail-empty'),
+  bulkBar: $('#bulk-bar'),
+  bulkCount: $('#bulk-count'),
+  bulkPause: $('#bulk-pause'),
+  bulkResume: $('#bulk-resume'),
+  bulkSave: $('#bulk-save'),
+  bulkRemove: $('#bulk-remove'),
+  bulkClear: $('#bulk-clear'),
 };
 
 /* ---------- settings ---------- */
@@ -3088,7 +3095,10 @@ function refreshView(view) {
 let pendingKeys = 0;
 function keyOf(view) {
   const key = view.torrent.infoHash || view.pendingKey || (view.pendingKey = `pending-${++pendingKeys}`);
-  if (view.key && view.key !== key && focusedKey === view.key) focusedKey = key;
+  if (view.key && view.key !== key) {
+    if (focusedKey === view.key) focusedKey = key;
+    if (selection.delete(view.key)) selection.add(key);
+  }
   view.key = key;
   return key;
 }
@@ -3123,7 +3133,24 @@ function rowOf(view, { pct = 0, progress = 0, complete = false, state = '', stuc
 }
 
 const list = createTorrentList(els.torrentList, {
-  onActivate: (key) => focusKey(key),
+  // A click opens the torrent; Ctrl or Cmd adds it to the selection or takes it out, Shift selects
+  // every row from the last one clicked. The boxes do the same as Ctrl and Shift.
+  onActivate: (key, { shift, toggle }) => {
+    if (shift) selectRange(key);
+    else if (toggle) toggleSelected(key);
+    else anchorKey = key;
+    focusKey(key);
+  },
+  onCheck: (key, checked, { shift }) => {
+    if (key === '*') {
+      selection = checked ? new Set(listedKeys) : new Set();
+    } else if (shift) {
+      selectRange(key);
+    } else {
+      toggleSelected(key, checked);
+    }
+    renderList();
+  },
   onSort: (sort) => {
     const same = listPrefs.sort === sort;
     setListPrefs({ sort, dir: same ? (listPrefs.dir === 'asc' ? 'desc' : 'asc') : SORTS.find((s) => s.key === sort).dir });
@@ -3135,6 +3162,9 @@ let listQuery = '';
 let focusedKey = null;
 /** The rows as last listed, in order: where the open one goes when it is removed. */
 let listedKeys = [];
+/** The torrents selected, for the bulk bar, by their rows' keys; and the row a Shift-click counts from. */
+let selection = new Set();
+let anchorKey = null;
 let listFrame = 0;
 
 /** Redrawn once a frame at most: refreshView runs for every card at every tick. */
@@ -3156,6 +3186,7 @@ function renderList() {
     focusedKey = near.find((key) => visible.some((row) => row.key === key)) || visible[0]?.key || all[0]?.key || null;
   }
   listedKeys = visible.map((row) => row.key);
+  for (const key of selection) if (!all.some((row) => row.key === key)) selection.delete(key);
   // The cards follow, on a phone: in the order chosen, and only the ones the search and filter keep.
   // They are never moved in the page, whose order is what the copies of the app tell each other.
   const order = new Map(sortRows(all, listPrefs).map((row, i) => [row.key, String(i)]));
@@ -3166,6 +3197,7 @@ function renderList() {
     view.el.classList.toggle('focused', view.key === focusedKey);
   }
   list.render(visible, {
+    selected: selection,
     focused: focusedKey,
     sort: listPrefs.sort,
     dir: listPrefs.dir,
@@ -3173,11 +3205,43 @@ function renderList() {
   });
   els.listTools.hidden = all.length === 0;
   els.detailEmpty.hidden = all.length === 0 || Boolean(focusedKey);
+  renderBulkBar();
   for (const option of els.listFilter.options) {
     const filter = FILTERS.find((f) => f.key === option.value);
     const text = `${filter.label} (${all.filter((row) => rowMatches(row, { filter: filter.key })).length})`;
     if (option.textContent !== text) option.textContent = text;
   }
+}
+
+function toggleSelected(key, on = !selection.has(key)) {
+  if (on) selection.add(key);
+  else selection.delete(key);
+  anchorKey = key;
+}
+
+/** Shift: every row listed from the last one clicked to this one, added to the selection. */
+function selectRange(key) {
+  for (const k of rangeKeys(listedKeys, anchorKey ?? focusedKey, key)) selection.add(k);
+}
+
+/** The torrents selected, in the order listed. */
+function selectedTorrents() {
+  return listedKeys.filter((key) => selection.has(key)).map(torrentOfKey).filter(Boolean);
+}
+
+function torrentOfKey(key) {
+  return [...views.values()].find((v) => v.key === key)?.torrent || null;
+}
+
+function renderBulkBar() {
+  const picked = selectedTorrents();
+  els.bulkBar.hidden = picked.length === 0;
+  if (!picked.length) return;
+  const text = `${picked.length} selected`;
+  if (els.bulkCount.textContent !== text) els.bulkCount.textContent = text;
+  els.bulkPause.disabled = !picked.some((t) => !t.paused);
+  els.bulkResume.disabled = !picked.some((t) => t.paused);
+  els.bulkSave.disabled = !picked.some((t) => t.metadata);
 }
 
 /** Open this row's torrent beside the list. */
@@ -3636,16 +3700,77 @@ function removeView(torrent) {
   scheduleList();
 }
 
-async function removeTorrent(torrent) {
-  const view = views.get(torrent);
-  const name = torrent.name || torrent.infoHash || 'this torrent';
-  const message = view && view.seeding
-    ? `Stop sharing "${name}"?`
-    : `Remove "${name}"?\n\nIts downloaded data will be deleted from the browser. Files you already saved to this device are not affected.`;
-  if (!askUser(() => confirm(message))) return;
-  if (torrent.remote) await tellLead({ op: 'remove', ...refOf(torrent) });
-  else await dropTorrent(torrent);
+function removeTorrent(torrent) {
+  return removeTorrents([torrent]);
 }
+
+/** Remove these torrents and delete their data, asked once for all of them. */
+async function removeTorrents(torrents) {
+  const list = torrents.filter((t) => views.has(t));
+  if (!list.length) return;
+  const seeds = list.filter((t) => views.get(t).seeding).length;
+  let message;
+  if (list.length === 1) {
+    const name = list[0].name || list[0].infoHash || 'this torrent';
+    message = seeds
+      ? `Stop sharing "${name}"?`
+      : `Remove "${name}"?\n\nIts downloaded data will be deleted from the browser. Files you already saved to this device are not affected.`;
+  } else {
+    message = seeds === list.length
+      ? `Stop sharing these ${list.length} torrents?`
+      : `Remove these ${list.length} torrents?\n\nTheir downloaded data will be deleted from the browser. Files you already saved to this device are not affected.`;
+  }
+  if (!askUser(() => confirm(message))) return;
+  for (const torrent of list) {
+    if (torrent.remote) await tellLead({ op: 'remove', ...refOf(torrent) });
+    else await dropTorrent(torrent);
+  }
+}
+
+/** Pause or resume, whichever it is not already: through togglePause, which a follower hands to the copy running it. */
+function setPaused(torrent, paused) {
+  if (views.has(torrent) && Boolean(torrent.paused) !== paused) togglePause(torrent);
+}
+
+/**
+ * The .torrent of each of these: one is saved as it is, several in one zip. A magnet still waiting
+ * for its metadata has no .torrent yet, and is said to be left out.
+ */
+async function saveTorrentFiles(torrents) {
+  const ready = torrents.filter((t) => t.metadata);
+  const waiting = torrents.length - ready.length;
+  if (waiting) toast(`${waiting} of them ${waiting === 1 ? 'has' : 'have'} no .torrent yet: ${waiting === 1 ? 'it is' : 'they are'} still waiting for metadata.`);
+  if (ready.length === 1) return saveTorrentFile(ready[0]);
+  if (!ready.length) return undefined;
+  const used = new Set();
+  const entries = [];
+  for (const torrent of ready) {
+    const bytes = await torrentBytesOf(torrent).catch(() => null);
+    if (!bytes) continue;
+    const base = `${torrent.name || torrent.infoHash}`.replace(/[\\/:*?"<>|\u0000-\u001f]+/g, '_') || torrent.infoHash;
+    let name = `${base}.torrent`;
+    for (let n = 2; used.has(name.toLowerCase()); n++) name = `${base} (${n}).torrent`;
+    used.add(name.toLowerCase());
+    entries.push({ name, input: bytes, lastModified: new Date() });
+  }
+  const zipName = `${entries.length} torrents.zip`;
+  try {
+    await saver.save({ name: zipName, stream: () => makeZip(entries) });
+    toast(`Saved ${zipName}`);
+  } catch (err) {
+    toast(`Could not save the .torrent files: ${err.message}`, { error: true });
+  }
+  return undefined;
+}
+
+els.bulkPause.addEventListener('click', () => { for (const t of selectedTorrents()) setPaused(t, true); renderList(); });
+els.bulkResume.addEventListener('click', () => { for (const t of selectedTorrents()) setPaused(t, false); renderList(); });
+els.bulkSave.addEventListener('click', () => saveTorrentFiles(selectedTorrents()));
+els.bulkRemove.addEventListener('click', () => removeTorrents(selectedTorrents()));
+els.bulkClear.addEventListener('click', () => {
+  selection.clear();
+  renderList();
+});
 
 /** Remove a torrent and delete its data: asked for here, or in a copy that follows this one. */
 async function dropTorrent(torrent) {

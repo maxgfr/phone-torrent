@@ -564,6 +564,14 @@ body {
   .list-search { flex-basis: 100%; }
   .list-tools select { flex: 1 1 0; }
 }
+/* What to do with the torrents selected in the list. */
+.bulk-bar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 10px 8px 14px;
+  background: var(--row-selected); border: 1px solid var(--border); border-radius: 12px;
+}
+.bulk-count { font-weight: 600; font-size: 0.9rem; margin-right: auto; }
+.bulk-bar .btn.danger { background: var(--card); }
+
 /* What the search or the filter leaves out, on a phone; the order chosen comes from `order`. */
 .torrents .torrent.filtered { display: none; }
 

@@ -1046,6 +1046,73 @@ try {
     assert.deepEqual(cardOrder, ['notes.txt', 'Holiday photos', 'The.Show.S01E01.mkv'], 'the cards in the same order');
     log('search, filters with their counts, order and its direction, and sortable headers that say so');
 
+    // Selected, several at once: a click opens one, Shift-click takes every row up to it, Ctrl-click
+    // one more or one less, the boxes the same; the bar acts on all of them.
+    const selected = () => desk.$$eval('.tl-row.selected .tl-title', (els) => els.map((e) => e.textContent));
+    await desk.click('.tl-row:has-text("notes.txt")');
+    await desk.click('.tl-row:has-text("The.Show")', { modifiers: ['Shift'] });
+    assert.deepEqual(await selected(), ['notes.txt', 'Holiday photos', 'The.Show.S01E01.mkv'], 'Shift-click: every row from the one clicked before');
+    assert.equal(await desk.textContent('#bulk-count'), '3 selected');
+    await desk.click('.tl-row:has-text("Holiday")', { modifiers: ['ControlOrMeta'] });
+    assert.deepEqual(await selected(), ['notes.txt', 'The.Show.S01E01.mkv'], 'Ctrl-click: one less');
+    assert.equal(await desk.$eval('.tl-row:has-text("Holiday") input', (e) => e.checked), false, 'its box unticked with it');
+    await desk.click('#bulk-pause');
+    await waitFor(() => desk.evaluate(() => [...window.__phoneTorrent.views.values()].filter((v) => v.torrent.paused).map((v) => v.torrent.name).sort().join()).then((n) => n === 'The.Show.S01E01.mkv,notes.txt'), { label: 'the two selected paused', timeout: 5000 });
+    assert.equal(await desk.isDisabled('#bulk-pause'), true, 'nothing left to pause among them');
+    await desk.click('#bulk-resume');
+    await waitFor(() => desk.evaluate(() => [...window.__phoneTorrent.views.values()].every((v) => !v.torrent.paused)), { label: 'and resumed', timeout: 5000 });
+    await desk.click('.tl-row:has-text("Holiday") input');
+    const [bundle] = await Promise.all([desk.waitForEvent('download'), desk.click('#bulk-save')]);
+    assert.equal(bundle.suggestedFilename(), '3 torrents.zip', 'their .torrent files, in one zip');
+    const zipped = readFileSync(await bundle.path());
+    assert.equal(zipped.subarray(0, 2).toString(), 'PK');
+    for (const name of ['notes.txt.torrent', 'Holiday photos.torrent', 'The.Show.S01E01.mkv.torrent']) assert.ok(zipped.includes(Buffer.from(name)), `${name} in it`);
+    await desk.click('.tl-head .tl-check input');
+    assert.deepEqual(await selected(), [], 'the box in the header: none, as all were');
+    assert.equal(await desk.isVisible('#bulk-bar'), false, 'and the bar goes');
+    log('selection: Shift- and Ctrl-click, the boxes, bulk pause, resume and .torrent files in one zip');
+
+    // Another open copy follows this one: the same rows, and what it does to several is done here.
+    const follower = await deskCtx.newPage();
+    follower.on('pageerror', (e) => console.error('desktop follower page error:', e));
+    await follower.goto(site.url);
+    await follower.waitForFunction(() => window.__phoneTorrent?.follower === true, null, { timeout: 15000 });
+    const followerTitles = () => follower.$$eval('.tl-row .tl-title', (els) => els.map((e) => e.textContent));
+    await waitFor(async () => (await followerTitles()).join() === (await titles()).join(), { label: 'the follower to list the same rows', timeout: 15000 });
+    await follower.click('.tl-row:has-text("notes.txt") input');
+    await follower.click('.tl-row:has-text("Holiday") input');
+    await follower.click('#bulk-pause');
+    await waitFor(() => desk.evaluate(() => [...window.__phoneTorrent.views.values()].filter((v) => v.torrent.paused).map((v) => v.torrent.name).sort().join()).then((n) => n === 'Holiday photos,notes.txt'), { label: 'the follower\'s bulk pause run here', timeout: 10000 });
+    await follower.click('#bulk-resume');
+    await waitFor(() => desk.evaluate(() => [...window.__phoneTorrent.views.values()].every((v) => !v.torrent.paused)), { label: 'and its resume', timeout: 10000 });
+    await follower.close();
+    log('a follower lists the same rows, and its bulk pause and resume run in the copy that leads');
+
+    // Two downloads removed at once: one question for both, and both gone from storage.
+    let asked = 0;
+    desk.on('dialog', (d) => { if (d.type() === 'confirm') asked += 1; });
+    await desk.click('.tab[data-tab="download"]');
+    for (const hash of ['1111111111111111111111111111111111111111', '2222222222222222222222222222222222222222']) {
+      await desk.fill('#magnet-input', `magnet:?xt=urn:btih:${hash}&dn=pending-${hash[0]}`);
+      await desk.click('#magnet-form button[type="submit"]');
+    }
+    const stored = () => desk.evaluate(() => new Promise((resolve, reject) => {
+      const open = indexedDB.open('phone-torrent');
+      open.onerror = () => reject(open.error);
+      open.onsuccess = () => {
+        const all = open.result.transaction('torrents', 'readonly').objectStore('torrents').getAll();
+        all.onsuccess = () => { resolve(all.result.map((r) => r.infoHash).sort()); open.result.close(); };
+      };
+    }));
+    await waitFor(async () => (await stored()).length === 2, { label: 'the two magnets remembered', timeout: 10000 });
+    await desk.click('.tl-row:has-text("pending-1") input');
+    await desk.click('.tl-row:has-text("pending-2") input');
+    await desk.click('#bulk-remove');
+    await waitFor(async () => (await stored()).length === 0, { label: 'both forgotten', timeout: 10000 });
+    assert.equal(asked, 1, 'asked once for the two');
+    await waitFor(() => desk.$$eval('.tl-row', (rows) => rows.length).then((n) => n === 3), { label: 'only they gone from the list', timeout: 5000 });
+    log('two removed at once: one question, both gone from storage');
+
     // Cards or table, as left: after a reload too. At phone width there is no list to show either way.
     assert.equal(await desk.$eval('#torrent-list', (e) => e.classList.contains('table')), true);
     await desk.reload();
