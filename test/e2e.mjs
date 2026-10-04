@@ -1193,6 +1193,65 @@ try {
     assert.equal(await ed.isVisible('#ed-save'), true, 'and back to editing');
     await ed.click('#ed-close');
     log('editor: files checked against a torrent — all good, a changed byte as one bad piece, a missing file named');
+
+    // A name ending in a space is what its torrent says, not a change: untouched, the same torrent.
+    const spaced = makeTorrent(noise(20000, 79), { name: 'Spaced name ', trackers: ['wss://old.example'] });
+    await ed.setInputFiles('#edit-file-input', { name: 'spaced.torrent', mimeType: 'application/x-bittorrent', buffer: spaced.buf });
+    await ed.waitForSelector('#editor-dialog[open][data-mode="torrent"]');
+    await ed.fill('#ed-trackers', 'wss://new.example');
+    await new Promise((r) => setTimeout(r, 400));
+    assert.equal(await ed.isVisible('#editor-new'), false, 'a name with a space at its end, untouched, is no new torrent');
+    assert.equal(infoHashOfFile((await savedFrom(ed)).buf), spaced.infoHash, 'and saved, keeps its info hash');
+    await ed.click('#ed-close');
+
+    // A private torrent, then a magnet: the magnet's own Copy magnet, not the private one's refusal.
+    await ed.setInputFiles('#edit-file-input', { name: 'private.torrent', mimeType: 'application/x-bittorrent', buffer: makeTorrent(noise(20000, 80), { name: 'secret.bin', trackers: ['https://private.example/announce/key'], private: true }).buf });
+    await ed.waitForSelector('#editor-dialog[open][data-mode="torrent"]');
+    await waitFor(() => ed.isDisabled('#ed-copy-magnet'), { label: 'no magnet for a private torrent', timeout: 5000 });
+    await ed.click('#ed-close');
+    const later = makeTorrent(noise(20000, 81), { name: 'later.bin' });
+    await ed.fill('#edit-magnet-input', `magnet:?xt=urn:btih:${later.infoHash}&dn=later`);
+    await ed.click('#edit-magnet-form button[type="submit"]');
+    await ed.waitForSelector('#editor-dialog[open][data-mode="magnet"]');
+    assert.equal(await ed.isDisabled('#ed-copy-magnet'), false, 'a magnet opened after a private torrent can be copied');
+
+    // Closed while its metadata is on the way: the editor stays closed when it arrives.
+    writeFileSync(path.join(TMP, `meta-${later.infoHash}.torrent`), later.buf);
+    let delivered = false;
+    await edCtx.route(`${site.url}test/.tmp/meta-${later.infoHash}.torrent`, async (route) => {
+      await new Promise((r) => setTimeout(r, 1500));
+      delivered = true;
+      await route.continue();
+    });
+    await ed.click('#ed-get-metadata');
+    await ed.click('#ed-close');
+    await waitFor(() => delivered, { label: 'the metadata to arrive', timeout: 10000 });
+    await new Promise((r) => setTimeout(r, 500));
+    assert.equal(await ed.evaluate(() => document.querySelector('#editor-dialog').open), false, 'closed, it does not open again by itself');
+
+    // A preset applied to a hybrid torrent leaves its identity locked.
+    const hybridPieces = createHash('sha1').update(noise(16384, 82)).digest();
+    const hybrid = bencode({ info: { name: 'hybrid.bin', length: 16384, 'piece length': 16384, pieces: hybridPieces, 'meta version': 2 } });
+    await ed.evaluate(() => window.__phoneTorrent.settings.presets.push({ id: 'src', name: 'With a source', trackers: [], source: 'SRC', private: true, webSeeds: [], comment: '', maxPiece: 0 }));
+    await ed.setInputFiles('#edit-file-input', { name: 'hybrid.torrent', mimeType: 'application/x-bittorrent', buffer: hybrid });
+    await ed.waitForSelector('#editor-dialog[open][data-mode="torrent"]');
+    await ed.selectOption('#ed-preset', { label: 'With a source' });
+    assert.equal(await ed.isDisabled('#ed-source'), true, 'its source stays locked');
+    assert.equal(await ed.isDisabled('#ed-private'), true, 'and its private flag');
+    assert.equal(await ed.isDisabled('#ed-save'), false, 'and it can still be saved');
+    await ed.click('#ed-close');
+
+    // Options changed in another open copy: this one's line says so, and goes on from them.
+    await ed.evaluate(() => {
+      const stored = JSON.parse(localStorage.getItem('phone-torrent:settings'));
+      stored.createOptions = { ...stored.createOptions, private: true, source: 'ELSEWHERE' };
+      const value = JSON.stringify(stored);
+      localStorage.setItem('phone-torrent:settings', value);
+      window.dispatchEvent(new StorageEvent('storage', { key: 'phone-torrent:settings', newValue: value }));
+    });
+    assert.match(await ed.textContent('#seed-options-summary'), /private.*source ELSEWHERE/, 'the options line follows another copy');
+    assert.equal(await ed.inputValue('#so-source'), 'ELSEWHERE');
+    log('editor: a trailing space kept, a magnet\'s Copy magnet after a private torrent, no reopening after a close, a hybrid locked through a preset, options from another copy');
     await edCtx.close();
   }
 
@@ -1207,7 +1266,9 @@ try {
       return out;
     };
     const content = made(200000, 76);
-    const settingsFor = ({ t, rtc }) => localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], trackerList: false, rtcConfig: rtc }));
+    // The top frame only: an init script runs in every frame, the saver's download frame included, and
+    // writing the settings from there is another copy saving them — which this page now follows.
+    const settingsFor = ({ t, rtc }) => { if (window === window.top) localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], trackerList: false, rtcConfig: rtc })); };
     const makerCtx = await browser.newContext({ acceptDownloads: true });
     const maker = await makerCtx.newPage();
     maker.on('pageerror', (e) => console.error('maker page error:', e));

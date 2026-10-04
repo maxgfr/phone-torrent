@@ -13,8 +13,8 @@ import {
 } from '../lib/torrent-meta.js';
 import { normalizePreset, normalizePresets, presetSummary } from '../lib/presets.js';
 import { hashInline } from '../lib/torrent-hash.js';
-import { matchFiles, checkTorrent } from '../lib/torrent-check.js';
-import { createSummary, creationOptions, normalizeCreate } from '../lib/create-options.js';
+import { matchFiles, checkTorrent, describeCheck } from '../lib/torrent-check.js';
+import { createSummary, creationOptions, creationProblems, normalizeCreate } from '../lib/create-options.js';
 import createTorrentPackage from 'create-torrent';
 import { bencode, makeTorrent } from './torrents.mjs';
 
@@ -387,6 +387,27 @@ const u8 = (b) => new Uint8Array(b.buffer, b.byteOffset, b.byteLength);
   const v2only = await readTorrent(u8(bencode({ info: { name: 'x', 'piece length': pieceLength, 'meta version': 2, 'file tree': { x: { '': { length: 5 } } } } })));
   await assert.rejects(checkTorrent(v2only, [new File(['hello'], 'x')], { hash }), /BitTorrent v2/);
   log('checking files: matched by folder, path or name; whole, a byte changed, a file missing, a file short');
+
+  // Every piece good is not "ready to seed" while a file is missing (an empty one has no piece) or
+  // has another size (a longer one is read only as far as the torrent goes).
+  const withEmpty = await readTorrent(u8(bencode({ info: { name: 'pair', 'piece length': pieceLength, pieces: Buffer.concat(pieces), files: [{ length: one.length, path: ['one.bin'] }, { length: two.length, path: ['sub', 'two.bin'] }, { length: 0, path: ['empty.txt'] }] } })));
+  const noEmpty = await checkTorrent(withEmpty, picked([['pair/one.bin', one], ['pair/sub/two.bin', two]]), { hash });
+  assert.equal(noEmpty.good, noEmpty.pieces);
+  assert.deepEqual(noEmpty.missingFiles, ['empty.txt']);
+  assert.doesNotMatch(describeCheck(noEmpty), /ready to seed/, 'a file missing is not ready to seed');
+  const longer = await checkTorrent(model, picked([['pair/one.bin', one], ['pair/sub/two.bin', Buffer.concat([two, Buffer.from('tail')])]]), { hash });
+  assert.equal(longer.good, longer.pieces);
+  assert.doesNotMatch(describeCheck(longer), /ready to seed/, 'nor a file of another size');
+  assert.match(describeCheck(whole), /ready to seed/);
+}
+
+/* ---------- warnings when making a torrent ---------- */
+{
+  const ptp = 'https://tracker.passthepopcorn.me/k/announce';
+  assert.deepEqual(creationProblems({ trackers: ptp, pieceMode: 'fixed', pieceSize: 64 * 2 ** 20 }), ['PTP takes pieces up to 16 MiB; these are 64 MiB.']);
+  assert.deepEqual(creationProblems({ pieceMode: 'fixed', pieceSize: 8 * 2 ** 20, maxPiece: 4 * 2 ** 20 }), ['The piece size, 8 MiB, is over the largest set, 4 MiB.']);
+  assert.deepEqual(creationProblems({ trackers: ptp }), [], 'Auto keeps to the rule by itself');
+  log('making a torrent: a fixed piece size over a tracker\'s largest, or over the one set, said');
 }
 
 console.log('\nAll .torrent workshop checks passed.');

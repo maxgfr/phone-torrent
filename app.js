@@ -2,7 +2,7 @@ import WebTorrent from './vendor/webtorrent.min.js';
 import { makeZip, predictLength } from './vendor/client-zip.js';
 import { saver } from './saver.js';
 import { createEditor } from './lib/editor.js';
-import { parseMagnet, createTorrent } from './lib/torrent-meta.js';
+import { parseMagnet, createTorrent, ruleFor, ruleProblems } from './lib/torrent-meta.js';
 import { hashPieces } from './lib/torrent-hash.js';
 import { createOptionsUI, creationOptions, normalizeCreate } from './lib/create-options.js';
 import { createPresetsUI, normalizePresets } from './lib/presets.js';
@@ -2553,6 +2553,12 @@ function sourceToId(record) {
 /** What WebTorrent's own seed wrote as "created by" ("WebTorrent/0208"), which sharing always wrote. */
 const CREATED_BY = `WebTorrent/${String(WebTorrent.VERSION || '').replace(/\d*./g, (v) => `0${v % 100}`.slice(-2)).slice(0, 4)}`;
 
+/** What the first tracker's rules find wrong with a torrent just made (its size, its pieces), said. */
+function warnRules(made, created) {
+  const problems = ruleProblems(ruleFor(made.trackers[0]?.[0] || ''), { torrentSize: created.bytes.length, pieceLength: created.pieceLength });
+  if (problems.length) toast(problems.join(' '), { error: true, timeout: 9000 });
+}
+
 /** What createTorrent is given for these Seed & share options. */
 function creationFor(options) {
   return creationOptions(options, { appTrackers: effectiveTrackers(), createdBy: CREATED_BY });
@@ -2594,6 +2600,7 @@ async function seedFiles(files, { name, options = settings.createOptions, picked
   // Removed while its files were being hashed.
   if (torrent.destroyed) return null;
   view.reach = torrentReach(created.bytes);
+  if (!handedOver) warnRules(made, created);
   // Files already being shared make the same torrent. Picked again to get the link back, that is
   // where it is.
   const existing = client.torrents.find((t) => t !== torrent && t.infoHash === created.infoHash);
@@ -2630,7 +2637,9 @@ async function seedFiles(files, { name, options = settings.createOptions, picked
 /** "Only make the .torrent": the same torrent sharing would make, saved to the device instead. */
 async function saveTorrentOf(files, { name, options = settings.createOptions } = {}) {
   toast('Making the .torrent…');
-  const created = await createTorrent(files, { ...creationFor(options), name, hash: hashPieces });
+  const made = creationFor(options);
+  const created = await createTorrent(files, { ...made, name, hash: hashPieces });
+  warnRules(made, created);
   const fileName = `${created.name.replace(/[\\/:*?"<>|\u0000-\u001f]+/g, '_') || 'torrent'}.torrent`;
   await saver.save({ name: fileName, size: created.bytes.length, stream: () => new Blob([created.bytes]).stream() });
   toast(`Saved ${fileName} (${created.infoHash}).`);
@@ -4319,6 +4328,8 @@ window.addEventListener('storage', (event) => {
   applyTrackers();
   applySpeedLimits();
   updateWakeLock();
+  // The Seed & share options, as the other copy left them: what the next share will use.
+  seedOptions.reload();
   if (JSON.stringify(settings.cloud) !== JSON.stringify(was.cloud)) {
     cloudAccountLine();
     refreshCloudLibrary({ quiet: true });

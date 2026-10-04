@@ -57,7 +57,9 @@ and saved to the device file by file or as one `.zip`.
   pieces or a size of your own, with a largest piece, and a private tracker's own table when its first
   tracker has one; private, source (the tracker's expected one unless you set another), comment, web
   seeds; no creation date, no *created by*; names to leave out (`*.nfo`); and **Only make the .torrent**,
-  which saves the very `.torrent` sharing would have shared, and shares nothing. They are remembered.
+  which saves the very `.torrent` sharing would have shared, and shares nothing. They are remembered,
+  and another open copy follows them. A piece size of your own over the largest the tracker (or you)
+  set is said before anything is made, and a `.torrent` larger than its tracker takes once it is.
 - **Share hands you the link.** Not a message saying it was copied: the app link and the magnet, both
   shown, selected and one tap from the clipboard — plus the system share sheet where there is one, and
   **Save .torrent**. Every torrent can be shared, not only the ones you seed — except a private one:
@@ -88,7 +90,9 @@ and saved to the device file by file or as one `.zip`.
   **⋯ → Check files…** checks files against the torrent open — picked one by one, or a whole folder
   where the browser can pick one: every piece hashed again off the page, with progress and a stop, and
   the result in words — how much is good, how many pieces are bad or missing, the files not found and
-  the ones of another size.
+  the ones of another size; "ready to seed" only when every piece is good and every file is there, at
+  its size. A field left as it was opened is written back as it was, byte for byte — a name ending in a
+  space, a comment with Windows line ends — so nothing untouched turns into a new torrent.
 - **Pause, resume, remove**, per‑torrent and total speeds, ETA, peer counts, and a details panel with
   the info hash, ratio, pieces, trackers and an event log. Pausing really pauses: a connection that
   was already in flight is dropped rather than allowed to resume the transfer — and it stays paused
@@ -184,8 +188,8 @@ Forward `6881` (TCP and UDP) and `6882` (UDP) and peers can connect to you, not 
 [`server/README.md`](server/README.md) documents the API and every setting.
 
 A phone that opens it at `http://<its LAN address>:8080` can drive the server from the Cloud tab, but
-not run torrents in the browser itself: that is not a secure page, and the Download and Seed tabs say
-so ([Browsers](#browsers) says why). Through the tunnel below, or a deploy, it is HTTPS, and the whole
+not run torrents in the browser itself: that is not a secure page, and the Download, Seed and Edit
+tabs say so ([Browsers](#browsers) says why). Through the tunnel below, or a deploy, it is HTTPS, and the whole
 app works.
 
 Away from home, without opening a port:
@@ -319,8 +323,8 @@ saving.
 **A secure page**, HTTPS or `localhost`, is the one thing that does not degrade: WebTorrent hashes
 every piece with `crypto.subtle`, which a browser gives only to a secure page. Opened over plain
 `http://` from any other address — your own server on the phone at `http://192.168.1.20:8080` — the
-Download and Seed tabs say so and offer nothing that could only fail, and the Cloud tab works as
-anywhere else. Reach the server through its tunnel, or a deploy, for the rest.
+Download, Seed and Edit tabs say so and offer nothing that could only fail (the editor hashes with it
+too), and the Cloud tab works as anywhere else. Reach the server through its tunnel, or a deploy, for the rest.
 
 **iOS**, where every browser is WebKit: the app, WebRTC and "Add to Home Screen" all work, and a save
 is assembled in memory then handed to the download popup — or, in the installed app, to the share
@@ -331,8 +335,9 @@ other three ways has no such cap: it is an ordinary download.
 In Brave, if nothing ever connects, lower Shields for the site.
 
 **WebRTC turned off** (Tor Browser, Mullvad Browser, Firefox with `media.peerconnection.enabled`
-off): no peer can be reached, and the Download and Seed tabs say so. Web seeds and the Cloud tab still
-work.
+off): no peer can be reached, and the Download and Seed tabs say so. Web seeds, the Cloud tab and the
+Edit tab, which talks to no peer, still work. Where a browser cannot pick a folder, the editor's check
+offers files alone.
 
 ## Tests
 
@@ -355,8 +360,10 @@ progress and a stop; a torrent made with the info hash of a hand‑made one, and
 `create-torrent` for a folder (its name taken from it, `.DS_Store` left out and `Thumbs.db` kept, as
 there), every option written where it goes, and a private tracker's own piece table; and the Seed &
 share options, folded into their line, giving the app's trackers when none are written and a rule's
-source when none is set; and files checked against a torrent — matched by folder, path or name, whole,
-with a byte changed, with a file missing and with one cut short.
+source when none is set, and a piece size of one's own over a tracker's largest, or over the one set,
+said; and files checked against a torrent — matched by folder, path or name, whole, with a byte
+changed, with a file missing and with one cut short, and not "ready to seed" with an empty file missing
+or a file too long.
 
 `test/e2e.mjs` boots a WebSocket tracker and a static server, seeds a two‑file torrent through the
 UI of one browser context and downloads it in a second, phone‑sized one — the real UI throughout. It
@@ -439,7 +446,10 @@ tracker added and a comment cleared with their info hashes kept, then a source s
 each, both times unzipped from the `.zip` saved; a preset made in Settings (Enter keeping it, not
 closing Settings) filling the trackers and comment, the PTP rule it brings shown and its source set in
 one tap, never by itself; files checked against a two‑file torrent — all good, a byte changed as one bad
-piece, a file missing named; a private torrent with a source made in Seed & share, saved alone with
+piece, a file missing named; a name ending in a space opened and saved with its info hash; a magnet's
+**Copy magnet** usable after a private torrent's refusal; the editor closed while its metadata is on
+the way staying closed; a hybrid torrent's identity staying locked through a preset; the Seed & share
+options following another open copy; a private torrent with a source made in Seed & share, saved alone with
 **Only make the .torrent** (its piece size the one sharing always used, nothing shared), then the same
 files shared — the same info hash, its card private, announced to its own tracker alone, the options
 remembered — and downloaded from the saved file by another page, byte for byte; and at 320px, four tabs and the
