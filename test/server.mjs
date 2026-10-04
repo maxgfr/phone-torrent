@@ -516,8 +516,9 @@ try {
   });
   assert.ok([201, 400].includes(clashSubmit.status), `the clashing torrent is answered (${clashSubmit.status})`);
   await waitFor(() => /refused .*transfers\.json/.test(serverLog), { label: 'the clashing torrent to be refused', timeout: 60000 });
-  const listed = (await (await api('/api/transfers')).json()).transfers.map((t) => t.id);
-  assert.ok(!listed.includes(clash.infoHash), 'the clashing torrent is not kept');
+  // Said, then let go of: the list is saved first, and the torrent is gone from the client a moment after.
+  const listed = async () => (await (await api('/api/transfers')).json()).transfers.map((t) => t.id);
+  await waitFor(async () => !(await listed()).includes(clash.infoHash), { label: 'the clashing torrent not kept', timeout: 10000 });
   const state = JSON.parse(readFileSync(path.join(downloads, 'transfers.json'), 'utf8'));
   assert.deepEqual(state.map((row) => row.id), [seeded.infoHash], 'the list of transfers is intact, and still lists the real one');
   rmSync(clashDir, { recursive: true, force: true });
