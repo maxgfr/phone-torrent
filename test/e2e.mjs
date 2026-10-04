@@ -21,6 +21,8 @@ import { startServer } from './serve.mjs';
 import proxyWorker from '../proxy/cloudflare-worker.js';
 import { bencode, makeTorrent } from './torrents.mjs';
 import { decode as decodeBencode } from '../lib/bencode.js';
+import { createTorrent as makeInfo } from '../lib/torrent-meta.js';
+import { hashInline } from '../lib/torrent-hash.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const TMP = path.join(HERE, '.tmp');
@@ -1125,6 +1127,318 @@ try {
     await desk.evaluate(() => localStorage.removeItem('phone-torrent:list'));
     await deskCtx.close();
     log('cards or table, and the order, kept across a reload; cards at phone width');
+  }
+
+  /* ---------- a computer: dropped anywhere, a folder, pasted, the keyboard, the system ---------- */
+  {
+    const settingsFor = ({ t, rtc, base }) => {
+      if (window !== window.top) return;
+      localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], trackerList: false, rtcConfig: rtc, metadataSources: [], cloud: { provider: 'torbox', apiKey: 'test-api-key', apiBase: base } }));
+    };
+    const waysCtx = await context({ viewport: { width: 1280, height: 800 } });
+    // What the system would hand over: an installed app's file handler, and the magnet registration.
+    await waysCtx.addInitScript(() => {
+      Object.defineProperty(window, 'launchQueue', { configurable: true, value: { setConsumer(fn) { window.__launch = fn; } } });
+      navigator.registerProtocolHandler = (scheme, url) => { window.__registered = [scheme, url]; };
+    });
+    const ways = await waysCtx.newPage();
+    ways.on('pageerror', (e) => console.error('ways page error:', e));
+    const asked = [];
+    let answer = true;
+    ways.on('dialog', (d) => {
+      if (d.type() === 'beforeunload') return;
+      asked.push(d.message());
+      if (answer) d.accept(d.type() === 'prompt' ? 'Loose files' : undefined);
+      else d.dismiss();
+    });
+    await ways.addInitScript(settingsFor, { t: trackerUrl, rtc: rtcConfig, base: cloudApi.url });
+    await ways.goto(site.url);
+    await ways.waitForFunction(() => window.__phoneTorrent?.client);
+    await ways.evaluate(() => window.__phoneTorrent.started);
+    const rows = () => ways.$$eval('.tl-row .tl-title', (els) => els.map((e) => e.textContent));
+    const url = ways.url();
+
+    // A drag over any part of the page shows what letting go will do on the tab open; a .torrent let
+    // go of beside the card at the top, where the browser opened it before, is added.
+    const dropped = makeTorrent(Buffer.alloc(3000, 7), { name: 'dropped beside.bin', trackers: [trackerUrl] });
+    const drag = (type, files, at = '#detail-pane') => ways.evaluate(({ type, files, at }) => {
+      const dt = new DataTransfer();
+      for (const f of files) dt.items.add(new File([new Uint8Array(f.bytes)], f.name));
+      return document.querySelector(at).dispatchEvent(new DragEvent(type, { dataTransfer: dt, bubbles: true, cancelable: true }));
+    }, { type, files: files.map((f) => ({ name: f.name, bytes: [...f.bytes] })), at });
+    assert.equal(await drag('dragover', [{ name: 'x.torrent', bytes: dropped.buf }]), false, 'a drag of files over the page is taken');
+    assert.equal(await ways.isVisible('#drop-overlay'), true, 'and the window says so');
+    assert.match(await ways.textContent('#drop-overlay'), /download/i, 'what for, on the Download tab');
+    await ways.click('.tab[data-tab="seed"]');
+    await drag('dragover', [{ name: 'x.torrent', bytes: dropped.buf }]);
+    assert.match(await ways.textContent('#drop-overlay'), /share/i, 'and on Seed & share');
+    await ways.click('.tab[data-tab="download"]');
+    await drag('drop', [{ name: 'dropped beside.torrent', bytes: dropped.buf }]);
+    await waitFor(async () => (await rows()).includes('dropped beside.bin'), { label: 'a .torrent dropped outside the card added', timeout: 10000 });
+    assert.equal(ways.url(), url, 'and the app is still there');
+    assert.equal(await ways.isVisible('#drop-overlay'), false, 'the overlay gone with the drop');
+    log('a drag shows what a drop does on the tab open; a .torrent dropped off the card is added, the app still there');
+
+    // A file that is not a .torrent, dropped on Download, is shared only once that is said yes to.
+    answer = false;
+    await drag('drop', [{ name: 'holiday.jpg', bytes: Buffer.alloc(2000, 4) }]);
+    await waitFor(() => asked.length === 1, { label: 'the question about a file that is not a .torrent', timeout: 5000 });
+    assert.match(asked[0], /"holiday\.jpg" is not a \.torrent file\. Share it/);
+    await ways.waitForTimeout(500);
+    assert.equal((await rows()).includes('holiday.jpg'), false, 'said no: not shared');
+    answer = true;
+    await drag('drop', [{ name: 'holiday.jpg', bytes: Buffer.alloc(2000, 4) }]);
+    await waitFor(async () => (await rows()).includes('holiday.jpg'), { label: 'said yes: shared', timeout: 10000 });
+    assert.equal(await ways.$eval('.tab.active', (t) => t.dataset.tab), 'seed', 'from the Seed & share tab');
+    log('a file that is not a .torrent, dropped on Download: asked first, shared only on yes');
+
+    // On the Cloud tab a .torrent goes to the cloud account; anything else is refused, and why is said.
+    const polls = cloudApi.state.polls;
+    cloudApi.state.submitted = null;
+    await ways.click('.tab[data-tab="cloud"]');
+    await drag('drop', [{ name: 'for the cloud.torrent', bytes: makeTorrent(Buffer.alloc(1000, 9), { name: 'dropped for the cloud' }).buf }]);
+    await waitFor(() => Boolean(cloudApi.state.submitted?.includes('dropped for the cloud')), { label: 'a .torrent dropped on Cloud sent to TorBox', timeout: 10000 });
+    await drag('drop', [{ name: 'notes.txt', bytes: Buffer.from('not a torrent') }]);
+    await waitFor(() => ways.$$eval('.toast', (els) => els.some((e) => /"notes\.txt" is not a \.torrent file: the cloud fetches torrents/.test(e.textContent))), { label: 'a file refused by the cloud, and why', timeout: 5000 });
+    cloudApi.state.polls = polls;
+    log('dropped on Cloud: a .torrent sent to the account, any other file refused with the reason');
+
+    // A folder, shared as itself: the torrent made here is the one Node makes of the same files, and so
+    // is the one a follower hands over, the paths crossing with the files.
+    const tree = [['Photos/a.jpg', 1, 4000], ['Photos/b.jpg', 2, 7000], ['Photos/2024/c.jpg', 3, 50000]];
+    const nodeFiles = tree.map(([p, fill, n]) => Object.defineProperty(new File([Buffer.alloc(n, fill)], p.split('/').pop()), 'fullPath', { value: p }));
+    const expected = (await makeInfo(nodeFiles, { hash: hashInline })).infoHash;
+    const seedFolder = (page) => page.evaluate(async (tree) => {
+      const files = tree.map(([p, fill, n]) => Object.defineProperty(new File([new Uint8Array(n).fill(fill)], p.split('/').pop()), 'fullPath', { value: p }));
+      document.querySelector('.tab[data-tab="seed"]').click();
+      await window.__phoneTorrent.routeDrop({ files });
+    }, tree);
+    const infoHashOf = (name) => ways.evaluate((name) => [...window.__phoneTorrent.views.keys()].find((t) => t.name === name && t.infoHash)?.infoHash || '', name);
+    const before = asked.length;
+    await seedFolder(ways);
+    await waitFor(async () => (await infoHashOf('Photos')) === expected, { label: 'the folder seeded with the info hash Node makes', timeout: 15000 });
+    assert.equal(asked.length, before, 'a folder is named after itself: nothing asked');
+    const removeFolderSeed = async () => {
+      await ways.evaluate(() => { for (const [t, v] of window.__phoneTorrent.views) if (t.name === 'Photos') v.el.querySelector('.remove-btn').click(); });
+      await waitFor(async () => !(await infoHashOf('Photos')), { label: 'the folder seed removed', timeout: 10000 });
+    };
+    await removeFolderSeed();
+    if (BROWSER === 'chromium') {
+      // The folder picker itself, where Playwright can hand it a folder. The browser lists the folder in
+      // an order of its own, which is the order in the torrent: Node is given the same.
+      const dir = path.join(TMP, 'picked-folder');
+      for (const [p, fill, n] of tree) {
+        mkdirSync(path.dirname(path.join(dir, p)), { recursive: true });
+        writeFileSync(path.join(dir, p), Buffer.alloc(n, fill));
+      }
+      await ways.click('.tab[data-tab="seed"]');
+      assert.equal(await ways.isVisible('#seed-folder-btn'), true, 'Pick a folder, where the browser can');
+      await ways.evaluate(() => document.querySelector('#seed-folder-input').addEventListener('change', (e) => {
+        window.__picked = [...e.target.files].map((f) => f.webkitRelativePath);
+      }, { capture: true, once: true }));
+      const asksBefore = asked.length;
+      await ways.setInputFiles('#seed-folder-input', path.join(dir, 'Photos'));
+      const order = await ways.evaluate(() => window.__picked);
+      const inOrder = order.map((p) => nodeFiles.find((f) => f.fullPath === p));
+      assert.equal(inOrder.every(Boolean), true, `the picked files are the folder's (${order})`);
+      const pickedHash = (await makeInfo(inOrder, { hash: hashInline })).infoHash;
+      await waitFor(async () => (await infoHashOf('Photos')) === pickedHash, { label: 'the folder picked, seeded with the info hash Node makes', timeout: 15000 });
+      assert.equal(asked.length, asksBefore, 'and named after itself');
+      await removeFolderSeed();
+    }
+    const helper = await waysCtx.newPage();
+    helper.on('pageerror', (e) => console.error('ways follower page error:', e));
+    await helper.goto(site.url);
+    await helper.waitForFunction(() => window.__phoneTorrent?.follower === true, null, { timeout: 15000 });
+    // What this window shows is its own: a seed started in the other one does not change its filter.
+    await ways.selectOption('#list-filter', 'paused');
+    await seedFolder(helper);
+    await waitFor(async () => (await infoHashOf('Photos')) === expected, { label: 'the folder from a follower seeded, the same info hash', timeout: 15000 });
+    await waitFor(() => helper.$$eval('.torrent .share-panel:not([hidden])', (els) => els.length > 0), { label: 'its link shown in the follower that picked it', timeout: 15000 });
+    assert.equal(await ways.$eval('#list-filter', (e) => e.value), 'paused', 'the leading window keeps its filter');
+    await ways.selectOption('#list-filter', 'all');
+    await helper.close();
+    log('a folder shared as itself, from the page and from a follower: the info hash Node makes of the same files');
+
+    // Ctrl+V or Cmd+V on the page, out of any field: what was copied goes where a drop would, unasked.
+    await ways.click('.tab[data-tab="download"]');
+    const pasted = await ways.evaluate(() => {
+      const dt = new DataTransfer();
+      dt.setData('text/plain', 'Have a look: magnet:?xt=urn:btih:4444444444444444444444444444444444444444&dn=pasted');
+      const event = new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true });
+      document.body.dispatchEvent(event);
+      return Boolean(event.clipboardData);
+    });
+    if (pasted) {
+      await waitFor(async () => (await rows()).includes('pasted'), { label: 'a magnet pasted on the page added', timeout: 5000 });
+      log('a magnet pasted on the page, out of any field, added without a question');
+    } else {
+      log('paste: skipped, this engine makes no clipboard event with data');
+    }
+    const typedInField = await ways.evaluate(() => {
+      const dt = new DataTransfer();
+      dt.setData('text/plain', 'magnet:?xt=urn:btih:5555555555555555555555555555555555555555&dn=into-field');
+      const field = document.querySelector('#magnet-input');
+      const event = new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true });
+      field.dispatchEvent(event);
+      return event.defaultPrevented;
+    });
+    assert.equal(typedInField, false, 'pasted into a field, it is the field\'s');
+
+    // The keyboard.
+    await ways.click('.tl-row:has-text("dropped beside")');
+    await ways.keyboard.press('/');
+    assert.equal(await ways.evaluate(() => document.activeElement.id), 'list-search', '/ goes to the search');
+    await ways.keyboard.type('holi');
+    assert.deepEqual(await rows(), ['holiday.jpg']);
+    await ways.keyboard.press('Escape');
+    assert.equal(await ways.$eval('#list-search', (e) => e.value), '', 'Escape empties it');
+    assert.ok((await rows()).length > 1);
+    const listed = await rows();
+    await ways.click('.tl-row >> nth=0');
+    await ways.keyboard.press('ArrowDown');
+    const openTitle = () => ways.$eval('.tl-row.focused .tl-title', (e) => e.textContent);
+    assert.equal(await openTitle(), listed[1], '↓ opens the next one');
+    assert.equal(await ways.evaluate(() => document.activeElement.classList.contains('tl-row')), true, 'with the focus on its row');
+    await ways.keyboard.press('Shift+ArrowUp');
+    assert.equal(await ways.$$eval('.tl-row.selected', (r) => r.length), 2, 'Shift+↑ selects as it goes');
+    await ways.keyboard.press('Home');
+    assert.equal(await openTitle(), listed[0], 'Home: the first');
+    await ways.keyboard.press('End');
+    assert.equal(await openTitle(), listed[listed.length - 1], 'End: the last');
+    await ways.keyboard.press('ControlOrMeta+a');
+    assert.equal(await ways.$$eval('.tl-row.selected', (r) => r.length), listed.length, 'Ctrl+A or Cmd+A: every torrent listed');
+    await ways.keyboard.press('Space');
+    await waitFor(() => ways.evaluate(() => [...window.__phoneTorrent.views.keys()].every((t) => t.paused)), { label: 'Space pausing the selection', timeout: 5000 });
+    await ways.keyboard.press('Space');
+    await waitFor(() => ways.evaluate(() => [...window.__phoneTorrent.views.keys()].every((t) => !t.paused)), { label: 'and resuming it', timeout: 5000 });
+    await ways.keyboard.press('Escape');
+    assert.equal(await ways.$$eval('.tl-row.selected', (r) => r.length), 0, 'Escape: the selection emptied');
+    await ways.click('.tl-row:has-text("holiday.jpg")');
+    const asks = asked.length;
+    await ways.keyboard.press('Delete');
+    await waitFor(async () => !(await rows()).includes('holiday.jpg'), { label: 'Delete removing the one open', timeout: 5000 });
+    assert.equal(asked.length, asks + 1, 'asked first');
+    await ways.keyboard.press('?');
+    assert.equal(await ways.isVisible('#keys-dialog'), true, '? lists the keys');
+    await ways.keyboard.press('/');
+    assert.equal(await ways.evaluate(() => document.activeElement.id === 'list-search'), false, 'and the keys stay the dialog\'s meanwhile');
+    await ways.keyboard.press('Escape');
+    assert.equal(await ways.isVisible('#keys-dialog'), false);
+    // The list's keys are the list's: not a control's that has the focus, nor the page's own scrolling.
+    const pausedNow = () => ways.evaluate(() => [...window.__phoneTorrent.views.keys()].filter((t) => t.paused).length);
+    await ways.click('.tl-row >> nth=0');
+    await ways.click('.tl-row >> nth=0 >> input');
+    await ways.keyboard.press('ArrowDown');
+    assert.equal(await openTitle(), (await rows())[1], 'a row\'s box clicked, ↓ still moves in the list');
+    await ways.keyboard.press('Escape');
+    await ways.evaluate(() => document.activeElement.blur());
+    await ways.keyboard.press('Space');
+    assert.equal(await pausedNow(), 0, 'Space on the page, nothing selected: the page scrolls, nothing is paused');
+    await ways.click('#view-table');
+    await ways.focus('.tl-head .tl-name .tl-sort');
+    await ways.keyboard.press('Space');
+    assert.equal(await ways.$eval('#list-sort', (e) => e.value), 'name', 'Space on a column header sorts by it');
+    assert.equal(await pausedNow(), 0, 'and pauses nothing');
+    await ways.click('#view-cards');
+    const player = await ways.evaluate(() => {
+      const video = Object.assign(document.createElement('video'), { controls: true, tabIndex: 0, id: 'a-player' });
+      document.querySelector('#cloud-library').before(video);
+      video.focus();
+      return document.activeElement === video;
+    });
+    if (player) {
+      for (const key of ['Space', 'ArrowDown', 'End']) {
+        const taken = await ways.evaluate((key) => {
+          const event = new KeyboardEvent('keydown', { key: key === 'Space' ? ' ' : key, bubbles: true, cancelable: true });
+          document.querySelector('#a-player').dispatchEvent(event);
+          return event.defaultPrevented;
+        }, key);
+        assert.equal(taken, false, `${key} on a video player is the player's`);
+      }
+      assert.equal(await pausedNow(), 0);
+    }
+    await ways.evaluate(() => document.querySelector('#a-player')?.remove());
+
+    // The tabs: one in the way of the Tab key, the arrows for the rest.
+    await ways.focus('.tab.active');
+    await ways.keyboard.press('ArrowRight');
+    assert.equal(await ways.evaluate(() => document.activeElement.dataset.tab), 'seed', '→ on the tabs: the next one');
+    assert.equal(await ways.$eval('#tab-seed', (p) => p.hidden), false, 'and its panel');
+    assert.deepEqual(await ways.$$eval('.tabs .tab', (tabs) => tabs.map((t) => t.tabIndex)), [-1, 0, -1, -1]);
+    assert.equal(await ways.getAttribute('.tab[data-tab="seed"]', 'aria-controls'), 'tab-seed');
+    log('keys: / and Escape for the search, ↑ ↓ Home End and Shift in the list, Ctrl+A, Space, Delete, ?, and the arrows on the tabs');
+
+    // The editor's ⋯ menu closes as a menu does: Escape closes it and not the editor; so does a click away.
+    await ways.evaluate(() => { for (const [t, v] of window.__phoneTorrent.views) if (t.name === 'dropped beside.bin') v.el.querySelector('.share-edit-btn').click(); });
+    await ways.waitForSelector('#editor-dialog[open]');
+    await ways.click('#ed-menu summary');
+    assert.equal(await ways.$eval('#ed-menu', (m) => m.open), true);
+    await ways.keyboard.press('Escape');
+    assert.equal(await ways.$eval('#ed-menu', (m) => m.open), false, 'Escape closes the menu');
+    assert.equal(await ways.isVisible('#editor-dialog'), true, 'and leaves the editor open');
+    await ways.click('#ed-menu summary');
+    await ways.click('#editor-title');
+    assert.equal(await ways.$eval('#ed-menu', (m) => m.open), false, 'a click elsewhere closes it too');
+    await ways.keyboard.press('Escape');
+    assert.equal(await ways.isVisible('#editor-dialog'), false, 'and Escape then closes the editor');
+    log('the editor\'s ⋯ menu: Escape closes it alone, a click away closes it');
+
+    // Leaving: asked while this copy runs something unpaused, and only then.
+    const leaving = (page) => page.evaluate(() => !window.dispatchEvent(new Event('beforeunload', { cancelable: true })));
+    await ways.waitForTimeout(1000);
+    assert.equal(await leaving(ways), true, 'seeding here: the browser asks before closing');
+    await ways.evaluate(() => { for (const t of window.__phoneTorrent.views.keys()) if (!t.paused) t.pause(); });
+    await ways.waitForTimeout(1000);
+    assert.equal(await leaving(ways), false, 'everything paused: nothing to ask');
+    await ways.evaluate(() => { for (const t of window.__phoneTorrent.views.keys()) t.resume(); });
+    await ways.waitForTimeout(1000);
+    assert.equal(await leaving(ways), true, 'running again: asked again');
+    const second = await waysCtx.newPage();
+    await second.goto(site.url);
+    await second.waitForFunction(() => window.__phoneTorrent?.follower === true, null, { timeout: 15000 });
+    await second.waitForTimeout(1000);
+    assert.equal(await leaving(second), false, 'a copy that follows runs nothing: it does not ask');
+    await waitFor(() => leaving(ways).then((asks) => !asks), { label: 'the leading copy, with another waiting to take over, no longer asking', timeout: 5000 });
+    await second.close();
+    log('closing asks only while this copy runs something unpaused and no other copy waits to take over');
+
+    // Opened by the system: a .torrent from the file handler, asked first; and magnet links registered.
+    const launched = makeTorrent(Buffer.alloc(2500, 5), { name: 'opened from the desktop.bin', trackers: [trackerUrl] });
+    const asksBefore = asked.length;
+    await ways.evaluate((bytes) => window.__launch({ files: [{ getFile: async () => new File([new Uint8Array(bytes)], 'opened.torrent') }] }), [...launched.buf]);
+    await waitFor(async () => (await rows()).includes('opened from the desktop.bin'), { label: 'a .torrent opened from the system added', timeout: 10000 });
+    assert.match(asked[asksBefore], /Add the file "opened\.torrent" to Swarmdeck/, 'once it was said yes to');
+    await ways.click('#settings-btn');
+    await ways.waitForSelector('#magnet-handler-btn', { state: 'visible', timeout: 5000 }); // Settings offers to open magnet links here
+    await ways.click('#magnet-handler-btn');
+    const registered = await ways.evaluate(() => window.__registered);
+    assert.equal(registered[0], 'magnet');
+    assert.equal(registered[1], `${site.url}?magnet=%s`, 'to this page, which takes ?magnet=');
+    await ways.click('#settings-dialog button[value="cancel"]');
+    log('a .torrent opened from the system asked about then added; magnet links registered from Settings');
+
+    // The manifest names the app, opens .torrent files and leaves the orientation free; the offline shell
+    // has every module the app imports.
+    const manifest = JSON.parse(readFileSync(path.join(HERE, '..', 'manifest.webmanifest'), 'utf8'));
+    assert.equal(manifest.name, 'Swarmdeck');
+    assert.equal('orientation' in manifest, false, 'no orientation: a computer is landscape');
+    assert.deepEqual(manifest.file_handlers?.[0]?.accept, { 'application/x-bittorrent': ['.torrent'] }, '.torrent files open with it');
+    const shell = readFileSync(path.join(HERE, '..', 'sw.js'), 'utf8').match(/const SHELL_FILES = \[([\s\S]*?)\];/)[1];
+    const cached = new Set([...shell.matchAll(/'\.\/([^']+)'/g)].map((m) => m[1]));
+    const seen = new Set();
+    const walk = (file) => {
+      if (seen.has(file)) return;
+      seen.add(file);
+      assert.ok(cached.has(file), `sw.js caches ${file} for the app offline`);
+      const source = readFileSync(path.join(HERE, '..', file), 'utf8');
+      for (const [, spec] of source.matchAll(/^\s*import\s[^'"]*['"](\.{1,2}\/[^'"]+)['"]/gm)) walk(path.posix.normalize(path.posix.join(path.posix.dirname(file), spec)));
+      for (const [, spec] of source.matchAll(/new Worker\(new URL\(['"](\.{1,2}\/[^'"]+)['"]/g)) walk(path.posix.normalize(path.posix.join(path.posix.dirname(file), spec)));
+    };
+    walk('app.js');
+    assert.ok(seen.has('lib/drop.js') && seen.has('lib/torrent-list.js'));
+    log(`the manifest: Swarmdeck, .torrent files, any orientation; the offline shell has all ${seen.size} modules`);
+    await waysCtx.close();
   }
 
   /* ---------- the .torrent editor ---------- */

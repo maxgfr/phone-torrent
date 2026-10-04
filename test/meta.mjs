@@ -9,13 +9,14 @@ import { createHash } from 'node:crypto';
 import { decode, encode, infoHashOf, Raw, text } from '../lib/bencode.js';
 import {
   readTorrent, applyEdits, applyBatch, identityChanges, parseTiers, formatTiers, parseMagnet, toMagnet,
-  autoPieceLength, ruleFor, describeRule, ruleProblems, createTorrent, excludeTest,
+  autoPieceLength, ruleFor, describeRule, ruleProblems, createTorrent, excludeTest, relativePath, withPaths, commonFolder,
 } from '../lib/torrent-meta.js';
 import { normalizePreset, normalizePresets, presetSummary } from '../lib/presets.js';
 import { hashInline } from '../lib/torrent-hash.js';
 import { matchFiles, checkTorrent, describeCheck } from '../lib/torrent-check.js';
 import { createSummary, creationOptions, creationProblems, normalizeCreate } from '../lib/create-options.js';
 import { FILTERS, SORTS, rowMatches, sortRows, rangeKeys, loadListPrefs, saveListPrefs } from '../lib/torrent-list.js';
+import { grabEntries, filesFromEntries, droppedText, draggingFiles } from '../lib/drop.js';
 import createTorrentPackage from 'create-torrent';
 import { bencode, makeTorrent } from './torrents.mjs';
 
@@ -467,6 +468,58 @@ const u8 = (b) => new Uint8Array(b.buffer, b.byteOffset, b.byteLength);
   assert.doesNotThrow(() => saveListPrefs({ filter: 'done' }, throwing), 'and saving to it is only skipped');
   assert.ok(FILTERS.some((f) => f.key === 'problem') && SORTS.every((s) => s.dir === 'asc' || s.dir === 'desc'));
   log('the list: search and filters, a stable sort each way, Shift-click ranges, and its settings even where storage throws');
+}
+
+/* ---------- what is dropped: folders opened all the way down, and the paths they give ---------- */
+{
+  // Entries as a browser hands them over: a folder's reader gives its children a batch at a time (the
+  // real ones, about a hundred), then an empty batch for the end.
+  const fileEntry = (fullPath, body = 'x') => ({
+    isFile: true, isDirectory: false, fullPath, name: fullPath.split('/').pop(),
+    file: (ok) => ok(new File([body], fullPath.split('/').pop())),
+  });
+  const dirEntry = (fullPath, children, batch = 2) => ({
+    isFile: false, isDirectory: true, fullPath, name: fullPath.split('/').pop(),
+    createReader() {
+      let at = 0;
+      return { readEntries(ok) { const next = children.slice(at, at + batch); at += batch; setTimeout(() => ok(next)); } };
+    },
+  });
+  const photos = dirEntry('/Photos', [
+    fileEntry('/Photos/a.jpg'), fileEntry('/Photos/b.jpg'), fileEntry('/Photos/c.jpg'),
+    dirEntry('/Photos/2024', [fileEntry('/Photos/2024/d.jpg'), dirEntry('/Photos/2024/empty', [])]),
+    fileEntry('/Photos/e.jpg'),
+  ]);
+  const files = await filesFromEntries([photos]);
+  assert.deepEqual(files.map((f) => f.fullPath), ['Photos/a.jpg', 'Photos/b.jpg', 'Photos/c.jpg', 'Photos/2024/d.jpg', 'Photos/e.jpg'], 'every batch read, folders opened, an empty one giving nothing');
+  assert.deepEqual(files.map((f) => relativePath(f)), files.map((f) => f.fullPath));
+  assert.equal(commonFolder(files), 'Photos', 'one folder dropped: its name');
+  assert.deepEqual(await filesFromEntries([dirEntry('/empty', [])]), [], 'an empty folder: nothing');
+  const loose = await filesFromEntries([fileEntry('/one.txt'), fileEntry('/two.txt')]);
+  assert.deepEqual(loose.map((f) => relativePath(f)), ['one.txt', 'two.txt'], 'loose files: their names');
+  assert.equal(commonFolder(loose), '', 'and no folder in common');
+  assert.equal(commonFolder([...files, ...loose]), '', 'nor a folder and loose files');
+  assert.equal(commonFolder([]), '');
+
+  // Sent to another open copy, a File loses where it was: put back, the same torrent is made there.
+  const bare = files.map((f) => new File([f], f.name));
+  assert.deepEqual(bare.map((f) => relativePath(f)), ['a.jpg', 'b.jpg', 'c.jpg', 'd.jpg', 'e.jpg'], 'what arrives in the other copy');
+  const back = withPaths(bare, files.map((f) => relativePath(f)));
+  assert.deepEqual(back.map((f) => relativePath(f)), files.map((f) => f.fullPath), 'and the paths put back');
+  assert.deepEqual(withPaths(loose, ['one.txt', undefined]).map((f) => relativePath(f)), ['one.txt', 'two.txt'], 'no path: as it was');
+  const made = await createTorrent(files, { hash: hashInline, creationDate: 0 });
+  const remade = await createTorrent(back, { hash: hashInline, creationDate: 0 });
+  assert.equal(remade.infoHash, made.infoHash, 'the same info hash');
+  assert.equal(made.name, 'Photos');
+
+  assert.equal(droppedText({ getData: (t) => ({ 'text/uri-list': '# a comment\nmagnet:?xt=urn:btih:abc\nhttps://x', 'text/plain': 'plain' }[t] || '') }), 'magnet:?xt=urn:btih:abc', 'a link: the first of the list');
+  assert.equal(droppedText({ getData: (t) => (t === 'text/plain' ? '  some text ' : '') }), 'some text', 'or the text');
+  assert.equal(droppedText({ getData() { throw new Error('protected'); } }), '', 'or nothing, when it cannot be read');
+  assert.equal(draggingFiles({ types: ['Files', 'text/uri-list'] }), true);
+  assert.equal(draggingFiles({ types: ['text/plain'] }), false);
+  assert.deepEqual(grabEntries({ items: [{ kind: 'file', webkitGetAsEntry: () => photos }], files: [] }).entries, [photos], 'entries, when every file has one');
+  assert.equal(grabEntries({ items: [{ kind: 'file' }], files: [new File(['x'], 'x')] }).entries, null, 'none without webkitGetAsEntry: the files instead');
+  log('dropped folders read all the way down, paths kept and put back after crossing to another copy, the same info hash');
 }
 
 console.log('\nAll .torrent workshop checks passed.');

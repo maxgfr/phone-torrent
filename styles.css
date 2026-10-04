@@ -121,7 +121,6 @@ body {
 
 .card h2 { margin: 0 0 12px; font-size: 1rem; }
 
-.add-card.dragover { outline: 2px dashed var(--primary); outline-offset: 2px; }
 
 .add-row { display: flex; gap: 8px; margin-bottom: 10px; }
 .add-row input[type="text"], .add-row input[type="url"] {
@@ -180,7 +179,14 @@ body {
   color: var(--muted);
   cursor: pointer;
 }
-.icon-btn:hover { background: var(--bg); color: var(--text); }
+@media (hover: hover) {
+  .icon-btn:hover { background: var(--bg); color: var(--text); }
+  .btn:not(:disabled):hover { border-color: color-mix(in srgb, var(--text) 30%, var(--border)); }
+  .btn.primary:not(:disabled):hover { filter: brightness(1.08); }
+  .tab:not(.active):hover { color: var(--text); }
+}
+/* The ring the keyboard draws, on everything it reaches; a click draws none. */
+:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
 
 .hint { color: var(--muted); font-size: 0.85rem; margin: 6px 0 0; }
 .hint code { font-family: ui-monospace, monospace; }
@@ -657,4 +663,26 @@ body {
     box-shadow: var(--shadow); overflow: hidden; container-type: inline-size;
   }
   .list-density { display: inline-flex; }
+  .list-tools .keys-btn { display: inline-flex; }
+}
+
+/* ---- the computer's ways in: a folder, a drop anywhere, the keyboard ---- */
+.add-row .file-btn { flex: 1 1 0; min-width: 0; }
+.add-row .folder-pick { flex: 0 1 auto; width: auto; }
+.keys-btn { display: none; }
+.drop-overlay {
+  position: fixed; inset: 8px; z-index: 20; display: grid; place-items: center; pointer-events: none;
+  border: 3px dashed var(--primary); border-radius: var(--radius);
+  background: color-mix(in srgb, var(--bg) 86%, transparent);
+}
+.drop-overlay p {
+  margin: 0; padding: 14px 22px; border-radius: 12px; font-weight: 600; font-size: 1.05rem;
+  background: var(--card); color: var(--text); box-shadow: 0 8px 30px rgba(0, 0, 0, 0.2);
+}
+.keys { display: grid; grid-template-columns: auto 1fr; gap: 8px 16px; margin: 0; font-size: 0.9rem; align-items: baseline; }
+.keys dt { white-space: nowrap; }
+.keys dd { margin: 0; color: var(--muted); }
+kbd {
+  font: 0.8rem ui-monospace, SFMono-Regular, Menlo, monospace; padding: 1px 6px; border-radius: 6px;
+  border: 1px solid var(--border); border-bottom-width: 2px; background: var(--bg); color: var(--text);
 }

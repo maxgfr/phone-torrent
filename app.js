@@ -2,7 +2,8 @@ import WebTorrent from './vendor/webtorrent.min.js';
 import { makeZip, predictLength } from './vendor/client-zip.js';
 import { saver } from './saver.js';
 import { createEditor } from './lib/editor.js';
-import { parseMagnet, createTorrent, ruleFor, ruleProblems } from './lib/torrent-meta.js';
+import { parseMagnet, createTorrent, ruleFor, ruleProblems, relativePath, withPaths, commonFolder } from './lib/torrent-meta.js';
+import { grabEntries, filesFromEntries, droppedText, draggingFiles } from './lib/drop.js';
 import { hashPieces } from './lib/torrent-hash.js';
 import { createOptionsUI, creationOptions, normalizeCreate } from './lib/create-options.js';
 import { createPresetsUI, normalizePresets } from './lib/presets.js';
@@ -100,9 +101,14 @@ const els = {
   magnetForm: $('#magnet-form'),
   magnetInput: $('#magnet-input'),
   seedFileInput: $('#seed-file-input'),
+  seedFolderInput: $('#seed-folder-input'),
+  seedFolderBtn: $('#seed-folder-btn'),
+  keysDialog: $('#keys-dialog'),
+  keysBtn: $('#keys-btn'),
+  magnetHandlerField: $('#magnet-handler-field'),
+  magnetHandlerBtn: $('#magnet-handler-btn'),
   seedUrlForm: $('#seed-url-form'),
   seedUrlInput: $('#seed-url-input'),
-  dropZone: $('#drop-zone'),
   netStatus: $('#net-status'),
   settingsBtn: $('#settings-btn'),
   settingsDialog: $('#settings-dialog'),
@@ -2602,7 +2608,8 @@ function creationFor(options) {
 async function seedFiles(files, { name, options = settings.createOptions, pickedIn = '', handedOver = false } = {}) {
   if (!files.length) return null;
   if (IN_BROWSER_BLOCKED) throw new Error(IN_BROWSER_BLOCKED);
-  const message = { op: 'seed', files: [...files], name, options };
+  // A File crosses to another copy without the folder it was in: its path goes beside it.
+  const message = { op: 'seed', files: [...files], paths: [...files].map((f, i) => relativePath(f, i)), name, options };
   if (!(await leading)) return addThroughLead(message, { share: true });
   await storageReady;
   if (follower) return addThroughLead(message, { share: true });
@@ -2645,7 +2652,7 @@ async function seedFiles(files, { name, options = settings.createOptions, picked
     torrent.destroy();
     if (views.has(existing) && !handedOver) {
       toast(`"${existing.name}" is already being shared.`);
-      shareTorrent(existing);
+      shareTorrent(existing, { here: !pickedIn });
       // Picked in a copy that follows this one: that is where its link is wanted.
       if (pickedIn) {
         postState();
@@ -2663,7 +2670,7 @@ async function seedFiles(files, { name, options = settings.createOptions, picked
   // Sharing is what a seed is for: the link, shown and selected, rather than the details panel.
   torrent.once('ready', () => {
     toast(`Seeding "${torrent.name}". Share the link so others can download it.`);
-    shareTorrent(torrent);
+    shareTorrent(torrent, { here: !pickedIn });
   });
   return torrent;
 }
@@ -3651,15 +3658,16 @@ async function copyFrom(button, text) {
  * only one — and on a desktop, or when the sheet is dismissed, there has to be
  * something to select and copy.
  */
-function shareTorrent(torrent) {
+function shareTorrent(torrent, { here = true } = {}) {
   const view = views.get(torrent);
   if (!view) return;
   if (!torrent.infoHash) {
     toast('Wait until the torrent has an info hash.');
     return;
   }
-  // On a computer, only the torrent open shows its card: this one opens, to show its links.
-  focusTorrent(torrent);
+  // On a computer, only the torrent open shows its card: this one opens, to show its links. Not when
+  // it was shared from another open copy (`here` false): that window's list and focus are left alone.
+  if (here) focusTorrent(torrent);
   const panel = $('.share-panel', view.el);
   const appLink = $('.share-app-link', view.el);
   const magnet = $('.share-magnet', view.el);
@@ -3675,7 +3683,7 @@ function shareTorrent(torrent) {
   magnet.value = secret ? '' : torrent.magnetURI;
   panel.hidden = false;
   $('.share-native-btn', view.el).hidden = secret || !navigator.share;
-  if (secret) return;
+  if (secret || !here) return;
   // Selected, so one tap on the phone's own "Copy" does the job too.
   appLink.focus();
   appLink.setSelectionRange(0, appLink.value.length);
@@ -4279,7 +4287,7 @@ async function runCall(message, from = '') {
       if (message.handover && !takesHandOver(message)) return { sid: '' };
       // A seed whose link was never shown (it was still getting ready) shows it here.
       const quiet = message.handover === true && message.ready === true;
-      const seeded = await seedFiles(message.files || [], { name: message.name, options: message.options, pickedIn: message.handover ? '' : from, handedOver: quiet });
+      const seeded = await seedFiles(withPaths(message.files || [], message.paths), { name: message.name, options: message.options, pickedIn: message.handover ? '' : from, handedOver: quiet });
       if (message.handover && seeded && !seeded.remote) keepPaused(seeded, message);
       return { sid: syncId(seeded) };
     }
@@ -4528,7 +4536,7 @@ function seedsToHandOver() {
   return [...views.values()].filter((v) => v.seeding && !v.torrent.remote && !v.torrent.destroyed).map((v) => {
     const { torrent } = v;
     const about = { handover: true, infoHash: torrent.infoHash || '', paused: Boolean(torrent.paused), ready: Boolean(torrent.ready) };
-    if (v.picked) return { op: 'seed', files: v.picked.files, name: v.picked.name, options: v.picked.options, ...about };
+    if (v.picked) return { op: 'seed', files: v.picked.files, paths: v.picked.files.map((f, i) => relativePath(f, i)), name: v.picked.name, options: v.picked.options, ...about };
     if (opfsOk && torrent.metadata && torrent.torrentFile) return { op: 'add', id: new Uint8Array(torrent.torrentFile), seeding: true, ...about };
     return null;
   }).filter(Boolean);
@@ -4843,38 +4851,36 @@ els.magnetForm.addEventListener('submit', async (event) => {
   }
 });
 
-els.cloudForm.addEventListener('submit', async (event) => {
-  event.preventDefault();
-  const id = parseTorrentText(els.cloudInput.value);
+/** A magnet, an info hash or a .torrent link, sent to the cloud account: typed, pasted or dropped. Says what went wrong, and whether it went. */
+async function sendTextToCloud(text) {
+  const id = parseTorrentText(text);
   if (!id) {
     toast('Paste a magnet link, a 40-character info hash, or a .torrent URL.', { error: true });
-    return;
+    return false;
   }
   const problem = /^magnet:/.test(id) ? magnetProblem(id) : '';
   if (problem) {
     toast(problem, { error: true, timeout: 9000 });
-    return;
+    return false;
   }
   if (!cloudReady()) {
     toast('Add your cloud API key first: Settings → Cloud fetch.', { error: true });
     els.settingsBtn.click();
-    return;
+    return false;
   }
-  const value = els.cloudInput.value;
-  els.cloudInput.value = '';
   try {
     // A .torrent URL is fetched here so the cloud gets the file itself, exactly as the picker does.
     if (/^https?:\/\//i.test(id)) await cloudSend({ bytes: await fetchTorrentUrl(id), name: 'torrent' });
     else await cloudSend({ magnet: id });
+    return true;
   } catch (err) {
-    els.cloudInput.value = value;
     toast(`Could not send it: ${err.message}`, { error: true, timeout: 9000 });
+    return false;
   }
-});
+}
 
-els.cloudFileInput.addEventListener('change', async () => {
-  const files = Array.from(els.cloudFileInput.files || []);
-  els.cloudFileInput.value = '';
+/** .torrent files sent to the cloud account: picked, pasted or dropped. Anything else is not sent, and why is said. */
+async function sendFilesToCloud(files) {
   if (!cloudReady() && files.length) {
     toast('Add your cloud API key first: Settings → Cloud fetch.', { error: true });
     els.settingsBtn.click();
@@ -4884,7 +4890,7 @@ els.cloudFileInput.addEventListener('change', async () => {
     try {
       const bytes = await readTorrentFile(f);
       if (!bytes) {
-        toast(`"${f.name}" is not a .torrent file.`, { error: true });
+        toast(`"${f.name}" is not a .torrent file: the cloud fetches torrents, it does not keep your files. To share it, use the "Seed & share" tab.`, { error: true, timeout: 9000 });
         continue;
       }
       await cloudSend({ bytes, name: f.name.replace(/\.torrent$/i, '') });
@@ -4892,6 +4898,20 @@ els.cloudFileInput.addEventListener('change', async () => {
       toast(`Could not send ${f.name}: ${err.message}`, { error: true, timeout: 9000 });
     }
   }
+}
+
+els.cloudForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  // What could not be sent comes back, to be fixed rather than pasted again.
+  const value = els.cloudInput.value;
+  els.cloudInput.value = '';
+  if (!(await sendTextToCloud(value)) && !els.cloudInput.value) els.cloudInput.value = value;
+});
+
+els.cloudFileInput.addEventListener('change', () => {
+  const files = Array.from(els.cloudFileInput.files || []);
+  els.cloudFileInput.value = '';
+  sendFilesToCloud(files);
 });
 
 els.cloudRefreshBtn.addEventListener('click', () => {
@@ -4899,20 +4919,31 @@ els.cloudRefreshBtn.addEventListener('click', () => {
   refreshCloudLibrary();
 });
 
-els.seedFileInput.addEventListener('change', () => {
-  const files = Array.from(els.seedFileInput.files || []);
-  els.seedFileInput.value = '';
-  if (!files.length) return;
+/**
+ * Files to share, picked, dropped or pasted. A folder is named after itself. Several loose files are
+ * asked a name: Cancel means not now, and a collection with no name would be called after its first
+ * file — "a.jpg" for two photos, and "a.jpg.zip" for whoever saves them — so an empty one is "Shared files".
+ */
+function seedPicked(files) {
+  if (!files.length) return undefined;
   let name;
-  if (files.length > 1) {
-    // Cancel means not now. A collection with no name would be called after its first file — "a.jpg"
-    // for two photos, and "a.jpg.zip" for whoever saves them — so an empty one is "Shared files".
+  if (files.length > 1 && !commonFolder(files)) {
     name = askUser(() => prompt('Name for this collection of files:', 'Shared files'));
-    if (name === null) return;
+    if (name === null) return undefined;
     name = name.trim() || 'Shared files';
   }
-  shareOrMake(files, { name }).catch((err) => toast(err.message, { error: true, timeout: 9000 }));
-});
+  return shareOrMake(files, { name }).catch((err) => toast(err.message, { error: true, timeout: 9000 }));
+}
+
+for (const input of [els.seedFileInput, els.seedFolderInput]) {
+  input.addEventListener('change', () => {
+    const files = Array.from(input.files || []);
+    input.value = '';
+    seedPicked(files);
+  });
+}
+// A browser that cannot pick a folder (an iPhone) is offered files alone.
+els.seedFolderBtn.hidden = !('webkitdirectory' in els.seedFolderInput);
 
 els.seedUrlForm.addEventListener('submit', async (event) => {
   event.preventDefault();
@@ -5067,8 +5098,10 @@ const seedOptions = createOptionsUI($('#tab-seed'), {
 
 // Only the add card's tabs: the Simple / Expert switch in Settings looks like one (class "tab") but
 // has no panel, and matching it too hid every panel the moment the mode was changed.
-$$('.tabs .tab').forEach((tab) => tab.addEventListener('click', () => {
-  if (tab.dataset.tab === 'cloud') {
+function selectTab(name) {
+  const tab = $(`.tabs .tab[data-tab="${name}"]`);
+  if (!tab) return;
+  if (name === 'cloud') {
     cloudAccountLine();
     refreshCloudLibrary({ quiet: true });
   }
@@ -5076,38 +5109,233 @@ $$('.tabs .tab').forEach((tab) => tab.addEventListener('click', () => {
     const active = t === tab;
     t.classList.toggle('active', active);
     t.setAttribute('aria-selected', String(active));
+    // One tab in the Tab key's way, the one chosen; the arrows go from it to the others.
+    t.tabIndex = active ? 0 : -1;
   });
-  $$('.tab-panel').forEach((p) => { p.hidden = p.id !== `tab-${tab.dataset.tab}`; });
-}));
+  $$('.tab-panel').forEach((p) => { p.hidden = p.id !== `tab-${name}`; });
+}
 
-['dragenter', 'dragover'].forEach((type) => els.dropZone.addEventListener(type, (e) => {
+$$('.tabs .tab').forEach((tab) => tab.addEventListener('click', () => selectTab(tab.dataset.tab)));
+$('.tabs').addEventListener('keydown', (e) => {
+  const tabs = $$('.tabs .tab');
+  const at = tabs.indexOf(e.target);
+  const to = { ArrowRight: at + 1, ArrowLeft: at - 1, Home: 0, End: tabs.length - 1 }[e.key];
+  if (at < 0 || to === undefined) return;
   e.preventDefault();
-  els.dropZone.classList.add('dragover');
-}));
-['dragleave', 'drop'].forEach((type) => els.dropZone.addEventListener(type, (e) => {
-  e.preventDefault();
-  els.dropZone.classList.remove('dragover');
-}));
-els.dropZone.addEventListener('drop', async (e) => {
-  const files = Array.from(e.dataTransfer?.files || []);
-  // On the Edit tab, what is dropped is opened in the editor, whatever it is: a file that is not a
-  // .torrent is said to be one, rather than shared.
-  if (activeTab() === 'edit') {
+  const tab = tabs[(to + tabs.length) % tabs.length];
+  selectTab(tab.dataset.tab);
+  tab.focus();
+});
+selectTab(activeTab());
+
+/* ---------- dropped, pasted, typed: the page as a computer uses it ---------- */
+
+/** A modal dialog is open (Settings, the editor, the shortcuts): what is dropped or typed is its own. */
+const modalOpen = () => Boolean(document.querySelector('dialog[open]:modal'));
+
+/** Somewhere text is typed, where a key, a paste or text dropped belongs to the field. */
+const typing = (target) => Boolean(target?.closest?.('input:not([type="checkbox"], [type="radio"], [type="button"], [type="submit"], [type="reset"], [type="file"]), textarea, select, [contenteditable]:not([contenteditable="false"])'));
+
+/**
+ * What was dropped or pasted, where it is meant to go: the tab open says what for. Text is read as a
+ * shared link is, a magnet, an info hash or a link to a .torrent; files are .torrent files to add on
+ * Download, files to share on Seed & share, and anything to open on Edit. A file that is not a
+ * .torrent, dropped on Download, is shared only once that is said yes to: never by surprise.
+ */
+async function routeDrop({ files = [], text = '' }) {
+  const tab = activeTab();
+  if (tab === 'edit') {
     if (files.length) return editTorrentFiles(files);
-    const text = e.dataTransfer?.getData('text');
     if (text) return editFromText(text).catch((err) => toast(err.message, { error: true, timeout: 9000 }));
     return undefined;
   }
-  const torrents = files.filter((f) => /\.torrent$/i.test(f.name));
-  if (torrents.length) return addTorrentFiles(torrents);
-  if (files.length) {
-    return shareOrMake(files, { name: files.length > 1 ? 'Shared files' : undefined })
-      .catch((err) => toast(err.message, { error: true, timeout: 9000 }));
+  if (!files.length) {
+    const id = parseSharedText(text);
+    if (!id) {
+      toast('Nothing to add in that: drop or paste a magnet, an info hash, a .torrent file, or a link to one.', { error: true, timeout: 7000 });
+      return undefined;
+    }
+    if (tab === 'cloud') return sendTextToCloud(id);
+    const torrent = await tryAddTorrent(id);
+    if (torrent) showCard(torrent);
+    return torrent;
   }
-  const text = e.dataTransfer?.getData('text');
-  const id = text && parseTorrentText(text);
-  if (id) await tryAddTorrent(id);
+  if (tab === 'cloud') return sendFilesToCloud(files);
+  if (tab === 'seed') return seedPicked(files);
+  const torrents = [];
+  const others = [];
+  for (const f of files) (await readTorrentFile(f).catch(() => null) ? torrents : others).push(f);
+  if (torrents.length) await addTorrentFiles(torrents);
+  if (!others.length) return undefined;
+  if (IN_BROWSER_BLOCKED) {
+    toast(IN_BROWSER_BLOCKED, { error: true, timeout: 9000 });
+    return undefined;
+  }
+  const what = others.length === 1 ? `"${others[0].name}" is not a .torrent file` : `${others.length} of these files are not .torrent files`;
+  if (!askUser(() => confirm(`${what}. Share ${others.length === 1 ? 'it' : 'them'} as a new torrent, from the Seed & share tab?`))) return undefined;
+  selectTab('seed');
+  return seedPicked(others);
+}
+
+// Dropped anywhere on the page, not only on the card at the top: a file let go of a little off it
+// was opened by the browser instead, and the app was gone.
+const dropOverlay = $('#drop-overlay');
+const DROP_WORDS = {
+  download: 'Drop to download: .torrent files, or a magnet',
+  seed: 'Drop files or a folder to share them',
+  cloud: 'Drop .torrent files or a magnet to send to the cloud',
+  edit: 'Drop .torrent files to edit them',
+};
+let dropOverlayTimer = 0;
+
+function showDropOverlay() {
+  $('#drop-overlay-text').textContent = DROP_WORDS[activeTab()] || DROP_WORDS.download;
+  dropOverlay.hidden = false;
+  // A drag that leaves the window, or is called off, does not always say so: no word for a moment is that.
+  clearTimeout(dropOverlayTimer);
+  dropOverlayTimer = setTimeout(hideDropOverlay, 400);
+}
+
+function hideDropOverlay() {
+  clearTimeout(dropOverlayTimer);
+  dropOverlay.hidden = true;
+}
+
+/** Whether this drag is the page's to take; and if not, whether it is still to be kept from the browser. */
+function dropFor(event) {
+  const dt = event.dataTransfer;
+  const files = draggingFiles(dt);
+  const text = !files && [...(dt?.types || [])].some((t) => t === 'text/plain' || t === 'text/uri-list');
+  if (!files && !text) return 'none';
+  // Under a dialog nothing is added; a file picker in it takes the file as it always does, and
+  // anything else is kept from opening in place of the app.
+  if (modalOpen()) return files && event.target.closest?.('input[type="file"]') ? 'none' : 'block';
+  // Text dropped into a field is the field's.
+  if (text && typing(event.target)) return 'none';
+  return 'take';
+}
+
+for (const type of ['dragenter', 'dragover']) {
+  window.addEventListener(type, (event) => {
+    const what = dropFor(event);
+    if (what === 'none') return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = what === 'take' ? 'copy' : 'none';
+    if (what === 'take') showDropOverlay();
+  });
+}
+window.addEventListener('dragleave', (event) => {
+  if (!event.relatedTarget) hideDropOverlay();
 });
+window.addEventListener('drop', (event) => {
+  const what = dropFor(event);
+  if (what === 'none') return;
+  event.preventDefault();
+  hideDropOverlay();
+  if (what !== 'take') return;
+  // Read now: once anything has been awaited, the browser has emptied what was dropped.
+  const { entries, files } = grabEntries(event.dataTransfer);
+  const text = files.length ? '' : droppedText(event.dataTransfer);
+  // A folder is only seen as an entry; without one among them, the files as the browser gave them.
+  const folders = entries?.some((entry) => entry.isDirectory);
+  (async () => routeDrop({ files: folders ? await filesFromEntries(entries) : files, text }))()
+    .catch((err) => toast(err.message || String(err), { error: true, timeout: 9000 }));
+});
+
+// Ctrl+V or Cmd+V on the page, not in a field: a magnet copied from elsewhere, or files copied in the
+// file manager, go where a drop would. Pasted by hand, nothing is asked first.
+document.addEventListener('paste', (event) => {
+  if (modalOpen() || typing(event.target)) return;
+  const data = event.clipboardData;
+  const files = [...(data?.files || [])];
+  const text = files.length ? '' : (data?.getData('text/plain') || '').trim();
+  if (!files.length && !text) return;
+  event.preventDefault();
+  routeDrop({ files, text }).catch((err) => toast(err.message || String(err), { error: true, timeout: 9000 }));
+});
+
+/**
+ * The keyboard, on a computer. Not in a field, nor under a dialog, which have keys of their own:
+ *   /            the search            ?          these keys, listed
+ *   ↑ ↓ Home End the list (Shift selects as it goes)
+ *   Ctrl/Cmd+A   every torrent listed  Space      pause or resume the selection, or the one open
+ *   Delete, ⌘⌫   remove them           Escape     the search emptied, then the selection
+ */
+document.addEventListener('keydown', (event) => {
+  if (event.defaultPrevented || event.isComposing || modalOpen()) return;
+  const { key, target } = event;
+  const mod = event.ctrlKey || event.metaKey;
+  if (key === 'Escape') {
+    if (listQuery || (target === els.listSearch && els.listSearch.value)) {
+      event.preventDefault();
+      listQuery = '';
+      els.listSearch.value = '';
+      renderList();
+    } else if (selection.size) {
+      event.preventDefault();
+      selection.clear();
+      renderList();
+    }
+    return;
+  }
+  if (typing(target) || event.altKey) return;
+  if (key === '?') {
+    event.preventDefault();
+    els.keysDialog.showModal();
+    return;
+  }
+  if (key === '/' && !mod && !els.listTools.hidden) {
+    event.preventDefault();
+    els.listSearch.focus();
+    els.listSearch.select();
+    return;
+  }
+  // The rest is the list's, which only a computer shows; and only from the list itself, or from the
+  // page with nothing else focused. A button, a column's header, a player has keys of its own.
+  if (!desktop.matches || !listedKeys.length) return;
+  const row = target.closest?.('.tl-row');
+  const onPage = target === document.body || target === document.documentElement;
+  if (!row && !onPage) return;
+  if (mod && key.toLowerCase() === 'a') {
+    event.preventDefault();
+    selection = new Set(listedKeys);
+    renderList();
+    return;
+  }
+  if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(key) && !mod) {
+    event.preventDefault();
+    const at = listedKeys.indexOf(focusedKey);
+    const last = listedKeys.length - 1;
+    const to = key === 'Home' ? 0 : key === 'End' ? last
+      : at < 0 ? 0 : Math.max(0, Math.min(last, at + (key === 'ArrowDown' ? 1 : -1)));
+    const next = listedKeys[to];
+    if (event.shiftKey) {
+      anchorKey ??= focusedKey ?? next;
+      selection = new Set(rangeKeys(listedKeys, anchorKey, next));
+    } else {
+      anchorKey = next;
+    }
+    focusKey(next);
+    list.focusRow(next);
+    return;
+  }
+  // The selection; or, from a row, the torrent open. Space on the page with nothing selected scrolls it.
+  const targets = selection.size ? selectedTorrents() : row ? [torrentOfKey(focusedKey)].filter(Boolean) : [];
+  // Space on a row's box ticks it, as a box does.
+  if ((key === ' ' || key === 'Spacebar') && !mod && (onPage || target === row) && targets.length) {
+    event.preventDefault();
+    const pause = targets.some((t) => !t.paused);
+    for (const torrent of targets) setPaused(torrent, pause);
+    renderList();
+    return;
+  }
+  if ((key === 'Delete' || (event.metaKey && key === 'Backspace')) && targets.length) {
+    event.preventDefault();
+    removeTorrents(targets);
+  }
+});
+
+els.keysBtn.addEventListener('click', () => els.keysDialog.showModal());
 
 // Where torrents cannot run in the page (see IN_BROWSER_BLOCKED), the Download and Seed tabs say
 // so, instead of offering pickers that could only fail.
@@ -5644,6 +5872,7 @@ function refreshAll() {
       ? `↓ ${formatSpeed(down)} ↑ ${formatSpeed(up)}`
       : count ? `${peers} peer${peers === 1 ? '' : 's'}` : 'idle';
   renderList();
+  updateLeaveWarning();
 }
 
 setInterval(refreshAll, 750);
@@ -5731,6 +5960,54 @@ els.installBtn.addEventListener('click', async () => {
   } catch { /* dismissed */ }
   installPrompt = null;
 });
+
+/*
+ * Opened by the system. A .torrent double-clicked, or opened with the installed app, arrives here
+ * (manifest file_handlers); a magnet link clicked on another page arrives as ?magnet= (protocol_handlers,
+ * or registerProtocolHandler below for a browser tab). Either is asked about first, as a share is.
+ */
+// A browser tab, not the installed app (whose manifest already says so), can still be the one magnet
+// links open in: the browser asks the user before it agrees.
+if (typeof navigator.registerProtocolHandler === 'function' && !isStandalone()) {
+  els.magnetHandlerField.hidden = false;
+  els.magnetHandlerBtn.addEventListener('click', () => {
+    try {
+      navigator.registerProtocolHandler('magnet', `${location.origin}${location.pathname}?magnet=%s`);
+      toast('Your browser asks to confirm: once it is said yes to, magnet links open here.');
+    } catch (err) {
+      toast(`This browser would not take it: ${err.message}`, { error: true });
+    }
+  });
+}
+
+/*
+ * Closing the tab, or reloading it, stops what it runs: a seed stops being shared, a download stops.
+ * The browser asks first — only while that is so here. Not in a copy that only shows another one's
+ * torrents, nor when another open copy is waiting to take them over, nor once all is paused; and the
+ * question is taken back the moment it no longer applies, since a page that asks is never kept in the
+ * browser's back/forward cache.
+ */
+let askingBeforeLeaving = false;
+function beforeLeaving(event) {
+  event.preventDefault();
+  event.returnValue = '';
+}
+
+async function updateLeaveWarning() {
+  const running = decided && !follower && [...views.keys()].some((t) => !t.remote && !t.destroyed && !t.paused);
+  let handedOn = false;
+  if (running && navigator.locks?.query) {
+    try {
+      const { pending = [] } = await navigator.locks.query();
+      handedOn = pending.some((lock) => lock.name === LEAD_LOCK);
+    } catch { /* ask, then */ }
+  }
+  const ask = running && !handedOn;
+  if (ask === askingBeforeLeaving) return;
+  askingBeforeLeaving = ask;
+  if (ask) window.addEventListener('beforeunload', beforeLeaving);
+  else window.removeEventListener('beforeunload', beforeLeaving);
+}
 
 function maybeShowIosInstallHint() {
   const isIos = /iP(hone|ad|od)/.test(navigator.userAgent) && !window.MSStream;
@@ -5837,5 +6114,21 @@ async function restoreTorrents(records) {
 // Whatever became of the start, another copy's requests are not held up for ever.
 started.then(() => startupRestored(), () => startupRestored());
 
+// Registered once the start is under way: a browser may hand over the files at once.
+if ('launchQueue' in window && typeof window.launchQueue?.setConsumer === 'function') {
+  window.launchQueue.setConsumer(async (params) => {
+    const handles = [...(params?.files || [])];
+    if (!handles.length) return;
+    const files = [];
+    for (const handle of handles) {
+      try { files.push(await handle.getFile()); } catch { /* gone meanwhile */ }
+    }
+    if (!files.length) return;
+    await started.catch(() => {});
+    const label = files.length === 1 ? `the file "${files[0].name}"` : `these ${files.length} .torrent files`;
+    if (confirmExternalAdd(label)) await addTorrentFiles(files);
+  });
+}
+
 // Expose for debugging and tests, under the name the tests have always used (see SETTINGS_KEY).
-window.__phoneTorrent = { editor, seedOptions, createTorrent, hashPieces, get follower() { return follower; }, get settings() { return settings; }, client, views, saver, started, addTorrent, askTrackersNow, seedFiles, torrentReach, unreachableReason, cloudCtx, CLOUD_PROVIDERS, cloudSend, refreshCloudLibrary, cloudRemoveItem, keyRefused, effectiveTrackers, refreshTrackerList, fetchMetadataFallback, verifyTorrentBytes, findInfoSpan, runNetworkCheck, cleanOrphanStores, isComplete, get opfsOk() { return opfsOk; } };
+window.__phoneTorrent = { editor, seedOptions, routeDrop, createTorrent, hashPieces, get follower() { return follower; }, get settings() { return settings; }, client, views, saver, started, addTorrent, askTrackersNow, seedFiles, torrentReach, unreachableReason, cloudCtx, CLOUD_PROVIDERS, cloudSend, refreshCloudLibrary, cloudRemoveItem, keyRefused, effectiveTrackers, refreshTrackerList, fetchMetadataFallback, verifyTorrentBytes, findInfoSpan, runNetworkCheck, cleanOrphanStores, isComplete, get opfsOk() { return opfsOk; } };

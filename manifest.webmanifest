@@ -28,6 +28,9 @@
       ]
     }
   },
+  "file_handlers": [
+    { "action": "./", "accept": { "application/x-bittorrent": [".torrent"] }, "launch_type": "single-client" }
+  ],
   "protocol_handlers": [
     { "protocol": "magnet", "url": "./?magnet=%s" }
   ]
