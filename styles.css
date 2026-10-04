@@ -354,6 +354,7 @@ body {
 
 /* seeding cards: the files are already on this device */
 .torrent.seeding .zip-btn,
+.torrent.seeding .folder-btn,
 .torrent.seeding .select-all-btn,
 .torrent.seeding .select-none-btn,
 .torrent.seeding .file-progress,

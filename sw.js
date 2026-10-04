@@ -33,6 +33,7 @@ const SHELL_FILES = [
   './lib/torrent-check.js',
   './lib/torrent-list.js',
   './lib/drop.js',
+  './lib/folder-save.js',
   './styles.css',
   './icon.svg',
   './manifest.webmanifest',

@@ -719,6 +719,80 @@ async function context(options = {}) {
   return ctx;
 }
 
+/**
+ * A folder to save into, for showDirectoryPicker to hand over: in memory, with just what the app asks
+ * of one (folders and files made on demand, a writable stream, removal), so the files written can be
+ * read back in any engine. `window.__folderDigests()` gives each file's path and SHA-256.
+ */
+function installMemoryFolder() {
+  const missing = () => new DOMException('not there', 'NotFoundError');
+  const make = (name) => {
+    const dirs = new Map();
+    const files = new Map();
+    return {
+      kind: 'directory',
+      name,
+      async getDirectoryHandle(n, { create = false } = {}) {
+        if (!dirs.has(n)) {
+          if (!create) throw missing();
+          dirs.set(n, make(n));
+        }
+        return dirs.get(n);
+      },
+      async getFileHandle(n, { create = false } = {}) {
+        if (!files.has(n)) {
+          if (!create) throw missing();
+          files.set(n, new Blob([]));
+        }
+        return {
+          kind: 'file',
+          name: n,
+          async getFile() { return new File([files.get(n)], n); },
+          async createWritable() {
+            const chunks = [];
+            return { async write(chunk) { chunks.push(chunk.slice(0)); }, async close() { files.set(n, new Blob(chunks)); }, async abort() {} };
+          },
+        };
+      },
+      async removeEntry(n) { files.delete(n); dirs.delete(n); },
+      async *walk(prefix = '') {
+        for (const [n, blob] of files) yield [`${prefix}${n}`, blob];
+        for (const [n, dir] of dirs) yield* dir.walk(`${prefix}${n}/`);
+      },
+    };
+  };
+  const root = make('Downloads');
+  window.showDirectoryPicker = async () => root;
+  window.__folderDigests = async () => {
+    const out = {};
+    for await (const [p, blob] of root.walk()) {
+      const digest = await crypto.subtle.digest('SHA-256', await blob.arrayBuffer());
+      out[p] = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+    }
+    return out;
+  };
+}
+
+/** The same with a real folder handle, the origin's private file system, where the engine writes there (Chromium). */
+function installOpfsFolder() {
+  const folder = async () => (await navigator.storage.getDirectory()).getDirectoryHandle('saved-in-a-folder', { create: true });
+  window.showDirectoryPicker = folder;
+  window.__folderDigests = async () => {
+    const out = {};
+    const walk = async (dir, prefix) => {
+      for await (const [n, handle] of dir.entries()) {
+        if (handle.kind === 'directory') await walk(handle, `${prefix}${n}/`);
+        else {
+          const digest = await crypto.subtle.digest('SHA-256', await (await handle.getFile()).arrayBuffer());
+          out[`${prefix}${n}`] = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+        }
+      }
+    };
+    await walk(await folder(), '');
+    return out;
+  };
+}
+
 let failed = false;
 try {
   /* ---------- npm start: this machine only, unless asked; and then the app, not the checkout ---------- */
@@ -2358,6 +2432,29 @@ try {
   }
   log('zip save OK:', zipDownload.suggestedFilename());
 
+  // Or straight into a folder, as in the torrent, where the browser can write into one (Chrome and
+  // Edge on a computer); no button where it cannot.
+  assert.equal(await phone.$eval('.torrent .folder-btn', (b) => b.hidden), BROWSER === 'webkit', `Save to a folder ${BROWSER === 'webkit' ? 'hidden: this engine cannot write into a folder' : 'offered'}`);
+  const savedInFolder = async (label) => {
+    const before = await phone.$$eval('.toast', (els) => els.filter((e) => /in "(Downloads|saved-in-a-folder)"/.test(e.textContent)).length);
+    await phone.click('.torrent .folder-btn');
+    await waitFor(() => phone.$$eval('.toast', (els) => els.filter((e) => /Saved 2 files in "(Downloads|saved-in-a-folder)"/.test(e.textContent)).length).then((n) => n > before), { label, timeout: 30000 });
+    const digests = await phone.evaluate(() => window.__folderDigests());
+    assert.deepEqual(Object.keys(digests).sort(), files.map((f) => `Swarmdeck Test/${f.name}`).sort(), `${label}: the torrent's folder, and its files in it`);
+    for (const f of files) assert.equal(digests[`Swarmdeck Test/${f.name}`], f.sha, `${label}: ${f.name} matches`);
+  };
+  await phone.evaluate(installMemoryFolder);
+  await phone.waitForSelector('.torrent .folder-btn:not([hidden]):not([disabled])', { timeout: 5000 });
+  await savedInFolder('saved into a folder');
+  const dialogsBeforeAgain = dialogs;
+  await savedInFolder('saved into it again');
+  assert.equal(dialogs, dialogsBeforeAgain + 1, 'asked first, files being there already');
+  if (BROWSER === 'chromium') {
+    await phone.evaluate(installOpfsFolder);
+    await savedInFolder('saved into a real folder handle');
+  }
+  log(`save to a folder: the torrent's tree and every byte, asked before replacing${BROWSER === 'chromium' ? ', through a real handle too' : ''}`);
+
   // A save lasts as long as the file takes to hand over — seconds to minutes on a phone — and the
   // list is redrawn every 750 ms meanwhile. Neither button may be offered again before its save is
   // over: a second tap was a second download (or, on iOS, a second copy in memory).
@@ -3774,6 +3871,13 @@ try {
   const unzippedFromSecond = path.join(TMP, 'unzipped-from-second-copy');
   execFileSync('unzip', ['-q', '-o', zipFromSecondPath, '-d', unzippedFromSecond]);
   for (const f of files) assert.equal(sha(readFileSync(path.join(unzippedFromSecond, 'Swarmdeck Test', f.name))), f.sha, `zip entry ${f.name} from the second copy matches`);
+  // Into a folder from the second copy too: the files stream over from the copy that runs them.
+  await secondCopy.evaluate(installMemoryFolder);
+  await secondCard('Swarmdeck Test').locator('.folder-btn:not([hidden]):not([disabled])').click({ timeout: 10000 });
+  await waitFor(() => secondCopy.$$eval('.toast', (els) => els.some((e) => /Saved 2 files in "Downloads"/.test(e.textContent))), { label: 'saved into a folder from the second copy', timeout: 60000 });
+  const folderFromSecond = await secondCopy.evaluate(() => window.__folderDigests());
+  for (const f of files) assert.equal(folderFromSecond[`Swarmdeck Test/${f.name}`], f.sha, `${f.name} saved into a folder from the second copy matches`);
+  log('a copy that follows saves into a folder too, every byte streamed over from the one that leads');
 
   const addedThere = createHash('sha1').update(`added in the second copy ${Math.random()}`).digest('hex');
   await secondCopy.fill('#magnet-input', `magnet:?xt=urn:btih:${addedThere}&dn=added%20in%20the%20second%20copy`);

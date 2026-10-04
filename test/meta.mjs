@@ -17,6 +17,7 @@ import { matchFiles, checkTorrent, describeCheck } from '../lib/torrent-check.js
 import { createSummary, creationOptions, creationProblems, normalizeCreate } from '../lib/create-options.js';
 import { FILTERS, SORTS, rowMatches, sortRows, rangeKeys, loadListPrefs, saveListPrefs } from '../lib/torrent-list.js';
 import { grabEntries, filesFromEntries, droppedText, draggingFiles } from '../lib/drop.js';
+import { safeSegment, existing, writeToFolder } from '../lib/folder-save.js';
 import createTorrentPackage from 'create-torrent';
 import { bencode, makeTorrent } from './torrents.mjs';
 
@@ -520,6 +521,48 @@ const u8 = (b) => new Uint8Array(b.buffer, b.byteOffset, b.byteLength);
   assert.deepEqual(grabEntries({ items: [{ kind: 'file', webkitGetAsEntry: () => photos }], files: [] }).entries, [photos], 'entries, when every file has one');
   assert.equal(grabEntries({ items: [{ kind: 'file' }], files: [new File(['x'], 'x')] }).entries, null, 'none without webkitGetAsEntry: the files instead');
   log('dropped folders read all the way down, paths kept and put back after crossing to another copy, the same info hash');
+}
+
+/* ---------- saving into a folder: names any system takes, nothing left cut short ---------- */
+{
+  assert.equal(safeSegment('a/b:c*?.mkv'), 'a_b_c_.mkv', 'separators and what Windows refuses');
+  assert.equal(safeSegment('..'), '_', 'never the folder above');
+  assert.equal(safeSegment('name. '), 'name', 'no trailing dot or space');
+  assert.equal(safeSegment(''), '_');
+  // A folder handle with what the app asks of one, in memory.
+  const missing = () => Object.assign(new Error('not there'), { name: 'NotFoundError' });
+  const folder = () => {
+    const dirs = new Map();
+    const files = new Map();
+    return {
+      files,
+      dirs,
+      async getDirectoryHandle(n, { create } = {}) { if (!dirs.has(n)) { if (!create) throw missing(); dirs.set(n, folder()); } return dirs.get(n); },
+      async getFileHandle(n, { create } = {}) {
+        if (!files.has(n)) { if (!create) throw missing(); files.set(n, Buffer.alloc(0)); }
+        return { createWritable: async () => { const chunks = []; return { write: async (c) => { chunks.push(Buffer.from(c)); }, close: async () => { files.set(n, Buffer.concat(chunks)); }, abort: async () => {} }; } };
+      },
+      async removeEntry(n) { files.delete(n); dirs.delete(n); },
+    };
+  };
+  const streamOf = (...parts) => () => new Blob(parts).stream();
+  const root = folder();
+  const items = [
+    { path: ['Show', 'S01', 'e1.mkv'], size: 5, stream: streamOf('hello') },
+    { path: ['Show', 'notes.txt'], size: 2, stream: streamOf('ok') },
+  ];
+  assert.deepEqual(await existing(root, items), [], 'nothing there yet');
+  const done = [];
+  await writeToFolder(root, items, { onFile: (item, i) => done.push(i) });
+  assert.deepEqual(done, [0, 1]);
+  const show = root.dirs.get('Show');
+  assert.equal(String(show.dirs.get('S01').files.get('e1.mkv')), 'hello', 'the folders made, the bytes written');
+  assert.deepEqual((await existing(root, items)).map((i) => i.path.join('/')), ['Show/S01/e1.mkv', 'Show/notes.txt'], 'and then both there');
+  await assert.rejects(writeToFolder(root, [{ path: ['Show', 'cut.bin'], size: 10, stream: streamOf('short') }]), /ended early/, 'a stream short of its size throws');
+  assert.equal(show.files.has('cut.bin'), false, 'and leaves no file cut short behind');
+  await assert.rejects(writeToFolder(root, [{ path: ['Show', 'notes.txt'], size: 10, stream: streamOf('short') }]), /ended early/);
+  assert.equal(String(show.files.get('notes.txt')), 'ok', 'one that was there stays as it was');
+  log('saving into a folder: safe names, folders made, a short stream refused and nothing left cut short');
 }
 
 console.log('\nAll .torrent workshop checks passed.');

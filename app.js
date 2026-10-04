@@ -4,6 +4,7 @@ import { saver } from './saver.js';
 import { createEditor } from './lib/editor.js';
 import { parseMagnet, createTorrent, ruleFor, ruleProblems, relativePath, withPaths, commonFolder } from './lib/torrent-meta.js';
 import { grabEntries, filesFromEntries, droppedText, draggingFiles } from './lib/drop.js';
+import { canPickFolder, pickFolder, existing, writeToFolder } from './lib/folder-save.js';
 import { hashPieces } from './lib/torrent-hash.js';
 import { createOptionsUI, creationOptions, normalizeCreate } from './lib/create-options.js';
 import { createPresetsUI, normalizePresets } from './lib/presets.js';
@@ -2769,6 +2770,8 @@ function createTorrentView(torrent, record, seeding) {
   $('.share-btn', el).addEventListener('click', () => shareTorrent(torrent));
   $('.share-link-btn', el).addEventListener('click', () => shareTorrent(torrent));
   $('.zip-btn', el).addEventListener('click', () => saveZip(torrent));
+  $('.folder-btn', el).addEventListener('click', () => saveToFolder(torrent));
+  $('.folder-btn', el).hidden = !canPickFolder();
   $('.select-all-btn', el).addEventListener('click', () => setAllSelected(torrent, true));
   $('.select-none-btn', el).addEventListener('click', () => setAllSelected(torrent, false));
   $('.details-btn', el).addEventListener('click', () => openDetails(torrent));
@@ -3064,6 +3067,8 @@ function refreshView(view) {
       ? 'Save all as .zip'
       : `Save ${selected.length} selected as .zip`;
   }
+  $('.folder-btn', el).hidden = !canPickFolder();
+  if (!view.folderSaving) $('.folder-btn', el).disabled = !allSelectedDone;
 
   torrent.files.forEach((file, i) => {
     const li = view.fileEls[i];
@@ -4742,6 +4747,49 @@ async function saveZip(torrent) {
   } finally {
     view.zipSaving = false;
     refreshView(view); // the label and the state for what is selected now
+  }
+}
+
+/**
+ * The files selected, written into a folder of the computer as they are in the torrent, its folders
+ * and all (lib/folder-save.js), each as it is read: nothing is held in memory whole. Asked first when
+ * that would replace files already there.
+ */
+async function saveToFolder(torrent) {
+  const view = views.get(torrent);
+  if (!view || view.folderSaving) return;
+  let dir;
+  try {
+    // First, before anything is awaited: the browser shows its picker only while the click still counts.
+    dir = await pickFolder();
+  } catch (err) {
+    if (err?.name !== 'AbortError') toast(`Could not open that folder: ${err.message}`, { error: true });
+    return;
+  }
+  const files = selectedFiles(view).filter((f) => f.done || f.progress >= 1);
+  if (!files.length || !views.has(torrent)) return;
+  // As in the zip: a torrent of several files keeps its folder, one file is the file.
+  const items = files.map((file) => ({
+    path: torrent.files.length > 1 ? file.path.split('/') : [file.name],
+    size: file.length,
+    stream: () => file.stream(),
+  }));
+  const btn = $('.folder-btn', view.el);
+  view.folderSaving = true;
+  btn.disabled = true;
+  try {
+    const there = await existing(dir, items);
+    const n = there.length;
+    if (n && !askUser(() => confirm(`Replace ${n} file${n === 1 ? '' : 's'} already in "${dir.name}"?`))) return;
+    btn.textContent = 'Saving…';
+    await writeToFolder(dir, items, { onFile: (item, i) => { btn.textContent = `Saving ${i + 1} of ${items.length}…`; } });
+    toast(`Saved ${items.length === 1 ? `"${files[0].name}"` : `${items.length} files`} in "${dir.name}".`);
+  } catch (err) {
+    toast(`Could not save it in that folder: ${err.message}`, { error: true, timeout: 9000 });
+  } finally {
+    view.folderSaving = false;
+    btn.textContent = 'Save to a folder…';
+    refreshView(view);
   }
 }
 

@@ -173,7 +173,7 @@ function saveViaWorker(item) {
 }
 
 /** What a save that came up short says: never a file cut off, handed over as if it were whole. */
-function endedEarly() {
+export function endedEarly() {
   return new Error('it ended early: the torrent was removed, or another open copy of the app took it over. Save it again');
 }
 
