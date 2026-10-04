@@ -135,11 +135,8 @@ jobs:
           file: server/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
-          # The project was called phone-torrent, and a docker-compose.yml fetched then still pulls
-          # that image: it gets each new one too, for a while, rather than stopping where it was.
           tags: |
             ghcr.io/${{ github.repository }}:latest
             ghcr.io/${{ github.repository }}:${{ github.sha }}
-            ghcr.io/${{ github.repository_owner }}/phone-torrent:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max

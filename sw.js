@@ -12,12 +12,10 @@
 const ANSWER_TIMEOUT_MS = 8000;
 
 /* App shell cache so the installed app opens offline and loads instantly.
- * Network first, cache as fallback: a deploy is picked up on the next online load.
- * The caches, and the message saver.js answers, keep the app's old name (Phone Torrent) on purpose:
- * renamed, the old shell would stay on the device for good (activate clears only its own prefix), a
- * share parked in the inbox by the old worker would never reach the new page, and a worker of one
- * version would ask a page of the other for a download in words it does not recognise. */
-const SHELL_CACHE = 'phone-torrent-shell-v1';
+ * Network first, cache as fallback: a deploy is picked up on the next online load. */
+const SHELL_CACHE = 'swarmdeck-shell-v1';
+/* The shell cached when the app was Phone Torrent: cleared as this worker takes over. */
+const OLD_SHELL_PREFIX = 'phone-torrent-shell-';
 const SHELL_FILES = [
   './',
   './index.html',
@@ -59,7 +57,7 @@ self.addEventListener('activate', (event) => {
   event.waitUntil((async () => {
     const keys = await caches.keys();
     await Promise.all(keys
-      .filter((k) => k.startsWith('phone-torrent-shell-') && k !== SHELL_CACHE)
+      .filter((k) => (k.startsWith('swarmdeck-shell-') && k !== SHELL_CACHE) || k.startsWith(OLD_SHELL_PREFIX))
       .map((k) => caches.delete(k)));
     await self.clients.claim();
   })());
@@ -144,7 +142,7 @@ self.addEventListener('fetch', (event) => {
 /* Web Share Target: Android lets the user "share" a .torrent file or a magnet
  * link to this app. The browser POSTs it here; we park it in the Cache API and
  * redirect to the app, which picks it up (see app.js, takeSharedInbox). */
-const INBOX_CACHE = 'phone-torrent-inbox'; // the old name, kept: see SHELL_CACHE
+const INBOX_CACHE = 'swarmdeck-inbox';
 
 async function receiveShare(request, scope) {
   try {
@@ -193,7 +191,7 @@ async function serve(id) {
           }
         }
       };
-      client.postMessage({ type: 'phone-torrent:request', id }, [port2]); // the old name, kept: see SHELL_CACHE
+      client.postMessage({ type: 'swarmdeck:request', id }, [port2]);
     }
   });
 
