@@ -7,7 +7,7 @@
  */
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, truncateSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, truncateSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -1075,8 +1075,89 @@ try {
     // left the swarm that follows unable to connect in Chromium.
     await ed.reload();
     await ed.waitForFunction(() => window.__phoneTorrent?.client);
-    await edCtx.close();
     log('editor: "Edit .torrent" on a card opens that torrent, and making it private says the shared one stays public');
+
+    // Several .torrent files at once: each field kept, set, added to or cleared in all of them, and
+    // saved as one .zip — each file told whether its info hash changed.
+    const zipOf = async () => {
+      const [download] = await Promise.all([ed.waitForEvent('download', { timeout: 15000 }), ed.click('#ed-save')]);
+      assert.equal(download.suggestedFilename(), 'edited torrents.zip');
+      const stamp = Date.now();
+      const zipPath = path.join(TMP, `batch-${stamp}.zip`);
+      const dir = path.join(TMP, `batch-${stamp}`);
+      await download.saveAs(zipPath);
+      execFileSync('unzip', ['-q', '-o', zipPath, '-d', dir]);
+      return Object.fromEntries(readdirSync(dir).map((f) => [f, readFileSync(path.join(dir, f))]));
+    };
+    const trackersOfFile = (buf) => {
+      const root = decodeBencode(new Uint8Array(buf));
+      const list = root.get('announce-list');
+      if (list) return list.map((tier) => tier.map((u) => Buffer.from(u).toString()));
+      return root.has('announce') ? [[Buffer.from(root.get('announce')).toString()]] : [];
+    };
+    const one = makeTorrent(noise(20000, 74), { name: 'one.bin', trackers: ['wss://kept.example'] });
+    const two = makeTorrent(noise(20000, 75), { name: 'two.bin', extra: { comment: 'two' } });
+    await ed.click('.tab[data-tab="edit"]');
+    await ed.setInputFiles('#edit-file-input', [
+      { name: 'one.torrent', mimeType: 'application/x-bittorrent', buffer: one.buf },
+      { name: 'two.torrent', mimeType: 'application/x-bittorrent', buffer: two.buf },
+    ]);
+    await ed.waitForSelector('#editor-dialog[open][data-mode="batch"]');
+    assert.equal((await ed.textContent('#ed-save')).trim(), 'Save 2 .torrent (zip)');
+    assert.deepEqual(await ed.$$eval('#editor-chips .chip-state', (els) => els.map((e) => e.textContent)), ['hash unchanged', 'hash unchanged']);
+    assert.equal(await ed.isDisabled('#ed-trackers'), true, 'a field kept is not typed in');
+    await ed.selectOption('.ed-op[data-field="trackers"]', 'add');
+    await ed.fill('#ed-trackers', 'wss://added.example');
+    await ed.selectOption('.ed-op[data-field="comment"]', 'clear');
+    let zipped = await zipOf();
+    assert.deepEqual(Object.keys(zipped).sort(), ['one.bin.torrent', 'two.bin.torrent']);
+    assert.deepEqual(trackersOfFile(zipped['one.bin.torrent']), [['wss://kept.example'], ['wss://added.example']], 'added after the trackers it had');
+    assert.deepEqual(trackersOfFile(zipped['two.bin.torrent']), [['wss://added.example']], 'and to a file that had none');
+    assert.equal(decodeBencode(new Uint8Array(zipped['two.bin.torrent'])).has('comment'), false, 'its comment cleared');
+    assert.equal(infoHashOfFile(zipped['one.bin.torrent']), one.infoHash);
+    assert.equal(infoHashOfFile(zipped['two.bin.torrent']), two.infoHash);
+    // A source set in all of them: a new torrent of each, said on each file.
+    await ed.click('#ed-identity summary');
+    await ed.selectOption('.ed-op[data-field="source"]', 'set');
+    await ed.fill('#ed-source', 'GGn');
+    await waitFor(() => ed.$$eval('#editor-chips .chip-state', (els) => els.every((e) => e.textContent === 'new hash')), { label: 'each file marked with a new hash', timeout: 5000 });
+    zipped = await zipOf();
+    for (const [name, made] of [['one.bin.torrent', one], ['two.bin.torrent', two]]) {
+      assert.equal(Buffer.from(decodeBencode(new Uint8Array(zipped[name])).get('info').get('source')).toString(), 'GGn');
+      assert.notEqual(infoHashOfFile(zipped[name]), made.infoHash, `${name} is a new torrent`);
+    }
+    await ed.click('#ed-close');
+    log('editor: two .torrent files at once — trackers added, a comment cleared, the same hashes; a source set, new ones; saved as a .zip');
+
+    // A preset, kept in Settings and applied in the editor; and the tracker's own rule, offered.
+    await ed.click('#settings-btn');
+    await ed.click('#mode-expert');
+    await ed.click('#preset-add');
+    await ed.fill('#preset-name', 'My tracker');
+    await ed.fill('#preset-trackers', 'https://tracker.passthepopcorn.me/key/announce');
+    await ed.fill('#preset-comment', 'from the preset');
+    await ed.press('#preset-name', 'Enter');
+    assert.equal(await ed.isVisible('#settings-dialog'), true, 'Enter in a preset keeps the preset, and leaves Settings open');
+    assert.match(await ed.textContent('#preset-list'), /My tracker.*1 tracker · a comment/s);
+    await ed.click('#settings-dialog button[value="save"]');
+    await ed.waitForFunction(() => window.__phoneTorrent.settings.presets?.[0]?.name === 'My tracker');
+    await ed.setInputFiles('#edit-file-input', { name: 'one.torrent', mimeType: 'application/x-bittorrent', buffer: one.buf });
+    await ed.waitForSelector('#editor-dialog[open][data-mode="torrent"]');
+    await ed.selectOption('#ed-preset', { label: 'My tracker' });
+    assert.equal(await ed.inputValue('#ed-trackers'), 'https://tracker.passthepopcorn.me/key/announce');
+    assert.equal(await ed.inputValue('#ed-comment'), 'from the preset');
+    await ed.waitForSelector('#ed-rule-line', { state: 'visible', timeout: 5000 });
+    assert.equal(await ed.textContent('#ed-rule'), 'Tracker rules — PTP: source PTP, pieces ≤ 16 MiB');
+    assert.equal(await hashShown(), one.infoHash, 'a rule is offered, never applied by itself');
+    await ed.click('#ed-rule-source');
+    assert.equal(await ed.inputValue('#ed-source'), 'PTP');
+    await ed.waitForSelector('#editor-new', { state: 'visible', timeout: 5000 });
+    assert.equal(await ed.isVisible('#ed-rule-source'), false, 'and no longer offered once set');
+    await ed.click('#ed-close');
+    // Stored with the settings (the page's init script would write them over on a reload).
+    assert.deepEqual(await ed.evaluate(() => JSON.parse(localStorage.getItem('phone-torrent:settings')).presets.map((p) => [p.name, p.comment])), [['My tracker', 'from the preset']], 'the preset stored');
+    log('editor: a preset made in Settings fills the trackers and comment; the PTP rule shown and its source one tap away');
+    await edCtx.close();
   }
 
   /* ---------- seeder ---------- */

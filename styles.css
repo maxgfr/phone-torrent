@@ -491,3 +491,25 @@ body {
 @media (min-width: 520px) {
   .editor-foot > .primary { flex: 0 1 auto; margin-right: auto; }
 }
+
+/* ---- the editor's batch mode: what to do with each field, in every file ---- */
+.field-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
+.field-head .toggle { flex: 1; min-width: 0; }
+.ed-op, .field .ed-op { width: auto; font: inherit; font-size: 0.85rem; padding: 4px 8px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); flex: none; }
+.editor-chips { list-style: none; margin: 4px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; max-height: 96px; overflow-y: auto; }
+.chip { display: inline-flex; align-items: baseline; gap: 6px; max-width: 100%; padding: 3px 10px; border: 1px solid var(--border); border-radius: 999px; font-size: 0.8rem; }
+.chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.chip-state { color: var(--muted); flex: none; }
+.chip.new { border-color: var(--warn); }
+.chip.new .chip-state { color: var(--warn); font-weight: 600; }
+#ed-preset { min-height: 36px; padding: 6px 10px; }
+.ed-rule { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+
+/* ---- presets, in Settings ---- */
+.preset-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.preset-item { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg); }
+.preset-item > div:first-child { min-width: 0; }
+.preset-name { font-weight: 600; overflow-wrap: anywhere; }
+.preset-item .hint { margin: 0; }
+.preset-form { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; display: grid; gap: 10px; margin: 0; min-width: 0; }
+.preset-form legend { font-weight: 600; font-size: 0.9rem; padding: 0 4px; }

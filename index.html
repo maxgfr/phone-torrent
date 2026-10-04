@@ -439,6 +439,51 @@
         <button id="clear-storage-btn" class="btn danger" type="button">Delete all stored torrent data</button>
       </div>
 
+      <div class="field" data-expert id="presets-field">
+        <span>Presets</span>
+        <p class="hint">What a tracker wants in every torrent for it — its announce address, source, private
+          flag and the rest — kept under a name, applied in one tap in the editor and when making a torrent.</p>
+        <ul id="preset-list" class="preset-list" hidden></ul>
+        <button id="preset-add" class="btn small" type="button">Add a preset</button>
+        <fieldset id="preset-form" class="preset-form" hidden>
+          <legend>Preset</legend>
+          <label class="field">
+            <span>Name</span>
+            <input id="preset-name" type="text" spellcheck="false" autocomplete="off" />
+          </label>
+          <label class="field">
+            <span>Trackers (one per line, a blank line between tiers)</span>
+            <textarea id="preset-trackers" rows="3" spellcheck="false"></textarea>
+          </label>
+          <div class="field two-col">
+            <label class="field">
+              <span>Source</span>
+              <input id="preset-source" type="text" spellcheck="false" autocomplete="off" />
+            </label>
+            <label class="field">
+              <span>Largest piece</span>
+              <select id="preset-maxpiece"></select>
+            </label>
+          </div>
+          <label class="toggle">
+            <input id="preset-private" type="checkbox" />
+            <span>Private</span>
+          </label>
+          <label class="field">
+            <span>Web seeds</span>
+            <textarea id="preset-webseeds" rows="2" spellcheck="false"></textarea>
+          </label>
+          <label class="field">
+            <span>Comment</span>
+            <input id="preset-comment" type="text" />
+          </label>
+          <div class="details-actions">
+            <button id="preset-keep" class="btn small primary" type="button">Keep this preset</button>
+            <button id="preset-cancel" class="btn small ghost" type="button">Cancel</button>
+          </div>
+        </fieldset>
+      </div>
+
       <div class="field" data-expert>
         <span>Client</span>
         <p class="hint" id="saver-info"></p>
@@ -470,6 +515,7 @@
       </div>
       <p class="editor-hash"><span class="mono" id="editor-hash" title="Info hash"></span> <span class="pill new-pill" id="editor-new" hidden>New torrent</span></p>
       <p class="hint" id="editor-note" hidden></p>
+      <ul class="editor-chips" id="editor-chips" hidden></ul>
     </header>
 
     <div class="editor-body">
@@ -485,37 +531,39 @@
       </section>
 
       <section class="editor-section">
-        <label class="field">
-          <span>Trackers</span>
+        <div class="field">
+          <span class="field-head"><label class="field-label" for="ed-trackers">Trackers</label><select class="ed-op" data-field="trackers" aria-label="Trackers: keep, set or clear in every file" hidden><option value="keep">Keep</option><option value="set">Set</option><option value="add">Add</option><option value="clear">Clear</option></select></span>
           <textarea id="ed-trackers" rows="6" spellcheck="false" autocapitalize="off" autocomplete="off"></textarea>
           <span class="hint">One per line. A blank line starts the next tier, tried when the one before fails.</span>
-        </label>
+        </div>
         <div class="details-actions">
           <button id="ed-add-public" class="btn small" type="button">Add public trackers</button>
+          <select id="ed-preset" class="btn small" aria-label="Apply a preset" hidden></select>
           <button id="ed-clear-trackers" class="btn small ghost" type="button">Clear</button>
         </div>
-        <p class="hint" id="ed-rule" hidden></p>
+        <p class="hint ed-rule" id="ed-rule-line" hidden><span id="ed-rule"></span>
+          <button id="ed-rule-source" class="btn small" type="button" hidden></button></p>
       </section>
 
       <section class="editor-section">
-        <label class="field">
-          <span>Web seeds</span>
+        <div class="field">
+          <span class="field-head"><label class="field-label" for="ed-webseeds">Web seeds</label><select class="ed-op" data-field="webSeeds" aria-label="Web seeds: keep, set or clear in every file" hidden><option value="keep">Keep</option><option value="set">Set</option><option value="add">Add</option><option value="clear">Clear</option></select></span>
           <textarea id="ed-webseeds" rows="2" spellcheck="false" autocapitalize="off" autocomplete="off"></textarea>
           <span class="hint">HTTP addresses that serve the same files, one per line.</span>
-        </label>
+        </div>
       </section>
 
       <section class="editor-section" id="ed-details">
         <h3>Details</h3>
-        <label class="field">
-          <span>Comment</span>
+        <div class="field">
+          <span class="field-head"><label class="field-label" for="ed-comment">Comment</label><select class="ed-op" data-field="comment" aria-label="Comment: keep, set or clear in every file" hidden><option value="keep">Keep</option><option value="set">Set</option><option value="clear">Clear</option></select></span>
           <textarea id="ed-comment" rows="2"></textarea>
-        </label>
+        </div>
         <div class="field two-col">
-          <label class="field">
-            <span>Created by</span>
+          <div class="field">
+            <span class="field-head"><label class="field-label" for="ed-created-by">Created by</label><select class="ed-op" data-field="createdBy" aria-label="Created by: keep, set or clear in every file" hidden><option value="keep">Keep</option><option value="set">Set</option><option value="clear">Clear</option></select></span>
             <input id="ed-created-by" type="text" spellcheck="false" autocomplete="off" />
-          </label>
+          </div>
           <label class="field">
             <span>Creation date</span>
             <select id="ed-date">
@@ -533,22 +581,25 @@
           <p class="notice warn" id="ed-identity-banner" hidden>This is now a different torrent. Peers of the
             original won't see it; it has to be seeded from the files.</p>
           <p class="hint" id="ed-identity-locked" hidden></p>
-          <label class="field">
+          <label class="field" data-single>
             <span>Name</span>
             <input id="ed-name" type="text" spellcheck="false" autocomplete="off" />
           </label>
-          <label class="toggle">
-            <input id="ed-private" type="checkbox" />
-            <span>Private: announced to its own trackers only, never to public ones or to other peers' lists</span>
-          </label>
+          <div class="field-head">
+            <label class="toggle">
+              <input id="ed-private" type="checkbox" />
+              <span>Private: announced to its own trackers only, never to public ones or to other peers' lists</span>
+            </label>
+            <select class="ed-op" data-field="private" aria-label="Private: keep, set or clear in every file" hidden><option value="keep">Keep</option><option value="set">Set</option><option value="clear">Clear</option></select>
+          </div>
           <p class="notice warn" id="ed-private-warning" hidden>This torrent is shared in this app without the
             private flag: the private one is another torrent, and the public one stays out there.</p>
-          <label class="field">
-            <span>Source</span>
+          <div class="field">
+            <span class="field-head"><label class="field-label" for="ed-source">Source</label><select class="ed-op" data-field="source" aria-label="Source: keep, set or clear in every file" hidden><option value="keep">Keep</option><option value="set">Set</option><option value="clear">Clear</option></select></span>
             <input id="ed-source" type="text" spellcheck="false" autocomplete="off" />
             <span class="hint">A tag private trackers ask for, so the same files make a torrent of their own there.</span>
-          </label>
-          <div class="field">
+          </div>
+          <div class="field" data-single>
             <label class="field-label" for="ed-entropy">Entropy</label>
             <span class="share-field">
               <input id="ed-entropy" type="text" spellcheck="false" autocomplete="off" />

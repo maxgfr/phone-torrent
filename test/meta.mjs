@@ -11,6 +11,7 @@ import {
   readTorrent, applyEdits, applyBatch, identityChanges, parseTiers, formatTiers, parseMagnet, toMagnet,
   autoPieceLength, ruleFor, describeRule, ruleProblems,
 } from '../lib/torrent-meta.js';
+import { normalizePreset, normalizePresets, presetSummary } from '../lib/presets.js';
 import { bencode, makeTorrent } from './torrents.mjs';
 
 const log = (...a) => console.log('•', ...a);
@@ -235,6 +236,20 @@ const u8 = (b) => new Uint8Array(b.buffer, b.byteOffset, b.byteLength);
   assert.deepEqual((await readTorrent(cleared[0].bytes)).fields.trackers, []);
   assert.equal((await readTorrent(cleared[1].bytes)).fields.comment, '');
   log('batch: keep, set, clear and add, each file told whether its info hash changed');
+}
+
+/* ---------- presets ---------- */
+{
+  const p = normalizePreset({ name: '  PTP  ', trackers: [['https://please.passthepopcorn.me/key/announce']], source: 'PTP', private: 1, maxPiece: 2 ** 24, junk: true });
+  assert.deepEqual(Object.keys(p).sort(), ['comment', 'id', 'maxPiece', 'name', 'private', 'source', 'trackers', 'webSeeds']);
+  assert.equal(p.name, 'PTP');
+  assert.equal(p.private, true);
+  assert.equal(presetSummary(p), '1 tracker · source PTP · private · pieces ≤ 16 MiB');
+  assert.equal(normalizePreset({ maxPiece: 12345 }).maxPiece, 0, 'a piece limit that is not one on offer is none');
+  assert.equal(normalizePreset({}).name, 'Preset');
+  assert.deepEqual(normalizePresets('nonsense'), []);
+  assert.deepEqual(normalizePreset({ trackers: ['wss://a', ['wss://b', '']] }).trackers, [['wss://a'], ['wss://b']], 'a tier written as a bare address is one tier');
+  log('presets: whatever was stored read as a preset, and summed up in a line');
 }
 
 console.log('\nAll .torrent workshop checks passed.');

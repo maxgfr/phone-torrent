@@ -22,6 +22,7 @@ const SHELL_FILES = [
   './lib/bencode.js',
   './lib/torrent-meta.js',
   './lib/editor.js',
+  './lib/presets.js',
   './styles.css',
   './icon.svg',
   './manifest.webmanifest',

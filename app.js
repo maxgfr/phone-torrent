@@ -3,6 +3,7 @@ import { makeZip, predictLength } from './vendor/client-zip.js';
 import { saver } from './saver.js';
 import { createEditor } from './lib/editor.js';
 import { parseMagnet } from './lib/torrent-meta.js';
+import { createPresetsUI, normalizePresets } from './lib/presets.js';
 
 const DEFAULT_CLOUD_PROVIDER = 'torbox';
 const CLOUD_POLL_MS = 5000;
@@ -173,6 +174,8 @@ function loadSettings() {
     autoResume: true,
     fallbackDelay: 20, // seconds
     dohResolver: DEFAULT_DOH,
+    // What a tracker wants in every torrent for it, under a name: see lib/presets.js.
+    presets: [],
   };
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
@@ -192,6 +195,7 @@ function loadSettings() {
         trackers: trackers.length ? trackers : defaults.trackers,
         metadataSources: sources,
         cloud: { ...defaults.cloud, ...(parsed.cloud || {}) },
+        presets: normalizePresets(parsed.presets),
       };
     }
   } catch { /* ignore */ }
@@ -4578,6 +4582,8 @@ const editor = createEditor({
   copyText,
   fetchMetadata: metadataFor,
   publicTrackers,
+  makeZip,
+  getPresets: () => settings.presets || [],
   isShared: (infoHash) => Boolean(listed(infoHash)),
 });
 
@@ -4613,9 +4619,9 @@ async function editTorrentFiles(fileList) {
     else picked.push({ name: f.name, bytes });
   }
   if (!picked.length) return;
-  if (picked.length > 1) toast(`Opened "${picked[0].name}" — one file at a time for now.`);
   try {
-    await editor.openTorrent(picked[0].bytes);
+    if (picked.length > 1) await editor.openBatch(picked);
+    else await editor.openTorrent(picked[0].bytes);
   } catch (err) {
     toast(`Could not open ${picked[0].name}: ${err.message}`, { error: true });
   }
@@ -4774,6 +4780,7 @@ els.settingsBtn.addEventListener('click', async () => {
   els.netcheckBtn.disabled = false;
   els.netcheckBtn.textContent = 'Check tracker connectivity';
   els.corsProxyInput.value = settings.corsProxy || '';
+  presetsUI.load(settings.presets);
   applySettingsMode(Boolean(settings.expert));
   els.cloudProviderSelect.value = CLOUD_PROVIDERS[settings.cloud.provider] ? settings.cloud.provider : DEFAULT_CLOUD_PROVIDER;
   els.cloudKeyInput.value = settings.cloud.apiKey || '';
@@ -4856,6 +4863,8 @@ for (const [button, expert] of [[els.modeSimpleBtn, false], [els.modeExpertBtn, 
     saveSettings({ ...settings, expert });
   });
 }
+
+const presetsUI = createPresetsUI(els.settingsDialog);
 
 /** The key and address of each service, as typed in the dialog since it opened. Saved on Save. */
 let cloudDraft = {};
@@ -5036,6 +5045,7 @@ els.settingsDialog.addEventListener('close', () => {
     fallbackDelay: Math.max(5, Number(els.fallbackDelayInput.value) || 20),
     dohResolver: els.dohSelect.value || DEFAULT_DOH,
     expert: Boolean(settings.expert),
+    presets: presetsUI.value,
   });
   applyTrackers();
   applySpeedLimits();

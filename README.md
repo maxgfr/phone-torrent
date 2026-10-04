@@ -69,7 +69,13 @@ and saved to the device file by file or as one `.zip`.
   and a tier of its own (not for a private torrent). An inspector shows the pieces, sizes, files and
   unknown keys; **Copy magnet**, **Share…** (the `.torrent` itself, where the phone shares files) and
   **Save .torrent** take the result. A magnet opens with what it has — name, trackers, web seeds — and
-  **Get metadata** fetches the rest from the list or the torrent caches.
+  **Get metadata** fetches the rest from the list or the torrent caches. Several `.torrent` files open
+  together: each field is kept in all of them until you set it, clear it or (trackers, web seeds) add
+  to it, each file says whether its info hash changes, and they are saved as one `.zip`.
+  **Apply preset** fills in what a preset holds. The first tracker is matched against the rules of
+  private trackers that [mkbrr](https://github.com/autobrr/mkbrr) knows — largest piece, size of the
+  `.torrent`, the source they expect: shown under the trackers, a file that breaks one is said so, and
+  the expected source is one tap away (never set by itself, as it makes a new torrent).
 - **Pause, resume, remove**, per‑torrent and total speeds, ETA, peer counts, and a details panel with
   the info hash, ratio, pieces, trackers and an event log. Pausing really pauses: a connection that
   was already in flight is dropped rather than allowed to resume the transfer — and it stays paused
@@ -111,7 +117,9 @@ and saved to the device file by file or as one `.zip`.
   the cloud service and its key, whether to keep seeding, the screen lock, and the stored data.
   Nothing behind **Expert** has to be touched to download anything; it holds the trackers, the
   metadata fallbacks, the network check, speed limits, piece order, the CORS proxy, the WebRTC
-  configuration and the debug switch, for when a default is wrong for you. The choice is remembered.
+  configuration, the debug switch and the **presets** (what a tracker wants in every torrent for it —
+  trackers, source, private flag, web seeds, comment, largest piece — kept under a name), for when a
+  default is wrong for you. The choice is remembered.
   Your own server's address stays in Simple, because for that one the address *is* the setting — and
   so does **pick up where it left off**, which is what makes leaving the app and coming back work.
   **Cancel** leaves everything as it was, a field that cannot be saved included: an iPhone has no
@@ -328,7 +336,8 @@ the trackers, web seeds, comment, *created by* and date edited with the info has
 whose keys are not sorted included, which only a copy of its bytes leaves alone — and the name, private
 flag, source and entropy each making a new one; v2 and hybrid torrents keeping theirs; tiers of
 trackers as text; magnets read and written again, base32 hashes and unknown parameters included;
-piece sizes; the trackers' rules; and the same edits across several files.
+piece sizes; the trackers' rules; the same edits across several files; and presets, read from
+whatever was stored.
 
 `test/e2e.mjs` boots a WebSocket tracker and a static server, seeds a two‑file torrent through the
 UI of one browser context and downloads it in a second, phone‑sized one — the real UI throughout. It
@@ -406,7 +415,11 @@ changed with the same info hash and an unknown key kept; its source changed for 
 such, and the one marked being the one saved; private, with no public trackers and no magnet; public
 trackers added once each, from the app, the `wss://` list and newTrackon; a magnet with only its name,
 trackers and web seeds until **Get metadata** fetches it from a cache, its tracker kept; a card's torrent
-opened from its **Edit .torrent**, and made private with a warning; and at 320px, four tabs and the
+opened from its **Edit .torrent**, and made private with a warning; two `.torrent` files at once, a
+tracker added and a comment cleared with their info hashes kept, then a source set with a new hash
+each, both times unzipped from the `.zip` saved; a preset made in Settings (Enter keeping it, not
+closing Settings) filling the trackers and comment, the PTP rule it brings shown and its source set in
+one tap, never by itself; and at 320px, four tabs and the
 whole dialog on the screen, its banner, mark, hints and Save at 4.5:1 or better in light and dark.
 
 `test/server.mjs` is the other half, with no browser anywhere: a plain BitTorrent client seeds a file
@@ -472,7 +485,8 @@ require it.
 | `saver.js` | hands a `ReadableStream` to the service worker, or falls back to a Blob |
 | `lib/bencode.js` | bencode without loss: byte strings stay bytes, big integers BigInts, keys in their order |
 | `lib/torrent-meta.js` | a `.torrent` read and edited (its `info` copied when untouched), magnets, piece sizes, the trackers' rules |
-| `lib/editor.js` | the editor's dialog: one form for a `.torrent` and a magnet |
+| `lib/editor.js` | the editor's dialog: one form for a `.torrent`, a magnet and several files at once |
+| `lib/presets.js` | presets, and their list and form in Settings |
 | `sw.js` | turns that stream into a download, and receives Web Share Target posts |
 | `server/` | the real BitTorrent client, its API and its Dockerfile |
 | `cloudflare/` | the Worker and container config for `wrangler deploy` |
