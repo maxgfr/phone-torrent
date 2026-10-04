@@ -56,6 +56,20 @@ and saved to the device file by file or as one `.zip`.
   to the public trackers, so its share panel says so and offers only the `.torrent`, which keeps the
   private flag — for your own devices, as it carries the passkey too. Nothing on its card copies a
   link either.
+- **Edit a `.torrent`.** The **Edit** tab opens a `.torrent` (picked, dropped or at a link), a magnet or an
+  info hash — the whole `.torrent` when the list already has that torrent — and every card has **Edit
+  .torrent** beside **Save .torrent**. One form for all of it: the trackers (one per line, a blank line
+  between tiers), the web seeds, the comment, *created by* and the creation date leave the torrent what
+  it is, and are written around its `info` without touching a byte of it, so the info hash stays. Its
+  identity — name, private flag, source, entropy — makes another torrent: the info hash is worked out
+  again as you type, a **New torrent** mark and a banner say so, and making private a torrent the app is
+  sharing says the public one stays out there. A key the editor does not know is kept, at the top and
+  inside `info`; a BitTorrent v2 or hybrid torrent keeps its identity, which this does not rehash.
+  **Add public trackers** adds the app's own, the `wss://` list and newTrackon's stable list, each once
+  and a tier of its own (not for a private torrent). An inspector shows the pieces, sizes, files and
+  unknown keys; **Copy magnet**, **Share…** (the `.torrent` itself, where the phone shares files) and
+  **Save .torrent** take the result. A magnet opens with what it has — name, trackers, web seeds — and
+  **Get metadata** fetches the rest from the list or the torrent caches.
 - **Pause, resume, remove**, per‑torrent and total speeds, ETA, peer counts, and a details panel with
   the info hash, ratio, pieces, trackers and an event log. Pausing really pauses: a connection that
   was already in flight is dropped rather than allowed to resume the transfer — and it stays paused
@@ -305,7 +319,16 @@ work.
 npm run lint          # undefined and unused symbols, across the app, the server and the tests
 npm test              # the app, in a real browser
 npm run test:server   # the server, against a real peer
+npm run test:unit     # the .torrent workshop's reading and writing, no browser
 ```
+
+`test/meta.mjs` reads and writes `.torrent` files built by a bencoder of the tests' own: decoded and
+encoded again byte for byte (integers past 2^53, names that are not UTF‑8, keys in their own order);
+the trackers, web seeds, comment, *created by* and date edited with the info hash unchanged — an `info`
+whose keys are not sorted included, which only a copy of its bytes leaves alone — and the name, private
+flag, source and entropy each making a new one; v2 and hybrid torrents keeping theirs; tiers of
+trackers as text; magnets read and written again, base32 hashes and unknown parameters included;
+piece sizes; the trackers' rules; and the same edits across several files.
 
 `test/e2e.mjs` boots a WebSocket tracker and a static server, seeds a two‑file torrent through the
 UI of one browser context and downloads it in a second, phone‑sized one — the real UI throughout. It
@@ -378,6 +401,14 @@ and, for the installed iPhone app, Cancel in reach beside a long release name on
 something dark under its white status bar in either colour scheme; and a file picker focused from
 the keyboard showing it.
 
+And the `.torrent` editor, read back from what it saves: a `.torrent`'s trackers, comment and web seeds
+changed with the same info hash and an unknown key kept; its source changed for a new one, marked as
+such, and the one marked being the one saved; private, with no public trackers and no magnet; public
+trackers added once each, from the app, the `wss://` list and newTrackon; a magnet with only its name,
+trackers and web seeds until **Get metadata** fetches it from a cache, its tracker kept; a card's torrent
+opened from its **Edit .torrent**, and made private with a warning; and at 320px, four tabs and the
+whole dialog on the screen, its banner, mark, hints and Save at 4.5:1 or better in light and dark.
+
 `test/server.mjs` is the other half, with no browser anywhere: a plain BitTorrent client seeds a file
 over an http tracker, the server is asked for it through its API, and the file comes back out whole
 and by `Range` (suffix ranges and ranges past the end included), byte for byte, through the token and
@@ -439,6 +470,9 @@ require it.
 | `index.html`, `styles.css` | the mobile‑first UI |
 | `app.js` | the client: adding, seeding, selection, pause/resume, sharing, settings, persistence, and the cloud provider table |
 | `saver.js` | hands a `ReadableStream` to the service worker, or falls back to a Blob |
+| `lib/bencode.js` | bencode without loss: byte strings stay bytes, big integers BigInts, keys in their order |
+| `lib/torrent-meta.js` | a `.torrent` read and edited (its `info` copied when untouched), magnets, piece sizes, the trackers' rules |
+| `lib/editor.js` | the editor's dialog: one form for a `.torrent` and a magnet |
 | `sw.js` | turns that stream into a download, and receives Web Share Target posts |
 | `server/` | the real BitTorrent client, its API and its Dockerfile |
 | `cloudflare/` | the Worker and container config for `wrangler deploy` |
@@ -456,6 +490,7 @@ require it.
 | Speed limits, sequential download | yes | the service's own settings |
 | Seeding, creating a torrent | yes, while the page is open | the server keeps seeding after a download |
 | Web seeds | yes | n/a |
+| Edit a `.torrent` (trackers, web seeds, comment, name, source, private) | yes | yes, on the page |
 | DHT, PEX, `udp://` and `http(s)://` trackers | **no** — impossible in a browser | **yes** |
 | Private trackers | **no** | **yes** |
 | Downloading with the phone asleep | no | **yes** — nothing depends on the phone; on Cloudflare, though, finished files go once half an hour passes with no download getting data and no request from the app — which stops asking once nothing is downloading, even left open |

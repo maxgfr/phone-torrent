@@ -2,7 +2,7 @@ import globals from 'globals';
 
 export default [
   {
-    files: ['app.js', 'saver.js'],
+    files: ['app.js', 'saver.js', 'lib/*.js'],
     languageOptions: { ecmaVersion: 2024, sourceType: 'module', globals: { ...globals.browser } },
     rules: {
       'no-undef': 'error',

@@ -1,6 +1,8 @@
 import WebTorrent from './vendor/webtorrent.min.js';
 import { makeZip, predictLength } from './vendor/client-zip.js';
 import { saver } from './saver.js';
+import { createEditor } from './lib/editor.js';
+import { parseMagnet } from './lib/torrent-meta.js';
 
 const DEFAULT_CLOUD_PROVIDER = 'torbox';
 const CLOUD_POLL_MS = 5000;
@@ -33,6 +35,9 @@ const TRACKER_LIST_MIRRORS = [
   'https://cdn.jsdelivr.net/gh/ngosang/trackerslist@master/trackers_all_ws.txt',
   'https://cdn.statically.io/gh/ngosang/trackerslist/master/trackers_all_ws.txt',
 ];
+// Trackers newTrackon has seen answer for days on end, every protocol: what "Add public trackers"
+// in the editor adds beside the WebSocket list, for the torrent clients a .torrent is also for.
+const NEWTRACKON_STABLE = 'https://newtrackon.com/api/stable';
 const DEFAULT_DOH = 'https://cloudflare-dns.com/dns-query';
 // Torrent caches that serve a .torrent by info hash. Tried only when peers never deliver the metadata.
 const DEFAULT_METADATA_SOURCES = [
@@ -102,6 +107,9 @@ const els = {
   cloudForm: $('#cloud-form'),
   cloudInput: $('#cloud-input'),
   cloudFileInput: $('#cloud-file-input'),
+  editFileInput: $('#edit-file-input'),
+  editMagnetForm: $('#edit-magnet-form'),
+  editMagnetInput: $('#edit-magnet-input'),
   cloudAccount: $('#cloud-account'),
   cloudError: $('#cloud-error'),
   cloudRefreshBtn: $('#cloud-refresh-btn'),
@@ -2653,6 +2661,7 @@ function createTorrentView(torrent, record, seeding) {
   $('.share-copy-magnet', el).addEventListener('click', (e) => copyFrom(e.currentTarget, $('.share-magnet', el).value));
   $('.share-native-btn', el).addEventListener('click', () => shareNatively(torrent));
   $('.share-torrent-btn', el).addEventListener('click', () => saveTorrentFile(torrent));
+  $('.share-edit-btn', el).addEventListener('click', () => editTorrent(torrent).catch((err) => toast(`Could not open the editor: ${err.message}`, { error: true })));
   $('.share-close-btn', el).addEventListener('click', () => { $('.share-panel', el).hidden = true; });
   // Tapping a link field selects all of it, which is what you want to do with it.
   for (const field of $$('.share-app-link, .share-magnet', el)) {
@@ -4508,6 +4517,128 @@ els.seedUrlForm.addEventListener('submit', async (event) => {
   }
 });
 
+/* ---------- the .torrent editor ---------- */
+
+/** The first of these addresses that answers with a list, read by `parse`; [] when none does. */
+async function firstList(urls, parse) {
+  for (const url of new Set(urls)) {
+    try {
+      const res = await fetch(url, { cache: 'no-store', signal: AbortSignal.timeout(8000) });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const list = parse(await res.text());
+      if (list.length) return list;
+    } catch (err) {
+      console.warn('tracker list fetch failed', url, err);
+    }
+  }
+  return [];
+}
+
+/**
+ * Every public tracker there is to add to a .torrent: the app's own, the WebSocket list (the one in
+ * Settings, or its default when that is off), and newTrackon's stable trackers of every protocol, for
+ * the other torrent clients the file is also for.
+ */
+async function publicTrackers() {
+  const ws = settings.trackerList
+    ? (await refreshTrackerList())?.trackers || []
+    : await firstList([DEFAULT_TRACKER_LIST_URL, ...TRACKER_LIST_MIRRORS], parseTrackerList);
+  const stable = await firstList([NEWTRACKON_STABLE, proxied(NEWTRACKON_STABLE)],
+    (text) => text.split(/\s+/).filter((l) => /^(udp|https?|wss?):\/\/\S+$/i.test(l)));
+  const seen = new Set();
+  return [...settings.trackers, ...ws, ...stable].filter((t) => {
+    const key = trackerKey(t);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+/** The .torrent of a torrent in the list: as it was added when it came as a file, or as WebTorrent has it. */
+async function torrentBytesOf(torrent) {
+  const view = views.get(torrent);
+  if (view?.source?.type === 'torrent') return new Uint8Array(view.source.bytes);
+  if (!torrent.metadata) return null;
+  if (!torrent.remote) return torrent.torrentFile ? new Uint8Array(torrent.torrentFile) : null;
+  return new Uint8Array(await new Response(streamFromLead(torrent, { torrentFile: true })).arrayBuffer());
+}
+
+const listed = (infoHash) => [...views.keys()].find((t) => t.infoHash === infoHash) || null;
+
+/** A magnet's metadata: from the torrent in the list that has it, or else from the torrent caches. */
+async function metadataFor(infoHash) {
+  const torrent = listed(infoHash);
+  const bytes = torrent ? await torrentBytesOf(torrent).catch(() => null) : null;
+  return bytes || fetchMetadataFallback(infoHash);
+}
+
+const editor = createEditor({
+  saver,
+  toast,
+  copyText,
+  fetchMetadata: metadataFor,
+  publicTrackers,
+  isShared: (infoHash) => Boolean(listed(infoHash)),
+});
+
+async function editTorrent(torrent) {
+  const bytes = await torrentBytesOf(torrent);
+  if (bytes) return editor.openTorrent(bytes, { live: true });
+  return editor.openMagnet(torrent.magnetURI || `magnet:?xt=urn:btih:${torrent.infoHash}`);
+}
+
+/** A magnet, an info hash or a .torrent address, opened in the editor: in full when the list has it. */
+async function editFromText(value) {
+  const id = parseTorrentText(value);
+  if (!id) throw new Error('Paste a magnet link, a 40-character info hash, or a .torrent URL.');
+  if (/^https?:\/\//i.test(id)) return editor.openTorrent(await fetchTorrentUrl(id));
+  const problem = magnetProblem(id);
+  if (problem) throw new Error(problem);
+  const torrent = listed(parseMagnet(id).infoHash);
+  const bytes = torrent ? await torrentBytesOf(torrent).catch(() => null) : null;
+  return bytes ? editor.openTorrent(bytes, { live: true }) : editor.openMagnet(id);
+}
+
+async function editTorrentFiles(fileList) {
+  const picked = [];
+  for (const f of fileList) {
+    let bytes;
+    try {
+      bytes = await readTorrentFile(f);
+    } catch (err) {
+      toast(`Could not read ${f.name}: ${err.message}`, { error: true });
+      continue;
+    }
+    if (!bytes) toast(`"${f.name}" is not a .torrent file.`, { error: true });
+    else picked.push({ name: f.name, bytes });
+  }
+  if (!picked.length) return;
+  if (picked.length > 1) toast(`Opened "${picked[0].name}" — one file at a time for now.`);
+  try {
+    await editor.openTorrent(picked[0].bytes);
+  } catch (err) {
+    toast(`Could not open ${picked[0].name}: ${err.message}`, { error: true });
+  }
+}
+
+els.editFileInput.addEventListener('change', () => {
+  const files = Array.from(els.editFileInput.files || []);
+  els.editFileInput.value = '';
+  editTorrentFiles(files);
+});
+
+els.editMagnetForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  try {
+    await editFromText(els.editMagnetInput.value);
+    els.editMagnetInput.value = '';
+  } catch (err) {
+    toast(err.message, { error: true, timeout: 9000 });
+  }
+});
+
+const activeTab = () => $('.tabs .tab.active')?.dataset.tab || 'download';
+
 // Only the add card's tabs: the Simple / Expert switch in Settings looks like one (class "tab") but
 // has no panel, and matching it too hid every panel the moment the mode was changed.
 $$('.tabs .tab').forEach((tab) => tab.addEventListener('click', () => {
@@ -4533,6 +4664,14 @@ $$('.tabs .tab').forEach((tab) => tab.addEventListener('click', () => {
 }));
 els.dropZone.addEventListener('drop', async (e) => {
   const files = Array.from(e.dataTransfer?.files || []);
+  // On the Edit tab, what is dropped is opened in the editor, whatever it is: a file that is not a
+  // .torrent is said to be one, rather than shared.
+  if (activeTab() === 'edit') {
+    if (files.length) return editTorrentFiles(files);
+    const text = e.dataTransfer?.getData('text');
+    if (text) return editFromText(text).catch((err) => toast(err.message, { error: true, timeout: 9000 }));
+    return undefined;
+  }
   const torrents = files.filter((f) => /\.torrent$/i.test(f.name));
   if (torrents.length) return addTorrentFiles(torrents);
   if (files.length) {
@@ -4551,12 +4690,14 @@ if (IN_BROWSER_BLOCKED) {
     note.textContent = IN_BROWSER_BLOCKED;
     note.hidden = false;
   }
-  for (const control of $$('#tab-download input, #tab-download button, #tab-seed input, #tab-seed button')) control.disabled = true;
+  // The editor too: it hashes with crypto.subtle, which such a page does not have either.
+  for (const control of $$('#tab-download input, #tab-download button, #tab-seed input, #tab-seed button, #tab-edit input, #tab-edit button')) control.disabled = true;
   // Not "pick a .torrent or paste a magnet above", under a picker and a field that are switched off.
   els.empty.textContent = 'No torrents here: they cannot run on this page. The Cloud tab can fetch them for you.';
 } else if (NO_WEBRTC) {
-  // Said where torrents are added, and nothing switched off: a web seed can still send one here.
-  for (const note of $$('.insecure-note')) {
+  // Said where torrents are added, and nothing switched off: a web seed can still send one here. Not
+  // on the Edit tab, which talks to no peer.
+  for (const note of $$('.insecure-note:not([data-secure-only])')) {
     note.textContent = NO_WEBRTC;
     note.hidden = false;
   }
@@ -5266,4 +5407,4 @@ async function restoreTorrents(records) {
 started.then(() => startupRestored(), () => startupRestored());
 
 // Expose for debugging and tests.
-window.__phoneTorrent = { get follower() { return follower; }, get settings() { return settings; }, client, views, saver, started, addTorrent, askTrackersNow, seedFiles, torrentReach, unreachableReason, cloudCtx, CLOUD_PROVIDERS, cloudSend, refreshCloudLibrary, cloudRemoveItem, keyRefused, effectiveTrackers, refreshTrackerList, fetchMetadataFallback, verifyTorrentBytes, findInfoSpan, runNetworkCheck, cleanOrphanStores, isComplete, get opfsOk() { return opfsOk; } };
+window.__phoneTorrent = { editor, get follower() { return follower; }, get settings() { return settings; }, client, views, saver, started, addTorrent, askTrackersNow, seedFiles, torrentReach, unreachableReason, cloudCtx, CLOUD_PROVIDERS, cloudSend, refreshCloudLibrary, cloudRemoveItem, keyRefused, effectiveTrackers, refreshTrackerList, fetchMetadataFallback, verifyTorrentBytes, findInfoSpan, runNetworkCheck, cleanOrphanStores, isComplete, get opfsOk() { return opfsOk; } };

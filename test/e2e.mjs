@@ -19,6 +19,8 @@ import { chromium, webkit, devices } from 'playwright';
 import { Server as TrackerServer } from 'bittorrent-tracker';
 import { startServer } from './serve.mjs';
 import proxyWorker from '../proxy/cloudflare-worker.js';
+import { bencode, makeTorrent } from './torrents.mjs';
+import { decode as decodeBencode } from '../lib/bencode.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const TMP = path.join(HERE, '.tmp');
@@ -52,34 +54,6 @@ setTimeout(() => {
   process.exit(2);
 }, WATCHDOG_MS).unref();
 const sha = (buf) => createHash('sha256').update(buf).digest('hex');
-
-/** Bencode just enough to build a .torrent by hand. */
-function bencode(v) {
-  if (Buffer.isBuffer(v)) return Buffer.concat([Buffer.from(`${v.length}:`), v]);
-  if (typeof v === 'string') return bencode(Buffer.from(v));
-  if (typeof v === 'number') return Buffer.from(`i${v}e`);
-  if (Array.isArray(v)) return Buffer.concat([Buffer.from('l'), ...v.map(bencode), Buffer.from('e')]);
-  const keys = Object.keys(v).sort();
-  return Buffer.concat([Buffer.from('d'), ...keys.map((k) => Buffer.concat([bencode(k), bencode(v[k])])), Buffer.from('e')]);
-}
-
-/** A single-file .torrent built by hand, with the trackers, web seeds and private flag asked for. */
-function makeTorrent(body, { name = 'file.bin', trackers = [], urlList, private: isPrivate = false } = {}) {
-  const pieceLength = 16384;
-  const pieces = [];
-  for (let off = 0; off < body.length; off += pieceLength) {
-    pieces.push(createHash('sha1').update(body.subarray(off, off + pieceLength)).digest());
-  }
-  const info = { length: body.length, name, 'piece length': pieceLength, pieces: Buffer.concat(pieces), ...(isPrivate ? { private: 1 } : {}) };
-  return {
-    buf: bencode({
-      ...(trackers.length ? { announce: trackers[0], 'announce-list': trackers.map((t) => [t]) } : {}),
-      ...(urlList ? { 'url-list': urlList } : {}),
-      info,
-    }),
-    infoHash: createHash('sha1').update(bencode(info)).digest('hex'),
-  };
-}
 
 /** A .torrent as a private tracker hands it out: private flag, https-only announce. */
 function privateTorrent(body, name = 'private release.bin') {
@@ -740,7 +714,7 @@ try {
     const base = `http://${lanAddress || '127.0.0.1'}:${shared.port}/`;
     try {
       assert.equal((await ask(base)).status, 200, 'HOST=0.0.0.0 puts it on the network');
-      for (const part of ['index.html', 'app.js', 'saver.js', 'sw.js', 'styles.css', 'manifest.webmanifest', 'icon.svg', 'icons/icon-192.png', 'vendor/webtorrent.min.js']) {
+      for (const part of ['index.html', 'app.js', 'saver.js', 'sw.js', 'styles.css', 'manifest.webmanifest', 'icon.svg', 'icons/icon-192.png', 'vendor/webtorrent.min.js', 'lib/editor.js']) {
         assert.equal((await ask(`${base}${part}`)).status, 200, `the page gets /${part}`);
       }
       // Nothing else: the server's downloads/ sits in the checkout when it runs from there, and a
@@ -934,6 +908,175 @@ try {
     await undo();
     await standalone.ctx.close();
     log('the installed iPhone app: Cancel on the save bar in reach, and its status bar legible, light and dark');
+  }
+
+  /* ---------- the .torrent editor ---------- */
+  // Its own page, no service worker (route() must see every request, in WebKit too), so saves are
+  // ordinary downloads: what the editor saved is read back here, and its info hash worked out again.
+  {
+    const noise = (n, seed) => {
+      const out = Buffer.alloc(n);
+      let x = seed;
+      for (let i = 0; i < n; i++) { x = (x * 1103515245 + 12345) & 0x7fffffff; out[i] = x >> 16; }
+      return out;
+    };
+    const infoHashOfFile = (buf) => {
+      const { spans } = decodeBencode(new Uint8Array(buf), { spans: true });
+      const [start, end] = spans.get('info');
+      return createHash('sha1').update(buf.subarray(start, end)).digest('hex');
+    };
+    const edCtx = await browser.newContext({ acceptDownloads: true, serviceWorkers: 'block', viewport: { width: 320, height: 640 }, isMobile: true, hasTouch: true });
+    let publicFetches = 0;
+    await edCtx.route('https://newtrackon.com/api/stable', (route) => {
+      publicFetches += 1;
+      return route.fulfill({ status: 200, contentType: 'text/plain', headers: { 'Access-Control-Allow-Origin': '*' }, body: 'udp://stable.example:1337/announce\n\nhttps://stable.example/announce\n' });
+    });
+    await edCtx.route('https://lists.invalid/ws.txt', (route) => route.fulfill({ status: 200, contentType: 'text/plain', headers: { 'Access-Control-Allow-Origin': '*' }, body: 'wss://listed.example\n' }));
+    const ed = await edCtx.newPage();
+    ed.on('pageerror', (e) => console.error('editor page error:', e));
+    await ed.addInitScript(({ t, rtc, sources }) => localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], trackerList: true, trackerListUrl: 'https://lists.invalid/ws.txt', rtcConfig: rtc, metadataSources: sources })),
+      { t: trackerUrl, rtc: rtcConfig, sources: [`${site.url}test/.tmp/meta-{infohash}.torrent`] });
+    await ed.goto(site.url);
+    await ed.waitForFunction(() => window.__phoneTorrent?.client);
+    await ed.waitForFunction(() => window.__phoneTorrent.saver.mode === 'stream' || window.__phoneTorrent.saver.reason, null, { timeout: 15000 });
+    const savedFrom = async (page) => {
+      const [download] = await Promise.all([page.waitForEvent('download', { timeout: 15000 }), page.click('#ed-save')]);
+      const where = path.join(TMP, `edited-${Date.now()}.torrent`);
+      await download.saveAs(where);
+      return { name: download.suggestedFilename(), buf: readFileSync(where) };
+    };
+    const hashShown = () => ed.textContent('#editor-hash');
+
+    // A .torrent, its trackers and details changed: saved, it is the same torrent.
+    const original = makeTorrent(noise(90000, 71), { name: 'edit me.bin', trackers: ['wss://old.example'], extra: { comment: 'first', 'x-kept': 'yes' } });
+    await ed.click('.tab[data-tab="edit"]');
+    await ed.setInputFiles('#edit-file-input', { name: 'edit me.torrent', mimeType: 'application/x-bittorrent', buffer: original.buf });
+    await ed.waitForSelector('#editor-dialog[open]');
+    await waitFor(async () => (await hashShown()) === original.infoHash, { label: 'the editor to show the info hash', timeout: 5000 });
+    assert.equal(await ed.inputValue('#ed-trackers'), 'wss://old.example');
+    assert.equal(await ed.inputValue('#ed-comment'), 'first');
+    await ed.fill('#ed-trackers', 'wss://new.example\n\nudp://second.example:6969');
+    await ed.fill('#ed-comment', 'second');
+    await ed.fill('#ed-webseeds', 'https://mirror.example/edit me.bin');
+    const same = await savedFrom(ed);
+    assert.equal(same.name, 'edit me.bin.torrent');
+    assert.equal(infoHashOfFile(same.buf), original.infoHash, 'trackers, comment and web seeds leave the info hash');
+    const sameRoot = decodeBencode(new Uint8Array(same.buf));
+    assert.deepEqual(sameRoot.get('announce-list').map((tier) => tier.map((u) => Buffer.from(u).toString())), [['wss://new.example'], ['udp://second.example:6969']]);
+    assert.equal(Buffer.from(sameRoot.get('comment')).toString(), 'second');
+    assert.equal(Buffer.from(sameRoot.get('x-kept')).toString(), 'yes', 'and a key the editor does not know stays');
+    assert.equal(await ed.isVisible('#editor-new'), false, 'no "New torrent" for the same one');
+    log('editor: a .torrent opened, its trackers, comment and web seeds changed and saved — the same info hash');
+
+    // Its source changed: another torrent, said at the top, and that is the one saved.
+    await ed.click('#ed-identity summary');
+    await ed.fill('#ed-source', 'PTP');
+    await ed.waitForSelector('#editor-new', { state: 'visible', timeout: 5000 });
+    assert.equal(await ed.isVisible('#ed-identity-banner'), true, 'the identity banner says it is another torrent now');
+    const shown = await hashShown();
+    assert.notEqual(shown, original.infoHash);
+    const renewed = await savedFrom(ed);
+    assert.equal(infoHashOfFile(renewed.buf), shown, 'the info hash shown is the one saved');
+    assert.equal(Buffer.from(decodeBencode(new Uint8Array(renewed.buf)).get('info').get('source')).toString(), 'PTP');
+    // Private: no public trackers for it, and no magnet to pass around.
+    await ed.check('#ed-private');
+    await waitFor(() => ed.isDisabled('#ed-add-public'), { label: '"Add public trackers" off for a private torrent', timeout: 5000 });
+    assert.equal(await ed.isDisabled('#ed-copy-magnet'), true, 'and no magnet for it');
+    await ed.uncheck('#ed-private');
+    await ed.fill('#ed-source', '');
+    await waitFor(async () => (await hashShown()) === original.infoHash, { label: 'the source emptied again: the first torrent', timeout: 5000 });
+    assert.equal(await ed.isVisible('#editor-new'), false);
+    log('editor: the source changed makes a new torrent, shown and saved; back again, the first one');
+
+    // Public trackers: the app's, the WebSocket list, and newTrackon's, each its own tier, once.
+    await ed.click('#ed-add-public');
+    await waitFor(async () => (await ed.inputValue('#ed-trackers')).includes('stable.example'), { label: 'public trackers added', timeout: 10000 });
+    const tiers = (await ed.inputValue('#ed-trackers')).split('\n\n');
+    for (const want of [trackerUrl, 'wss://listed.example', 'udp://stable.example:1337/announce', 'https://stable.example/announce']) {
+      assert.ok(tiers.includes(want), `${want} added as a tier of its own (${tiers.join(' | ')})`);
+    }
+    assert.equal(publicFetches, 1);
+    await ed.click('#ed-add-public');
+    await waitFor(() => ed.$$eval('.toast', (els) => els.some((e) => /in the list already/.test(e.textContent))), { label: 'added again: nothing new', timeout: 10000 });
+    assert.equal((await ed.inputValue('#ed-trackers')).split('\n\n').length, tiers.length, 'and nothing twice');
+    log('editor: public trackers added once each, a tier each, from the app, the WebSocket list and newTrackon');
+
+    // A phone's screen: nothing sideways, and the words of the dialog legible, light and dark.
+    await ed.click('#ed-identity summary').catch(() => {});
+    await ed.evaluate(() => { document.querySelector('#ed-identity').open = true; document.querySelector('#ed-inspector').open = true; document.querySelector('#ed-identity-banner').hidden = false; });
+    for (const colorScheme of ['light', 'dark']) {
+      await ed.emulateMedia({ colorScheme });
+      const fit = await ed.evaluate(() => {
+        const screen = document.documentElement.clientWidth;
+        return [...document.querySelectorAll('#editor-dialog *')].filter((e) => e.getClientRects().length && e.getBoundingClientRect().right > screen + 0.5).map((e) => e.id || e.className || e.localName);
+      });
+      assert.deepEqual(fit, [], `${colorScheme}: nothing in the editor reaches past a 320px screen`);
+      const pairs = await ed.evaluate(() => {
+        const bg = (e) => {
+          for (let at = e; at; at = at.parentElement) {
+            const c = getComputedStyle(at).backgroundColor;
+            if (c && c !== 'rgba(0, 0, 0, 0)' && c !== 'transparent') return c;
+          }
+          return 'rgb(255, 255, 255)';
+        };
+        const pick = (sel) => { const e = document.querySelector(sel); return [getComputedStyle(e).color, bg(e)]; };
+        return {
+          'the identity banner': pick('#ed-identity-banner'),
+          'the "New torrent" pill': pick('#editor-new'),
+          'a hint': pick('#ed-identity .hint'),
+          'the info hash': pick('#editor-hash'),
+          'Save': pick('#ed-save'),
+        };
+      });
+      for (const [what, [text, background]] of Object.entries(pairs)) {
+        const ratio = contrast(text, background);
+        assert.ok(ratio >= 4.5, `${colorScheme}: ${what} is ${text} on ${background}, ${ratio.toFixed(2)}:1`);
+      }
+    }
+    await ed.emulateMedia({ colorScheme: 'light' });
+    const tabsFit = await ed.$$eval('.tabs .tab', (els) => els.every((e) => e.scrollWidth <= e.clientWidth + 1));
+    assert.ok(tabsFit, 'four tabs at 320px, each label inside its tab');
+    await ed.click('#ed-close');
+    log('editor: fits 320px, its banner, pill, hints and Save at 4.5:1 or more, light and dark; four tabs fit');
+
+    // A magnet: name, trackers and web seeds only, until its metadata is fetched (from a cache here).
+    const fetched = makeTorrent(noise(40000, 72), { name: 'from the cache.bin', trackers: [trackerUrl] });
+    writeFileSync(path.join(TMP, `meta-${fetched.infoHash}.torrent`), fetched.buf);
+    await ed.fill('#edit-magnet-input', `magnet:?xt=urn:btih:${fetched.infoHash}&dn=Cached&tr=wss%3A%2F%2Fmagnet.example`);
+    await ed.click('#edit-magnet-form button[type="submit"]');
+    await ed.waitForSelector('#editor-dialog[open][data-mode="magnet"]');
+    assert.equal(await ed.inputValue('#ed-dn'), 'Cached');
+    assert.equal(await ed.inputValue('#ed-trackers'), 'wss://magnet.example');
+    assert.equal(await ed.isVisible('#ed-identity'), false, 'no identity to edit without the metadata');
+    assert.equal(await ed.isDisabled('#ed-save'), true, 'nor a .torrent to save');
+    await ed.click('#ed-get-metadata');
+    await ed.waitForSelector('#editor-dialog[data-mode="torrent"]', { timeout: 15000 });
+    assert.equal(await hashShown(), fetched.infoHash);
+    assert.equal(await ed.inputValue('#ed-name'), 'from the cache.bin');
+    assert.deepEqual((await ed.inputValue('#ed-trackers')).split('\n\n'), [trackerUrl, 'wss://magnet.example'], 'the magnet\'s tracker added to the .torrent\'s');
+    assert.match(await ed.textContent('#ed-inspect'), /3 × 16 KiB/);
+    await ed.click('#ed-close');
+    log('editor: a magnet opens with its name, trackers and web seeds, then whole once its metadata is fetched');
+
+    // From a card: the torrent in the list, opened with the info hash it has there.
+    await ed.click('.tab[data-tab="seed"]');
+    await ed.setInputFiles('#seed-file-input', { name: 'shared here.bin', mimeType: 'application/octet-stream', buffer: noise(30000, 73) });
+    await ed.waitForSelector('.torrent .share-panel:not([hidden])', { timeout: 15000 });
+    const seededHash = await ed.evaluate(() => window.__phoneTorrent.client.torrents[0].infoHash);
+    await ed.click('.torrent .share-edit-btn');
+    await ed.waitForSelector('#editor-dialog[open][data-mode="torrent"]');
+    await waitFor(async () => (await hashShown()) === seededHash, { label: 'the card\'s torrent in the editor', timeout: 5000 });
+    // Made private, a torrent shared here is another one: said so.
+    await ed.click('#ed-identity summary');
+    await ed.check('#ed-private');
+    await ed.waitForSelector('#ed-private-warning', { state: 'visible', timeout: 5000 });
+    await ed.click('#ed-close');
+    // The seed goes with the page, as in the layout check above: a context closed under a live seed
+    // left the swarm that follows unable to connect in Chromium.
+    await ed.reload();
+    await ed.waitForFunction(() => window.__phoneTorrent?.client);
+    await edCtx.close();
+    log('editor: "Edit .torrent" on a card opens that torrent, and making it private says the shared one stays public');
   }
 
   /* ---------- seeder ---------- */

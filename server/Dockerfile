@@ -28,6 +28,7 @@ COPY server/app.mjs server/entrypoint.sh ./server/
 COPY index.html app.js saver.js sw.js styles.css manifest.webmanifest icon.svg ./web/
 COPY icons ./web/icons
 COPY vendor ./web/vendor
+COPY lib ./web/lib
 
 ENV WEB_DIR=/app/web \
     DOWNLOAD_DIR=/data/downloads \

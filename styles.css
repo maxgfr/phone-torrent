@@ -299,6 +299,11 @@ body {
 @media (max-width: 360px) {
   .tab { padding: 9px 4px; font-size: 0.9rem; }
 }
+/* Four of them on a phone: each as wide as its label, so "Download" is not cut at a quarter of the
+   card while "Edit" has room to spare; "Seed & share" takes two lines when it must. */
+@media (max-width: 480px) {
+  .tabs .tab { flex: 1 1 0; min-width: min-content; }
+}
 .tab.active { background: var(--card); color: var(--text); box-shadow: var(--shadow); }
 
 /* ---- torrent head actions ---- */
@@ -426,4 +431,63 @@ body {
   @media (prefers-color-scheme: light) {
     .topbar { padding-top: 10px; border-top: env(safe-area-inset-top) solid #0f172a; }
   }
+}
+
+/* ---- the .torrent editor ----
+   Full screen on a phone, a column on a wider screen: a header that says which torrent (and whether it
+   is still the same one), the form that scrolls, and the actions always in reach at the bottom. */
+.dialog.editor {
+  width: 100vw; max-width: 100vw; height: 100dvh; max-height: 100dvh; margin: 0;
+  border-radius: 0; overflow: hidden; padding: 0;
+}
+.dialog.editor[open] { display: flex; flex-direction: column; }
+@media (min-width: 760px) {
+  .dialog.editor { width: min(720px, 92vw); height: calc(100dvh - 48px); margin: auto; border-radius: var(--radius); }
+}
+.editor-head {
+  padding: calc(12px + env(safe-area-inset-top)) 16px 10px; border-bottom: 1px solid var(--border);
+  display: grid; gap: 4px; min-width: 0;
+}
+.editor-title-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.editor-title-row h2 { margin: 0; font-size: 1.05rem; overflow-wrap: anywhere; min-width: 0; }
+.editor-hash { margin: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--muted); min-width: 0; }
+.editor-hash .mono { overflow-wrap: anywhere; min-width: 0; }
+.new-pill { color: var(--warn); border-color: var(--warn); font-weight: 600; }
+.editor-head .hint { margin: 0; }
+.editor-body { flex: 1; overflow-y: auto; padding: 16px; display: grid; gap: 18px; align-content: start; overscroll-behavior: contain; }
+.editor-body > * { min-width: 0; }
+.editor-section { display: grid; gap: 8px; }
+.editor-section h3 { margin: 0; font-size: 0.95rem; }
+.editor-section .hint { margin: 0; }
+.editor-body textarea { width: 100%; }
+.field-label { font-weight: 600; font-size: 0.9rem; }
+.notice.warn { color: var(--warn); margin: 0; font-size: 0.9rem; }
+.editor-identity { border: 1px dashed var(--warn); border-radius: 10px; padding: 10px 12px; }
+.editor-identity summary, .editor-inspector summary { font-weight: 600; cursor: pointer; }
+.editor-identity summary .hint { font-weight: 400; margin-left: 4px; }
+.editor-identity-body { display: grid; gap: 12px; margin-top: 12px; }
+.editor-inspector { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; }
+.editor-inspector[open] { display: grid; gap: 10px; }
+.editor-inspector .kv { margin-top: 10px; }
+.editor-inspector .kv dt { cursor: help; text-decoration: underline dotted; text-underline-offset: 3px; }
+.editor-files { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; font-size: 0.85rem; }
+.editor-files li { display: flex; justify-content: space-between; gap: 10px; padding: 4px 0; border-top: 1px solid var(--border); overflow-wrap: anywhere; }
+#ed-problems { margin: 0; display: grid; gap: 4px; font-size: 0.9rem; }
+#ed-problems p { margin: 0; }
+.editor-foot {
+  display: flex; flex-wrap: wrap; gap: 8px; padding: 10px 16px calc(10px + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--border); background: var(--card);
+}
+.editor-foot > .primary { flex: 1 1 100%; }
+.editor-foot > .btn:not(.primary) { flex: 1 1 auto; }
+.menu { position: relative; }
+.menu > summary { list-style: none; min-width: 48px; }
+.menu > summary::-webkit-details-marker { display: none; }
+.menu-list {
+  position: absolute; right: 0; bottom: calc(100% + 6px); z-index: 2; display: grid; gap: 4px; min-width: 180px;
+  padding: 6px; background: var(--card); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 8px 30px rgba(0, 0, 0, 0.25);
+}
+.menu-list .btn { justify-content: flex-start; }
+@media (min-width: 520px) {
+  .editor-foot > .primary { flex: 0 1 auto; margin-right: auto; }
 }

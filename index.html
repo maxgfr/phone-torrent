@@ -42,6 +42,7 @@
         <button class="tab active" type="button" role="tab" data-tab="download" aria-selected="true">Download</button>
         <button class="tab" type="button" role="tab" data-tab="seed" aria-selected="false">Seed &amp; share</button>
         <button class="tab" type="button" role="tab" data-tab="cloud" aria-selected="false">Cloud</button>
+        <button class="tab" type="button" role="tab" data-tab="edit" aria-selected="false">Edit</button>
       </div>
 
       <div class="tab-panel" id="tab-download" role="tabpanel">
@@ -107,6 +108,27 @@
           Your cloud account downloads the torrent — a real BitTorrent client, so private trackers,
           <code>http(s)</code> trackers and swarms with no WebRTC peer all work. Then you stream or save the
           files from here over HTTPS, with no size limit.
+        </p>
+      </div>
+
+      <div class="tab-panel" id="tab-edit" role="tabpanel" hidden>
+        <p class="notice error insecure-note" data-secure-only hidden></p>
+        <div class="add-row">
+          <label class="btn primary file-btn">
+            <!-- No accept filter, as on the Download tab: on an iPhone it greys out every .torrent. -->
+            <input id="edit-file-input" type="file" multiple />
+            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25ZM20.71 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83Z"/></svg>
+            Open .torrent files
+          </label>
+        </div>
+        <form id="edit-magnet-form" class="add-row" autocomplete="off">
+          <input id="edit-magnet-input" type="text" inputmode="url" placeholder="magnet:?xt=urn:btih:… or info hash"
+                 aria-label="Magnet link or info hash to edit" spellcheck="false" />
+          <button class="btn" type="submit">Open</button>
+        </form>
+        <p class="hint">
+          Change a .torrent's trackers, web seeds and comment and it stays the same torrent; change its name,
+          source or private flag and it becomes a new one. It is all done here, on this device, and saved back to it.
         </p>
       </div>
     </section>
@@ -180,6 +202,7 @@
         <div class="details-actions">
           <button class="btn small share-native-btn" type="button" hidden>Share…</button>
           <button class="btn small share-torrent-btn" type="button">Save .torrent</button>
+          <button class="btn small share-edit-btn" type="button">Edit .torrent</button>
           <button class="btn small share-close-btn" type="button">Close</button>
         </div>
       </div>
@@ -433,6 +456,129 @@
         <button class="btn primary" type="submit" value="save">Save</button>
       </div>
     </form>
+  </dialog>
+
+  <!-- The .torrent editor. Full screen on a phone: a form this long in a box over the page left a
+       strip of it to scroll in. One form for every way a torrent comes in (a file, a magnet). -->
+  <dialog id="editor-dialog" class="dialog editor" aria-labelledby="editor-title">
+    <header class="editor-head">
+      <div class="editor-title-row">
+        <h2 id="editor-title"></h2>
+        <button id="ed-close" class="icon-btn" type="button" aria-label="Close the editor" title="Close">
+          <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12 19 6.41Z"/></svg>
+        </button>
+      </div>
+      <p class="editor-hash"><span class="mono" id="editor-hash" title="Info hash"></span> <span class="pill new-pill" id="editor-new" hidden>New torrent</span></p>
+      <p class="hint" id="editor-note" hidden></p>
+    </header>
+
+    <div class="editor-body">
+      <section class="editor-section" id="ed-magnet" hidden>
+        <label class="field">
+          <span>Name shown (dn)</span>
+          <input id="ed-dn" type="text" spellcheck="false" autocomplete="off" />
+        </label>
+        <div class="details-actions">
+          <button id="ed-get-metadata" class="btn small" type="button">Get metadata</button>
+        </div>
+        <p class="hint" id="ed-metadata-state" role="status"></p>
+      </section>
+
+      <section class="editor-section">
+        <label class="field">
+          <span>Trackers</span>
+          <textarea id="ed-trackers" rows="6" spellcheck="false" autocapitalize="off" autocomplete="off"></textarea>
+          <span class="hint">One per line. A blank line starts the next tier, tried when the one before fails.</span>
+        </label>
+        <div class="details-actions">
+          <button id="ed-add-public" class="btn small" type="button">Add public trackers</button>
+          <button id="ed-clear-trackers" class="btn small ghost" type="button">Clear</button>
+        </div>
+        <p class="hint" id="ed-rule" hidden></p>
+      </section>
+
+      <section class="editor-section">
+        <label class="field">
+          <span>Web seeds</span>
+          <textarea id="ed-webseeds" rows="2" spellcheck="false" autocapitalize="off" autocomplete="off"></textarea>
+          <span class="hint">HTTP addresses that serve the same files, one per line.</span>
+        </label>
+      </section>
+
+      <section class="editor-section" id="ed-details">
+        <h3>Details</h3>
+        <label class="field">
+          <span>Comment</span>
+          <textarea id="ed-comment" rows="2"></textarea>
+        </label>
+        <div class="field two-col">
+          <label class="field">
+            <span>Created by</span>
+            <input id="ed-created-by" type="text" spellcheck="false" autocomplete="off" />
+          </label>
+          <label class="field">
+            <span>Creation date</span>
+            <select id="ed-date">
+              <option value="keep">Keep</option>
+              <option value="now">Set to now</option>
+              <option value="remove">Remove</option>
+            </select>
+          </label>
+        </div>
+      </section>
+
+      <details class="editor-identity" id="ed-identity">
+        <summary>Identity <span class="hint">changes the info hash</span></summary>
+        <div class="editor-identity-body">
+          <p class="notice warn" id="ed-identity-banner" hidden>This is now a different torrent. Peers of the
+            original won't see it; it has to be seeded from the files.</p>
+          <p class="hint" id="ed-identity-locked" hidden></p>
+          <label class="field">
+            <span>Name</span>
+            <input id="ed-name" type="text" spellcheck="false" autocomplete="off" />
+          </label>
+          <label class="toggle">
+            <input id="ed-private" type="checkbox" />
+            <span>Private: announced to its own trackers only, never to public ones or to other peers' lists</span>
+          </label>
+          <p class="notice warn" id="ed-private-warning" hidden>This torrent is shared in this app without the
+            private flag: the private one is another torrent, and the public one stays out there.</p>
+          <label class="field">
+            <span>Source</span>
+            <input id="ed-source" type="text" spellcheck="false" autocomplete="off" />
+            <span class="hint">A tag private trackers ask for, so the same files make a torrent of their own there.</span>
+          </label>
+          <div class="field">
+            <label class="field-label" for="ed-entropy">Entropy</label>
+            <span class="share-field">
+              <input id="ed-entropy" type="text" spellcheck="false" autocomplete="off" />
+              <button id="ed-regenerate" class="btn small" type="button">New</button>
+            </span>
+            <span class="hint">Random text that makes a new info hash for the same files.</span>
+          </div>
+        </div>
+      </details>
+
+      <details class="editor-inspector" id="ed-inspector">
+        <summary>Inspector</summary>
+        <dl class="kv" id="ed-inspect"></dl>
+        <ul class="editor-files" id="ed-files"></ul>
+      </details>
+
+      <div class="notice error" id="ed-problems" role="alert" hidden></div>
+    </div>
+
+    <footer class="editor-foot">
+      <button id="ed-save" class="btn primary" type="button">Save .torrent</button>
+      <button id="ed-copy-magnet" class="btn" type="button">Copy magnet</button>
+      <button id="ed-share" class="btn" type="button">Share…</button>
+      <details class="menu" id="ed-menu">
+        <summary class="btn" aria-label="More actions" title="More actions">⋯</summary>
+        <div class="menu-list">
+          <button id="ed-reset" class="btn small ghost" type="button">Reset</button>
+        </div>
+      </details>
+    </footer>
   </dialog>
 
   <div id="toasts" class="toasts" aria-live="assertive"></div>

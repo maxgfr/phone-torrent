@@ -30,7 +30,7 @@ const TYPES = {
  * list of what to keep out misses what it did not think of — downloads/, where the server keeps
  * every file it fetched and its list of transfers when it runs from the checkout, was one.
  */
-const THE_APP = /^(index\.html|app\.js|saver\.js|sw\.js|styles\.css|manifest\.webmanifest|icon\.svg|(icons|vendor)\/[^/.][^/]*)$/;
+const THE_APP = /^(index\.html|app\.js|saver\.js|sw\.js|styles\.css|manifest\.webmanifest|icon\.svg|(icons|vendor|lib)\/[^/.][^/]*)$/;
 
 export function startServer(port = 0, host = '127.0.0.1') {
   const loopback = host === '127.0.0.1' || host === 'localhost' || host === '::1';
