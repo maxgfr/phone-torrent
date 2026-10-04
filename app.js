@@ -6,6 +6,7 @@ import { parseMagnet, createTorrent, ruleFor, ruleProblems } from './lib/torrent
 import { hashPieces } from './lib/torrent-hash.js';
 import { createOptionsUI, creationOptions, normalizeCreate } from './lib/create-options.js';
 import { createPresetsUI, normalizePresets } from './lib/presets.js';
+import { FILTERS, SORTS, rowMatches, sortRows, loadListPrefs, saveListPrefs, createTorrentList } from './lib/torrent-list.js';
 
 const DEFAULT_CLOUD_PROVIDER = 'torbox';
 const CLOUD_POLL_MS = 5000;
@@ -160,6 +161,15 @@ const els = {
   toasts: $('#toasts'),
   torrentTemplate: $('#torrent-template'),
   fileTemplate: $('#file-template'),
+  listTools: $('#list-tools'),
+  listSearch: $('#list-search'),
+  listFilter: $('#list-filter'),
+  listSort: $('#list-sort'),
+  listDir: $('#list-dir'),
+  viewCards: $('#view-cards'),
+  viewTable: $('#view-table'),
+  torrentList: $('#torrent-list'),
+  detailEmpty: $('#detail-empty'),
 };
 
 /* ---------- settings ---------- */
@@ -2429,6 +2439,7 @@ const views = new Map();
 
 function updateEmptyState() {
   els.empty.hidden = views.size > 0;
+  scheduleList();
 }
 
 const LOG_LIMIT = 60;
@@ -2731,7 +2742,7 @@ function attachTorrent(torrent, { record, seeding, reach = null }) {
 
 function createTorrentView(torrent, record, seeding) {
   const el = els.torrentTemplate.content.firstElementChild.cloneNode(true);
-  const view = { torrent, el, fileEls: [], record: record || null, seeding: Boolean(seeding), log: [], startedAt: Date.now(), webSeeds: [...((record && record.webSeeds) || [])] };
+  const view = { torrent, el, fileEls: [], record: record || null, seeding: Boolean(seeding), log: [], startedAt: Date.now(), webSeeds: [...((record && record.webSeeds) || [])], addedAt: (record && record.addedAt) || Date.now(), row: null };
   views.set(torrent, view);
   el.classList.toggle('seeding', view.seeding);
 
@@ -2935,7 +2946,7 @@ function persistTorrent(view) {
     cloud: view.cloud ? { id: view.cloud.id, provider: view.cloud.provider, base: view.cloud.base } : ((view.record && view.record.cloud) || null),
     reach: view.reach || null,
     webSeeds: view.webSeeds,
-    addedAt: (view.record && view.record.addedAt) || Date.now(),
+    addedAt: (view.record && view.record.addedAt) || view.addedAt,
   };
   view.persisted = dbPut(view.record);
   return view.persisted;
@@ -3060,7 +3071,172 @@ function refreshView(view) {
       ? `${torrent.numPeers} connected${torrent._peersLength ? ` · ${torrent._peersLength} known` : ''}`
       : '—';
   }
+
+  // The list says what the card says, in a line.
+  view.row = rowOf(view, { pct, progress, complete, state, stuck: stuck || cannotDownloadHere(view.reach), remaining: selectedBytes - selectedDownloaded });
+  scheduleList();
 }
+
+/* ---------- the list: one row a torrent, searched, filtered and sorted (lib/torrent-list.js) ---------- */
+
+/**
+ * The row that stands for a torrent: the numbers its card shows, and what the filters ask. A row is
+ * known by the torrent's info hash, the one thing that stays when a retry rebuilds the torrent or the
+ * copy running it changes; a seed whose files are still being hashed has none yet, and a stand-in
+ * until then.
+ */
+let pendingKeys = 0;
+function keyOf(view) {
+  const key = view.torrent.infoHash || view.pendingKey || (view.pendingKey = `pending-${++pendingKeys}`);
+  if (view.key && view.key !== key && focusedKey === view.key) focusedKey = key;
+  view.key = key;
+  return key;
+}
+
+function rowOf(view, { pct = 0, progress = 0, complete = false, state = '', stuck = false, remaining = 0 } = {}) {
+  const { torrent } = view;
+  const down = torrent.downloadSpeed || 0;
+  const up = torrent.uploadSpeed || 0;
+  const paused = Boolean(torrent.paused) && !view.autoStopped;
+  const speed = (bytes) => (bytes > 512 ? formatSpeed(bytes) : '');
+  return {
+    key: keyOf(view),
+    name: torrent.name || torrent.infoHash || (view.seeding ? 'Preparing files…' : 'Fetching metadata…'),
+    size: torrent.length || 0,
+    sizeText: torrent.length ? formatBytes(torrent.length) : '—',
+    progress,
+    pct,
+    down,
+    up,
+    downText: speed(down),
+    upText: speed(up),
+    speedText: down > 512 || up > 512 ? `↓ ${formatSpeed(down)} ↑ ${formatSpeed(up)}` : '',
+    peers: torrent.numPeers || 0,
+    etaText: !complete && down > 0 && remaining > 0 ? formatEta((remaining / down) * 1000).replace(/ left$/, '') : '',
+    state: state || (view.seeding ? 'hashing' : 'connecting'),
+    paused,
+    complete,
+    seeding: !torrent.paused && (view.seeding || complete),
+    problem: Boolean(stuck),
+    addedAt: view.addedAt,
+  };
+}
+
+const list = createTorrentList(els.torrentList, {
+  onActivate: (key) => focusKey(key),
+  onSort: (sort) => {
+    const same = listPrefs.sort === sort;
+    setListPrefs({ sort, dir: same ? (listPrefs.dir === 'asc' ? 'desc' : 'asc') : SORTS.find((s) => s.key === sort).dir });
+  },
+});
+let listPrefs = loadListPrefs();
+let listQuery = '';
+/** The torrent open beside the list on a computer (its card is the one shown there), by its row's key. */
+let focusedKey = null;
+/** The rows as last listed, in order: where the open one goes when it is removed. */
+let listedKeys = [];
+let listFrame = 0;
+
+/** Redrawn once a frame at most: refreshView runs for every card at every tick. */
+function scheduleList() {
+  if (listFrame) return;
+  listFrame = requestAnimationFrame(renderList);
+}
+
+function renderList() {
+  cancelAnimationFrame(listFrame);
+  listFrame = 0;
+  const shown = [...views.values()].filter((v) => !v.torrent.destroyed);
+  const all = shown.map((v) => v.row || rowOf(v));
+  const visible = sortRows(all.filter((row) => rowMatches(row, { filter: listPrefs.filter, query: listQuery })), listPrefs);
+  // The open torrent removed: the one after it in the list opens, or the one before, or the first.
+  if (!all.some((row) => row.key === focusedKey)) {
+    const at = listedKeys.indexOf(focusedKey);
+    const near = at < 0 ? [] : [...listedKeys.slice(at + 1), ...listedKeys.slice(0, at).reverse()];
+    focusedKey = near.find((key) => visible.some((row) => row.key === key)) || visible[0]?.key || all[0]?.key || null;
+  }
+  listedKeys = visible.map((row) => row.key);
+  // The cards follow, on a phone: in the order chosen, and only the ones the search and filter keep.
+  // They are never moved in the page, whose order is what the copies of the app tell each other.
+  const order = new Map(sortRows(all, listPrefs).map((row, i) => [row.key, String(i)]));
+  const kept = new Set(listedKeys);
+  for (const view of shown) {
+    if (view.el.style.order !== order.get(view.key)) view.el.style.order = order.get(view.key);
+    view.el.classList.toggle('filtered', !kept.has(view.key));
+    view.el.classList.toggle('focused', view.key === focusedKey);
+  }
+  list.render(visible, {
+    focused: focusedKey,
+    sort: listPrefs.sort,
+    dir: listPrefs.dir,
+    emptyText: all.length ? 'Nothing here matches: change the search or the filter.' : '',
+  });
+  els.listTools.hidden = all.length === 0;
+  els.detailEmpty.hidden = all.length === 0 || Boolean(focusedKey);
+  for (const option of els.listFilter.options) {
+    const filter = FILTERS.find((f) => f.key === option.value);
+    const text = `${filter.label} (${all.filter((row) => rowMatches(row, { filter: filter.key })).length})`;
+    if (option.textContent !== text) option.textContent = text;
+  }
+}
+
+/** Open this row's torrent beside the list. */
+function focusKey(key) {
+  focusedKey = key;
+  renderList();
+}
+
+/**
+ * Open a torrent beside the list: one just added, or shared. A search or a filter that would hide it
+ * gives way, or the list would not show what was just done.
+ */
+function focusTorrent(torrent) {
+  const view = views.get(torrent);
+  if (!view) return;
+  const row = view.row || rowOf(view);
+  if (!rowMatches(row, { filter: listPrefs.filter, query: listQuery })) {
+    listQuery = '';
+    els.listSearch.value = '';
+    setListPrefs({ filter: 'all' });
+  }
+  focusKey(row.key);
+}
+
+function setListPrefs(change) {
+  listPrefs = { ...listPrefs, ...change };
+  saveListPrefs(listPrefs);
+  syncListTools();
+  renderList();
+}
+
+/** The controls as the preferences say. */
+function syncListTools() {
+  els.listFilter.value = listPrefs.filter;
+  els.listSort.value = listPrefs.sort;
+  const ascending = listPrefs.dir === 'asc';
+  els.listDir.textContent = ascending ? '↑' : '↓';
+  els.listDir.title = ascending ? 'Ascending: click for descending' : 'Descending: click for ascending';
+  els.listDir.setAttribute('aria-label', els.listDir.title);
+  const table = listPrefs.view === 'table';
+  els.torrentList.classList.toggle('table', table);
+  for (const [button, on] of [[els.viewCards, !table], [els.viewTable, table]]) {
+    button.classList.toggle('active', on);
+    button.setAttribute('aria-pressed', String(on));
+  }
+}
+
+els.listFilter.append(...FILTERS.map((f) => new Option(f.label, f.key)));
+els.listSort.append(...SORTS.map((s) => new Option(s.label, s.key)));
+syncListTools();
+els.listSearch.addEventListener('input', () => {
+  listQuery = els.listSearch.value;
+  renderList();
+});
+els.listFilter.addEventListener('change', () => setListPrefs({ filter: els.listFilter.value }));
+els.listSort.addEventListener('change', () => setListPrefs({ sort: els.listSort.value, dir: SORTS.find((s) => s.key === els.listSort.value).dir }));
+els.listDir.addEventListener('click', () => setListPrefs({ dir: listPrefs.dir === 'asc' ? 'desc' : 'asc' }));
+els.viewCards.addEventListener('click', () => setListPrefs({ view: 'cards' }));
+els.viewTable.addEventListener('click', () => setListPrefs({ view: 'table' }));
 
 /** How many of a torrent's pieces are here, of how many; a copy that only shows it is told. */
 function pieceCounts(torrent) {
@@ -3212,6 +3388,7 @@ async function replaceTorrent(torrent, id, why, { source: newSource } = {}) {
     : null;
   const source = newSource || view.source;
   const anchor = view.el.nextElementSibling;
+  const wasOpen = focusedKey === view.key;
   clearTimeout(view.fallbackTimer);
   removeView(torrent);
   await new Promise((resolve) => {
@@ -3233,6 +3410,9 @@ async function replaceTorrent(torrent, id, why, { source: newSource } = {}) {
     else if (source) nextView.source = source;
     nextView.log = [...view.log];
     nextView.picked = view.picked;
+    // Its place in the list, and open if it was: a seed has no record to say when it came.
+    nextView.addedAt = view.addedAt;
+    if (wasOpen) focusedKey = keyOf(nextView);
     $('.log', nextView.el).hidden = view.log.length === 0;
     for (const line of view.log) {
       const li = document.createElement('li');
@@ -3414,6 +3594,8 @@ function shareTorrent(torrent) {
     toast('Wait until the torrent has an info hash.');
     return;
   }
+  // On a computer, only the torrent open shows its card: this one opens, to show its links.
+  focusTorrent(torrent);
   const panel = $('.share-panel', view.el);
   const appLink = $('.share-app-link', view.el);
   const magnet = $('.share-magnet', view.el);
@@ -3451,6 +3633,7 @@ function removeView(torrent) {
   stopCloudPoll(view);
   view.el.remove();
   views.delete(torrent);
+  scheduleList();
 }
 
 async function removeTorrent(torrent) {
@@ -3678,6 +3861,7 @@ function showRemote(view, card) {
   view.webSeeds = card.webSeeds;
   view.startedAt = card.startedAt;
   view.reconnectingUntil = card.reconnectingUntil;
+  view.addedAt = card.addedAt || view.addedAt;
   if (!torrent.metadata) $('.name', el).textContent = torrent.name || torrent.infoHash || (view.seeding ? 'Preparing files…' : 'Fetching metadata…');
   if (torrent.metadata && !view.fileEls.length && torrent.files.length) {
     view.record = { deselected: card.deselected };
@@ -3899,6 +4083,7 @@ function torrentState(view) {
       cloudRefused: Boolean(view.cloudRefused),
       cloudNote: view.cloudNote || '',
       log: [...view.log],
+      addedAt: view.addedAt,
     },
   };
 }
@@ -4477,8 +4662,16 @@ async function readTorrentFile(f) {
  * tab: with a few transfers in it, a new card landed screens below, and nothing on screen said it came.
  */
 function showCard(torrent) {
-  views.get(torrent)?.el.scrollIntoView({ block: 'nearest' });
+  const view = views.get(torrent);
+  if (!view) return;
+  // On a computer it opens beside the list, and its row comes into view.
+  focusTorrent(torrent);
+  const row = desktop.matches && els.torrentList.querySelector(`.tl-row[data-key="${CSS.escape(view.key)}"]`);
+  (row || view.el).scrollIntoView({ block: 'nearest' });
 }
+
+/** Wide enough for the list beside the torrent open: styles.css says the same. */
+const desktop = window.matchMedia('(min-width: 1024px)');
 
 async function addTorrentFiles(fileList) {
   for (const f of fileList) {
@@ -5325,6 +5518,7 @@ function refreshAll() {
     : down > 512 || up > 512
       ? `↓ ${formatSpeed(down)} ↑ ${formatSpeed(up)}`
       : count ? `${peers} peer${peers === 1 ? '' : 's'}` : 'idle';
+  renderList();
 }
 
 setInterval(refreshAll, 750);

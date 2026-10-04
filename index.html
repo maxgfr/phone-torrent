@@ -37,6 +37,10 @@
   <main class="container">
     <noscript><p class="notice error">This app needs JavaScript enabled.</p></noscript>
 
+    <!-- On a computer, two panes: this one, with the ways in and the list, and the torrent open beside
+         it. On a phone, one column, as before: the list stays out, and the cards follow the search,
+         the filter and the order chosen here. -->
+    <div class="list-pane" id="list-pane">
     <section class="card add-card" id="drop-zone">
       <div class="tabs" role="tablist">
         <button class="tab active" type="button" role="tab" data-tab="download" aria-selected="true">Download</button>
@@ -206,11 +210,32 @@
       <p id="cloud-empty" class="empty"></p>
     </section>
 
-    <!-- Not a live region: its speeds and percentages change every 750 ms, and a screen reader would
-         read each change aloud. What deserves announcing (finished, errors) goes to the toasts. -->
-    <section id="torrents" class="torrents" aria-label="Torrents"></section>
+    <section class="list-tools" id="list-tools" aria-label="Find a torrent" hidden>
+      <input id="list-search" class="list-search" type="search" placeholder="Search" aria-label="Search the torrents"
+             spellcheck="false" autocomplete="off" autocapitalize="off" />
+      <select id="list-filter" aria-label="Show"></select>
+      <span class="list-sort">
+        <select id="list-sort" aria-label="Sort by"></select>
+        <button id="list-dir" class="icon-btn" type="button"></button>
+      </span>
+      <span class="list-density" role="group" aria-label="Show the list as">
+        <button id="view-cards" class="tab" type="button" aria-pressed="true">Cards</button>
+        <button id="view-table" class="tab" type="button" aria-pressed="false">Table</button>
+      </span>
+    </section>
+
+    <!-- The speeds in it change every 750 ms: not a live region, like the cards. -->
+    <div id="torrent-list" class="torrent-list" role="grid" aria-label="Torrent list" aria-multiselectable="true"></div>
 
     <p id="empty-state" class="empty">No torrents yet. Pick a .torrent file or paste a magnet link above.</p>
+    </div>
+
+    <section class="detail-pane" id="detail-pane" aria-label="The torrent open">
+      <p id="detail-empty" class="empty detail-empty" hidden>Pick a torrent in the list to see its files, its links and its details here.</p>
+      <!-- Not a live region: its speeds and percentages change every 750 ms, and a screen reader would
+           read each change aloud. What deserves announcing (finished, errors) goes to the toasts. -->
+      <section id="torrents" class="torrents" aria-label="Torrents"></section>
+    </section>
   </main>
 
   <template id="torrent-template">

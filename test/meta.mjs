@@ -15,6 +15,7 @@ import { normalizePreset, normalizePresets, presetSummary } from '../lib/presets
 import { hashInline } from '../lib/torrent-hash.js';
 import { matchFiles, checkTorrent, describeCheck } from '../lib/torrent-check.js';
 import { createSummary, creationOptions, creationProblems, normalizeCreate } from '../lib/create-options.js';
+import { FILTERS, SORTS, rowMatches, sortRows, rangeKeys, loadListPrefs, saveListPrefs } from '../lib/torrent-list.js';
 import createTorrentPackage from 'create-torrent';
 import { bencode, makeTorrent } from './torrents.mjs';
 
@@ -411,6 +412,61 @@ const u8 = (b) => new Uint8Array(b.buffer, b.byteOffset, b.byteLength);
   assert.deepEqual(creationProblems({ pieceMode: 'fixed', pieceSize: 8 * 2 ** 20, maxPiece: 4 * 2 ** 20 }), ['The piece size, 8 MiB, is over the largest set, 4 MiB.']);
   assert.deepEqual(creationProblems({ trackers: ptp }), [], 'Auto keeps to the rule by itself');
   log('making a torrent: a fixed piece size over a tracker\'s largest, or over the one set, said');
+}
+
+/* ---------- the list of torrents: search, filter, sort, Shift-click, and what is remembered ---------- */
+{
+  const rows = [
+    { key: 'a1', name: 'The.Show.S01E01.mkv', size: 300, progress: 0.5, down: 10, up: 0, addedAt: 3, paused: false, complete: false, seeding: false, problem: false },
+    { key: 'b2', name: 'holiday photos', size: 900, progress: 1, down: 0, up: 5, addedAt: 1, paused: false, complete: true, seeding: true, problem: false },
+    { key: 'c3', name: 'the.show.s01e02.mkv', size: 300, progress: 0.2, down: 0, up: 0, addedAt: 2, paused: true, complete: false, seeding: false, problem: false },
+    { key: 'd4', name: 'private release', size: 50, progress: 0, down: 0, up: 0, addedAt: 4, paused: false, complete: false, seeding: false, problem: true },
+  ];
+  const keys = (list) => list.map((r) => r.key);
+  const matching = (opts) => keys(rows.filter((r) => rowMatches(r, opts)));
+  assert.deepEqual(matching({ query: 'show s01' }), ['a1', 'c3'], 'every word, anywhere in the name, case ignored');
+  assert.deepEqual(matching({ query: 'B2' }), ['b2'], 'or the info hash');
+  assert.deepEqual(matching({ filter: 'downloading' }), ['a1', 'd4'], 'downloading: not paused, not finished, not a seed');
+  assert.deepEqual(matching({ filter: 'seeding' }), ['b2']);
+  assert.deepEqual(matching({ filter: 'paused' }), ['c3']);
+  assert.deepEqual(matching({ filter: 'done' }), ['b2'], 'a finished download still sharing is done and seeding');
+  assert.deepEqual(matching({ filter: 'problem' }), ['d4']);
+  assert.deepEqual(matching({ filter: 'paused', query: 'holiday' }), [], 'the filter and the search both');
+  assert.deepEqual(matching({ filter: 'nonsense' }), keys(rows), 'a filter it does not know is all');
+
+  assert.deepEqual(keys(sortRows(rows)), ['d4', 'a1', 'c3', 'b2'], 'newest first by default');
+  assert.deepEqual(keys(sortRows(rows, { sort: 'name', dir: 'asc' })), ['b2', 'd4', 'a1', 'c3'], 'names as people read them, case ignored');
+  assert.deepEqual(keys(sortRows(rows, { sort: 'size', dir: 'desc' })), ['b2', 'a1', 'c3', 'd4'], 'the same size keeps the order it came in');
+  assert.deepEqual(keys(sortRows(rows, { sort: 'size', dir: 'asc' })), ['d4', 'a1', 'c3', 'b2'], 'either way');
+  assert.deepEqual(keys(sortRows(rows, { sort: 'progress' })), ['b2', 'a1', 'c3', 'd4']);
+  assert.deepEqual(keys(sortRows(rows, { sort: 'speed' })), ['a1', 'b2', 'c3', 'd4'], 'speed is down and up together; ties stay put');
+  assert.deepEqual(keys(sortRows([{ key: 'x', name: 'ep10' }, { key: 'y', name: 'ep9' }], { sort: 'name', dir: 'asc' })), ['y', 'x'], 'ep9 before ep10');
+  assert.notEqual(sortRows(rows), rows, 'a new array, the rows given left as they were');
+
+  const order = ['a', 'b', 'c', 'd', 'e'];
+  assert.deepEqual(rangeKeys(order, 'b', 'd'), ['b', 'c', 'd']);
+  assert.deepEqual(rangeKeys(order, 'd', 'b'), ['b', 'c', 'd'], 'upwards too, in the order listed');
+  assert.deepEqual(rangeKeys(order, 'gone', 'c'), ['c'], 'from a row no longer listed: the one clicked');
+  assert.deepEqual(rangeKeys(order, 'a', 'gone'), [], 'to one not listed: nothing');
+
+  const memory = () => {
+    const kept = new Map();
+    return { getItem: (k) => kept.get(k) ?? null, setItem: (k, v) => kept.set(k, String(v)), kept };
+  };
+  const store = memory();
+  assert.deepEqual(loadListPrefs(store), { filter: 'all', sort: 'added', dir: 'desc', view: 'cards' }, 'nothing saved: the defaults');
+  saveListPrefs({ filter: 'seeding', sort: 'name', dir: 'asc', view: 'table', query: 'not kept' }, store);
+  assert.deepEqual(loadListPrefs(store), { filter: 'seeding', sort: 'name', dir: 'asc', view: 'table' }, 'saved and read back, the search left out');
+  assert.deepEqual(JSON.parse(store.kept.get('phone-torrent:list')), { filter: 'seeding', sort: 'name', dir: 'asc', view: 'table' }, 'under the storage names the app keeps');
+  store.setItem('phone-torrent:list', JSON.stringify({ filter: 'x', sort: 'y', dir: 'sideways', view: 'tiles' }));
+  assert.deepEqual(loadListPrefs(store), { filter: 'all', sort: 'added', dir: 'desc', view: 'cards' }, 'what it does not know: the defaults');
+  store.setItem('phone-torrent:list', '{not json');
+  assert.deepEqual(loadListPrefs(store).filter, 'all', 'nor what is not JSON');
+  const throwing = { getItem() { throw new Error('SecurityError'); }, setItem() { throw new Error('QuotaExceededError'); } };
+  assert.deepEqual(loadListPrefs(throwing), { filter: 'all', sort: 'added', dir: 'desc', view: 'cards' }, 'storage that throws: the defaults');
+  assert.doesNotThrow(() => saveListPrefs({ filter: 'done' }, throwing), 'and saving to it is only skipped');
+  assert.ok(FILTERS.some((f) => f.key === 'problem') && SORTS.every((s) => s.dir === 'asc' || s.dir === 'desc'));
+  log('the list: search and filters, a stable sort each way, Shift-click ranges, and its settings even where storage throws');
 }
 
 console.log('\nAll .torrent workshop checks passed.');

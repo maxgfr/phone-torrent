@@ -926,6 +926,140 @@ try {
     log('the installed iPhone app: Cancel on the save bar in reach, and its status bar legible, light and dark');
   }
 
+  /* ---------- a computer: the list beside the torrent open ---------- */
+  {
+    const settingsFor = ({ t, rtc }) => { if (window === window.top) localStorage.setItem('phone-torrent:settings', JSON.stringify({ trackers: [t], trackerList: false, rtcConfig: rtc })); };
+    const deskCtx = await context({ viewport: { width: 1280, height: 800 } });
+    const desk = await deskCtx.newPage();
+    desk.on('pageerror', (e) => console.error('desktop page error:', e));
+    desk.on('dialog', (d) => { if (d.type() === 'beforeunload') return; d.accept(d.type() === 'prompt' ? 'Holiday photos' : undefined); });
+    await desk.addInitScript(settingsFor, { t: trackerUrl, rtc: rtcConfig });
+    await desk.goto(site.url);
+    await desk.waitForFunction(() => window.__phoneTorrent?.client);
+    await desk.evaluate(() => window.__phoneTorrent.started);
+    assert.equal(await desk.isVisible('#list-tools'), false, 'no torrents: nothing to search');
+    await desk.click('.tab[data-tab="seed"]');
+    const seeds = [
+      [{ name: 'The.Show.S01E01.mkv', mimeType: 'video/x-matroska', buffer: Buffer.alloc(30000, 1) }],
+      [{ name: 'notes.txt', mimeType: 'text/plain', buffer: Buffer.from('a few words') }],
+      [{ name: 'a.jpg', mimeType: 'image/jpeg', buffer: Buffer.alloc(9000, 2) }, { name: 'b.jpg', mimeType: 'image/jpeg', buffer: Buffer.alloc(9000, 3) }],
+    ];
+    for (const [i, files] of seeds.entries()) {
+      await desk.setInputFiles('#seed-file-input', files);
+      await waitFor(() => desk.$$eval('.tl-row', (rows) => rows.length).then((n) => n === i + 1), { label: `seed ${i + 1} listed`, timeout: 15000 });
+    }
+    const titles = () => desk.$$eval('.tl-row .tl-title', (els) => els.map((e) => e.textContent));
+    await waitFor(async () => (await titles()).join() === 'Holiday photos,notes.txt,The.Show.S01E01.mkv', { label: 'the three seeds named, newest first', timeout: 15000 });
+    // Each seed opened on its link as it was made: the last one is open, and the only card shown.
+    const openCards = () => desk.$$eval('.torrents .torrent', (els) => els.filter((e) => getComputedStyle(e).display !== 'none').map((e) => e.querySelector('.name').textContent));
+    await waitFor(async () => (await openCards()).join() === 'Holiday photos', { label: 'the last seed open beside the list', timeout: 15000 });
+    assert.equal(await desk.$eval('.tl-row.focused .tl-title', (e) => e.textContent), 'Holiday photos', 'and marked in the list');
+    await desk.click('.tl-row:has-text("notes.txt")');
+    assert.deepEqual(await openCards(), ['notes.txt'], 'a row clicked opens its torrent');
+    log('a computer: the list beside one open torrent, the newest on top, a click to open another');
+
+    // The two panes side by side at every common width, nothing scrolling sideways; under 1024px, one
+    // column again, with every card and no list.
+    for (const width of [1024, 1280, 1440, 1920]) {
+      await desk.setViewportSize({ width, height: 800 });
+      const fit = await desk.evaluate(() => {
+        const box = (sel) => document.querySelector(sel).getBoundingClientRect();
+        return {
+          overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+          list: box('#list-pane').right,
+          detail: box('#detail-pane').left,
+          detailRight: box('#detail-pane').right,
+          screen: document.documentElement.clientWidth,
+          rows: [...document.querySelectorAll('.tl-row')].map((r) => r.scrollWidth - r.clientWidth),
+        };
+      });
+      assert.equal(fit.overflow, 0, `${width}px: the page scrolls sideways by ${fit.overflow}px`);
+      assert.ok(fit.list <= fit.detail && fit.detailRight <= fit.screen, `${width}px: the list (to ${fit.list}) and the torrent (${fit.detail}–${fit.detailRight}) side by side on a ${fit.screen}px screen`);
+      for (const view of ['table', 'cards']) {
+        await desk.click(`#view-${view}`);
+        const rows = await desk.$$eval('.tl-row', (els) => els.map((r) => r.scrollWidth - r.clientWidth));
+        assert.ok(rows.every((n) => n <= 0), `${width}px, ${view}: a row wider than the list (${rows})`);
+      }
+    }
+    await desk.setViewportSize({ width: 900, height: 800 });
+    assert.equal(await desk.isVisible('#torrent-list'), false, '900px: no list');
+    assert.equal((await openCards()).length, 3, 'and every card, one under the other');
+    await desk.setViewportSize({ width: 1280, height: 800 });
+    log('the panes fit 1024 to 1920px without scrolling sideways, in cards and in table; one column at 900px');
+
+    // Read at 4.5:1 or more, light and dark: a row's second line, a selected row's, the table's headers.
+    for (const colorScheme of ['light', 'dark']) {
+      await desk.emulateMedia({ colorScheme });
+      await desk.click('#view-cards');
+      const pairs = await desk.evaluate(() => {
+        const style = (el) => getComputedStyle(el);
+        const row = document.querySelector('.tl-row:not(.focused)');
+        const open = document.querySelector('.tl-row.focused');
+        return {
+          'a row\'s second line': [style(row.querySelector('.tl-sub')).color, style(row).backgroundColor === 'rgba(0, 0, 0, 0)' ? style(document.querySelector('.torrent-list')).backgroundColor : style(row).backgroundColor],
+          'the open row\'s second line': [style(open.querySelector('.tl-sub')).color, style(open).backgroundColor],
+        };
+      });
+      await desk.click('#view-table');
+      const head = await desk.evaluate(() => [getComputedStyle(document.querySelector('.tl-head')).color, getComputedStyle(document.querySelector('.tl-head')).backgroundColor]);
+      for (const [what, [text, background]] of Object.entries({ ...pairs, 'the table\'s headers': head })) {
+        const ratio = contrast(text, background);
+        assert.ok(ratio >= 4.5, `${colorScheme}: ${what} is ${text} on ${background}, ${ratio.toFixed(2)}:1`);
+      }
+    }
+    await desk.emulateMedia({ colorScheme: 'light' });
+    log('the list reads at 4.5:1 or more, light and dark, cards and table');
+
+    // Search, filter and order: the list, and the cards on a phone, both follow.
+    await desk.fill('#list-search', 'NOTES');
+    assert.deepEqual(await titles(), ['notes.txt'], 'searched, case ignored');
+    await desk.setViewportSize({ width: 900, height: 800 });
+    assert.deepEqual(await openCards(), ['notes.txt'], 'and the cards on one column too');
+    await desk.setViewportSize({ width: 1280, height: 800 });
+    await desk.fill('#list-search', '');
+    await desk.selectOption('#list-filter', 'paused');
+    assert.deepEqual(await titles(), [], 'nothing paused');
+    assert.match(await desk.textContent('.tl-empty'), /Nothing here matches/, 'and the list says so');
+    await desk.selectOption('#list-filter', 'all');
+    await desk.click('.tl-row:has-text("notes.txt")');
+    await desk.click('.torrent.focused .pause-btn');
+    await desk.selectOption('#list-filter', 'paused');
+    await waitFor(async () => (await titles()).join() === 'notes.txt', { label: 'the paused filter', timeout: 5000 });
+    assert.match(await desk.$eval('#list-filter option[value="paused"]', (o) => o.textContent), /\(1\)/, 'its count');
+    await desk.selectOption('#list-filter', 'seeding');
+    assert.deepEqual((await titles()).sort(), ['Holiday photos', 'The.Show.S01E01.mkv'], 'the others still seeding');
+    await desk.selectOption('#list-filter', 'all');
+    await desk.click('.torrent.focused .pause-btn');
+    await desk.selectOption('#list-sort', 'name');
+    assert.deepEqual(await titles(), ['Holiday photos', 'notes.txt', 'The.Show.S01E01.mkv'], 'by name, A to Z, case ignored');
+    await desk.click('#list-dir');
+    assert.deepEqual(await titles(), ['The.Show.S01E01.mkv', 'notes.txt', 'Holiday photos'], 'and Z to A');
+    await desk.click('#view-table');
+    await desk.click('.tl-head .tl-size .tl-sort');
+    assert.equal(await desk.getAttribute('.tl-head .tl-size', 'aria-sort'), 'descending', 'a header clicked sorts by it, biggest first');
+    assert.equal(await desk.getAttribute('.tl-head .tl-name', 'aria-sort'), 'none', 'and the others say they do not');
+    assert.deepEqual(await titles(), ['The.Show.S01E01.mkv', 'Holiday photos', 'notes.txt'], 'biggest first');
+    await desk.click('.tl-head .tl-size .tl-sort');
+    assert.equal(await desk.getAttribute('.tl-head .tl-size', 'aria-sort'), 'ascending', 'clicked again, the other way');
+    assert.deepEqual(await titles(), ['notes.txt', 'Holiday photos', 'The.Show.S01E01.mkv']);
+    const cardOrder = await desk.evaluate(() => [...document.querySelectorAll('.torrents .torrent')].sort((a, b) => Number(a.style.order) - Number(b.style.order)).map((e) => e.querySelector('.name').textContent));
+    assert.deepEqual(cardOrder, ['notes.txt', 'Holiday photos', 'The.Show.S01E01.mkv'], 'the cards in the same order');
+    log('search, filters with their counts, order and its direction, and sortable headers that say so');
+
+    // Cards or table, as left: after a reload too. At phone width there is no list to show either way.
+    assert.equal(await desk.$eval('#torrent-list', (e) => e.classList.contains('table')), true);
+    await desk.reload();
+    await desk.waitForFunction(() => window.__phoneTorrent?.client);
+    assert.equal(await desk.$eval('#torrent-list', (e) => e.classList.contains('table')), true, 'the table, after a reload');
+    assert.equal(await desk.getAttribute('#view-table', 'aria-pressed'), 'true');
+    assert.equal(await desk.$eval('#list-sort', (e) => e.value), 'size', 'and the order');
+    await desk.setViewportSize({ width: 390, height: 844 });
+    assert.equal(await desk.$eval('#torrent-list', (e) => getComputedStyle(e).display), 'none', 'at 390px, cards only');
+    await desk.evaluate(() => localStorage.removeItem('phone-torrent:list'));
+    await deskCtx.close();
+    log('cards or table, and the order, kept across a reload; cards at phone width');
+  }
+
   /* ---------- the .torrent editor ---------- */
   // Its own page, no service worker (route() must see every request, in WebKit too), so saves are
   // ordinary downloads: what the editor saved is read back here, and its info hash worked out again.

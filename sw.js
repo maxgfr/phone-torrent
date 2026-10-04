@@ -31,6 +31,7 @@ const SHELL_FILES = [
   './lib/torrent-hash.js',
   './lib/hash-worker.js',
   './lib/torrent-check.js',
+  './lib/torrent-list.js',
   './styles.css',
   './icon.svg',
   './manifest.webmanifest',
