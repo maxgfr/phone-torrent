@@ -1,8 +1,13 @@
-# Phone Torrent
+# Swarmdeck
 
-Torrents on a phone, from a web page. Add a `.torrent` or a magnet, watch it arrive, save the files
-to the device — and when the swarm is one a browser cannot reach, hand the same torrent to a real
-client: one you run in a container, or an account you already pay for.
+Torrents from a web page, on a phone or a computer. Add a `.torrent` or a magnet, watch it arrive,
+save the files to the device; share files of your own, edit, make and check `.torrent` files — and
+when the swarm is one a browser cannot reach, hand the same torrent to a real client: one you run in
+a container, or an account you already pay for.
+
+On a phone it is one column you can install like an app. On a computer it is a list of torrents beside
+the one open, with a table view, a search, several selected at once, files and folders dropped
+anywhere on the window, the keyboard, and files saved straight into a folder.
 
 The page itself is static — HTML, CSS and two vendored libraries, hosted on GitHub Pages. Everything
 else is optional and yours: nothing is enabled until you give it a key or an address.
@@ -11,9 +16,9 @@ else is optional and yours: nothing is enabled until you give it a key or an add
 
 | | what you need | private and `http(s)` trackers | best for |
 |---|---|---|---|
-| **1. The page alone** — [maxgfr.github.io/swarmdeck](https://maxgfr.github.io/swarmdeck/) | nothing | no — a browser cannot reach those swarms | torrents with WebRTC peers, and seeding from your phone |
+| **1. The page alone** — [maxgfr.github.io/swarmdeck](https://maxgfr.github.io/swarmdeck/) | nothing | no — a browser cannot reach those swarms | torrents with WebRTC peers, and seeding from your phone or computer |
 | **2. Your own server** | one `docker compose up -d` on a machine you own | yes — a real client, TCP, UDP and DHT | everything, with the files staying on your disk |
-| **3. A quick deploy** | one click or one command: Render, Fly, or Cloudflare | yes | a phone, from anywhere, with no machine at home |
+| **3. A quick deploy** | one click or one command: Render, Fly, or Cloudflare | yes | any device, from anywhere, with no machine at home |
 | **4. A cloud service** | a TorBox, put.io, Real‑Debrid or AllDebrid key | yes | no machine and no deploy at all |
 
 They are the same page. **Settings → Cloud fetch** takes one service, one key and one address, and
@@ -35,18 +40,20 @@ and saved to the device file by file or as one `.zip`.
   A magnet that cannot work — cut short in a chat, with no info hash, or BitTorrent v2 only — is
   refused with the reason, and stays in the box to be fixed. On Android you can also *share* a
   `.torrent`, a magnet or a link to a `.torrent` into the installed app, which says so when a share
-  holds nothing it can add. On desktop Chrome and Edge, `magnet:` links open in the installed app;
-  no Android browser hands them to a web app, so there it is share or paste. The card of a torrent
+  holds nothing it can add. On desktop Chrome and Edge, `magnet:` links open in the installed app
+  (or, from **Settings → Magnet links**, in a browser tab), and so do `.torrent` files opened from
+  the system; no Android browser hands them to a web app, so there it is share or paste. The card of a torrent
   you add is brought into view, below the cloud library when that is long.
 - **Choose the files you want.** Untick one and its pieces are never requested.
 - **Save file by file, or everything as one `.zip`** with the folder structure. A service worker
   turns each save into an ordinary browser download, so a multi‑gigabyte file never has to fit in
   memory; without a service worker the app falls back to building it in memory. A button stays busy
   for as long as its save runs, so a second tap does not start a second download.
-- **Seed and share.** Turn files on the phone into a torrent, and its card opens on the link, selected,
+- **Seed and share.** Turn files on this device into a torrent, and its card opens on the link, selected,
   as soon as it is ready; send it with the system share sheet, and whoever opens it downloads
-  straight from your browser. Several files are named as one collection ("Shared files" unless you
-  say otherwise; Cancel there seeds nothing). Picked again, files already being shared open the link
+  straight from your browser. A folder, picked where the browser can pick one or dropped, is shared as
+  itself, subfolders and all, under its own name. Several loose files are named as one collection
+  ("Shared files" unless you say otherwise; Cancel there seeds nothing). Picked again, files already being shared open the link
   of the seed there is. A seed stays a seed through a retry: never remembered, and gone with the page.
   A CORS‑enabled remote URL can be seeded too. The `.torrent` and the magnet are one tap away.
   The app makes the torrent itself, hashing the files off the page in a Worker (on the page where there
@@ -78,7 +85,7 @@ and saved to the device file by file or as one `.zip`.
   inside `info`; a BitTorrent v2 or hybrid torrent keeps its identity, which this does not rehash.
   **Add public trackers** adds the app's own, the `wss://` list and newTrackon's stable list, each once
   and a tier of its own (not for a private torrent). An inspector shows the pieces, sizes, files and
-  unknown keys; **Copy magnet**, **Share…** (the `.torrent` itself, where the phone shares files) and
+  unknown keys; **Copy magnet**, **Share…** (the `.torrent` itself, where the device shares files) and
   **Save .torrent** take the result. A magnet opens with what it has — name, trackers, web seeds — and
   **Get metadata** fetches the rest from the list or the torrent caches. Several `.torrent` files open
   together: each field is kept in all of them until you set it, clear it or (trackers, web seeds) add
@@ -107,8 +114,8 @@ and saved to the device file by file or as one `.zip`.
   while a phone has frozen the first, and it takes over within seconds. (Without Web Locks every
   copy runs every torrent, as before; settings still apply in all of them, and with BroadcastChannel
   a removal or a delete-all is passed on.)
-- **Installable.** Proper icons, an offline app shell, an **Install** button on Android and the
-  "Add to Home Screen" hint on iOS. Dark mode, big touch targets, safe‑area aware, and an optional
+- **Installable.** Proper icons, an offline app shell, an **Install** button on Android and in Chrome
+  and Edge on a computer (dock, Start menu or apps list), and the "Add to Home Screen" hint on iOS. Dark mode, big touch targets, safe‑area aware, and an optional
   **wake lock** so the screen staying on keeps the download alive — held only while something can
   still arrive: not with every file unticked, and not for a private torrent the page cannot reach,
   unless a web seed is sending it.
@@ -146,6 +153,48 @@ and saved to the device file by file or as one `.zip`.
   they read then, and a metadata source without `{infohash}` is named. **Copy diagnostics**, for a bug
   report, says which keys, proxy and TURN credentials are set without giving them, and an `http(s)`
   tracker by its host alone.
+
+### On a computer
+
+From 1024px wide the page is two panes, still one web page, nothing to install:
+
+- **The list beside the torrent open.** One row a torrent on the left, under the ways in; the one
+  open on the right, its card as on a phone, staying in view as the list scrolls. A click opens a
+  row; a torrent just added, or shared, opens by itself, and a search or a filter that would hide it
+  gives way; one removed hands over to the next. **Cards** shows two lines a torrent, **Table** one,
+  in columns (name, size, progress, ↓, ↑, peers, ETA, state) sorted by a click on a header, and a
+  narrow window keeps the columns that matter. The choice is remembered.
+- **Search, filter, order** — on a phone too, where they apply to the cards. The search takes words
+  from a name or an info hash; the filter (all, downloading, seeding, paused, done, problem) shows
+  how many are in each; the order is when it was added, name, size, progress or speed, either way.
+- **Several at once.** Shift‑click selects every row up to the one clicked, Ctrl‑ or Cmd‑click one
+  more or one less, the boxes the same, the one in the header every row listed. The bar over the list
+  pauses, resumes, saves their `.torrent` files (one as it is, several in one zip) or removes them,
+  asking once for all. In a second open copy of the app, the same rows, and the same actions.
+- **Dropped anywhere.** A file let go of anywhere on the window is taken, the window saying what it
+  will do on the tab open: **Download** adds `.torrent` files, and asks before sharing anything else
+  it is given; **Seed & share** shares, a folder as itself; **Cloud** sends `.torrent` files and
+  magnets to the account, and says why it takes nothing else; **Edit** opens. A magnet or a link
+  dropped from another page is read as a shared one. Text dropped into a field stays the field's.
+- **Pasted.** Ctrl+V or Cmd+V on the page, out of any field, does what a drop would: a magnet copied
+  from anywhere is added at once, with no question, since you pasted it.
+- **The keyboard.** <kbd>/</kbd> the search; <kbd>↑</kbd> <kbd>↓</kbd> <kbd>Home</kbd> <kbd>End</kbd>
+  the list, with <kbd>Shift</kbd> to select as you go; <kbd>Ctrl</kbd>/<kbd>⌘</kbd>+<kbd>A</kbd> every
+  torrent listed; <kbd>Space</kbd> pauses or resumes the selection, or the one open; <kbd>Delete</kbd>
+  or <kbd>⌘</kbd>+<kbd>⌫</kbd> removes them; <kbd>Esc</kbd> empties the search, then the selection;
+  <kbd>?</kbd> lists all this. Not in a field, nor under a dialog. The tabs take the arrow keys; the
+  editor's ⋯ menu closes on <kbd>Esc</kbd> (the editor stays) and on a click away. Every control shows
+  the keyboard's focus ring, and a hover only where there is a pointer.
+- **Saved into a folder.** Where the browser lets a page write into a folder you pick (Chrome and
+  Edge on a computer), a card offers **Save to a folder…**: its files land there as they are in the
+  torrent, folders and all, each written as it arrives, never held in memory whole. Files already
+  there are replaced only once you say so, and a file that comes up short is not left behind.
+- **Opened by the system.** The installed app opens `.torrent` files (double‑click one, or *Open
+  with*), and magnet links; both are asked about first, as anything handed over from outside is.
+- **Asked before closing.** Closing or reloading the tab stops what it runs, so the browser asks
+  first — only while this copy is seeding or downloading something not paused, and not when another
+  open copy is waiting to take it over. The question is taken back as soon as it no longer applies,
+  so the page is not kept from the browser's back/forward cache for nothing.
 
 ### What the page alone cannot do, and why
 
@@ -318,7 +367,7 @@ That difference is the honest reason the other three ways exist.
 
 ## Browsers
 
-Recent Chrome, Edge and Firefox on Android and desktop; Safari 16.4+ on iOS. Everything degrades:
+Recent Chrome, Edge and Firefox on Android and on a computer; Safari 16.4+ on iOS and macOS. Everything degrades:
 without OPFS the pieces stay in memory, without a service worker files are assembled in memory before
 saving.
 
@@ -341,13 +390,49 @@ off): no peer can be reached, and the Download and Seed tabs say so. Web seeds, 
 Edit tab, which talks to no peer, still work. Where a browser cannot pick a folder, the editor's check
 offers files alone.
 
+**On a computer**, what each part asks of the browser — and where it is missing, it is not offered,
+or the page does without:
+
+| | needs | where |
+|---|---|---|
+| Two panes, table, search, selection, keys, paste | a window 1024px wide or more | every browser |
+| A folder dropped and read all the way down | `webkitGetAsEntry` on what is dropped | Chrome, Edge, Firefox, Safari |
+| **Pick a folder** to share | `<input webkitdirectory>` | Chrome, Edge, Firefox, Safari on a computer (not on an iPhone) |
+| **Save to a folder…** | the File System Access API (`showDirectoryPicker`) | Chrome and Edge; Firefox and Safari save file by file or as a zip |
+| `.torrent` files opened from the system | the installed app, `file_handlers` | Chrome and Edge |
+| `magnet:` links | the installed app, or **Settings → Magnet links** (`registerProtocolHandler`) | Chrome, Edge and Firefox; not Safari |
+| Saves streamed to disk | a service worker the download manager reads | Chrome, Edge and Firefox; Safari builds each save in memory first |
+
+## Upgrading from Phone Torrent
+
+Swarmdeck was called Phone Torrent. Nothing has to be done to keep what you had:
+
+- **What the browser holds stays.** The torrents, their pieces, the settings and the presets live
+  under names this app keeps on purpose (`phone-torrent:settings`, the `phone-torrent` IndexedDB, the
+  caches), so the new version finds them; a tab still open on the old one and one on the new agree on
+  which runs the torrents. The address of the page changed, from `maxgfr.github.io/phone-torrent/` to
+  `maxgfr.github.io/swarmdeck/` (the old one sends you on, links shared before included). Both are on
+  the same origin, so the new page finds everything the old one kept; an app installed from the old
+  address is that address's, though: install it again from the new one, and remove the old.
+- **`docker compose`**: fetch `docker-compose.yml` again, then run `docker compose up -d
+  --remove-orphans`. The service is called `swarmdeck` now and the old `phone-torrent` one goes; the
+  downloads stay, in the same `downloads` volume. The old image name keeps receiving updates for a
+  while, so a compose file not fetched again still works.
+- **`docker run`**: the new command names a `swarmdeck` volume. Keep `-v phone-torrent:/data` to go on
+  with the old one, or copy it over first (see [`server/README.md`](server/README.md)).
+- **The Cloudflare Workers** keep their names (`phone-torrent`, `phone-torrent-proxy`): a renamed
+  Worker is a new one at a new address, with none of your transfers, and the proxy address set in
+  your Settings would stop answering.
+- **The repository** is `maxgfr/swarmdeck`; GitHub sends the old address there. A clone can point at
+  it with `git remote set-url origin git@github.com:maxgfr/swarmdeck.git`.
+
 ## Tests
 
 ```sh
 npm run lint          # undefined and unused symbols, across the app, the server and the tests
 npm test              # the app, in a real browser
 npm run test:server   # the server, against a real peer
-npm run test:unit     # the .torrent workshop's reading and writing, no browser
+npm run test:unit     # the .torrent workshop, the list's rules, drops and folder saves, no browser
 ```
 
 `test/meta.mjs` reads and writes `.torrent` files built by a bencoder of the tests' own: decoded and
@@ -365,7 +450,12 @@ share options, folded into their line, giving the app's trackers when none are w
 source when none is set, and a piece size of one's own over a tracker's largest, or over the one set,
 said; and files checked against a torrent — matched by folder, path or name, whole, with a byte
 changed, with a file missing and with one cut short, and not "ready to seed" with an empty file missing
-or a file too long.
+or a file too long. And the computer's parts: the list's search (every word, a name or an info hash),
+its filters, a sort that keeps ties in place either way and puts ep9 before ep10, Shift‑click ranges,
+its settings read back, and read as the defaults from storage that throws; folders dropped, read in
+batches all the way down, an empty one giving nothing, their paths put back after crossing to another
+open copy and making the same info hash; and files written into a folder, with names any system takes,
+and a stream that comes up short refused without leaving a file cut short behind.
 
 `test/e2e.mjs` boots a WebSocket tracker and a static server, seeds a two‑file torrent through the
 UI of one browser context and downloads it in a second, phone‑sized one — the real UI throughout. It
@@ -458,6 +548,26 @@ remembered — and downloaded from the saved file by another page, byte for byte
 its files are hashed no longer hashed; and at 320px, four tabs and the
 whole dialog on the screen, its banner, mark, hints and Save at 4.5:1 or better in light and dark.
 
+And on a computer, at 1280px: the list beside the one torrent open, a row clicked opening another; the
+two panes side by side at 1024, 1280, 1440 and 1920px without scrolling sideways, in cards and in
+table, and one column with every card at 900px; the list read at 4.5:1 or better, light and dark; the
+search (the cards on one column following it), the filters and their counts, the order and its
+direction, a header clicked sorting by it and saying so (`aria-sort`); the table and the order kept
+across a reload, and cards at phone width; Shift‑ and Ctrl‑click and the boxes, a bulk pause, resume
+and zip of `.torrent` files, and two downloads removed with one question and gone from IndexedDB; a
+second open copy listing the same rows and its bulk actions run in the first; a drag showing what a
+drop will do, a `.torrent` dropped off the card added with the app still there, a file that is not a
+`.torrent` dropped on Download shared only once that is said yes to, and on Cloud a `.torrent` sent
+to TorBox's stand‑in and any other file refused; a folder shared as itself — dropped, picked (Chromium)
+and from a follower — with the info hash Node makes of the same files; a magnet pasted on the page; the
+keys (`/`, Escape, the arrows, Home, End, Shift, Ctrl+A, Space, Delete, `?`, the tabs' arrows) and the
+editor's ⋯ menu; the question before closing asked only while something runs unpaused in the copy
+that leads with no other waiting; a `.torrent` opened by the system and magnet links registered, both
+through stand‑ins; the manifest, and every module the app imports in the offline shell; and a
+torrent's files saved into a folder, tree and bytes, in an in‑memory folder on both engines and through
+a real folder handle on Chromium, asked before replacing, from a follower too, and no such button on
+WebKit.
+
 `test/server.mjs` is the other half, with no browser anywhere: a plain BitTorrent client seeds a file
 over an http tracker, the server is asked for it through its API, and the file comes back out whole
 and by `Range` (suffix ranges and ranges past the end included), byte for byte, through the token and
@@ -516,7 +626,7 @@ require it.
 
 | | |
 |---|---|
-| `index.html`, `styles.css` | the mobile‑first UI |
+| `index.html`, `styles.css` | the UI: one column on a phone, two panes from 1024px |
 | `app.js` | the client: adding, seeding, selection, pause/resume, sharing, settings, persistence, and the cloud provider table |
 | `saver.js` | hands a `ReadableStream` to the service worker, or falls back to a Blob |
 | `lib/bencode.js` | bencode without loss: byte strings stay bytes, big integers BigInts, keys in their order |
@@ -526,6 +636,9 @@ require it.
 | `lib/torrent-hash.js`, `lib/hash-worker.js` | the SHA‑1 of every piece, across files, in a Worker, with progress and a stop |
 | `lib/create-options.js` | Seed & share's torrent options, folded into one line |
 | `lib/torrent-check.js` | files checked against a torrent, piece by piece |
+| `lib/torrent-list.js` | the list: search, filters, order, selection ranges, and its rows on the page |
+| `lib/drop.js` | what is dropped: folders read all the way down, and text |
+| `lib/folder-save.js` | a torrent's files written into a folder of the computer |
 | `sw.js` | turns that stream into a download, and receives Web Share Target posts |
 | `server/` | the real BitTorrent client, its API and its Dockerfile |
 | `cloudflare/` | the Worker and container config for `wrangler deploy` |
@@ -539,14 +652,15 @@ require it.
 | Add by magnet, info hash or `.torrent` | yes | yes |
 | Automatic trackers | yes | n/a |
 | Select the files to download | yes | on the page; the server fetches the whole torrent |
-| Pause, resume, remove | yes | remove, on the account |
+| Pause, resume, remove | yes, one or several at once | remove, on the account |
+| A list with columns, search, filters, the keyboard | yes, on a computer | yes, on the page |
 | Speed limits, sequential download | yes | the service's own settings |
 | Seeding, creating a torrent | yes, while the page is open — piece size, private, source, trackers, or only the `.torrent` | the server keeps seeding after a download |
 | Web seeds | yes | n/a |
 | Edit a `.torrent` (trackers, web seeds, comment, name, source, private) | yes | yes, on the page |
 | DHT, PEX, `udp://` and `http(s)://` trackers | **no** — impossible in a browser | **yes** |
 | Private trackers | **no** | **yes** |
-| Downloading with the phone asleep | no | **yes** — nothing depends on the phone; on Cloudflare, though, finished files go once half an hour passes with no download getting data and no request from the app — which stops asking once nothing is downloading, even left open |
+| Downloading with this device asleep | no | **yes** — nothing depends on it; on Cloudflare, though, finished files go once half an hour passes with no download getting data and no request from the app — which stops asking once nothing is downloading, even left open |
 | RSS, search, scheduler, IP filter | no | no |
 
 ## Privacy
