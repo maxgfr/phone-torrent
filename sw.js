@@ -26,6 +26,7 @@ const SHELL_FILES = [
   './lib/create-options.js',
   './lib/torrent-hash.js',
   './lib/hash-worker.js',
+  './lib/torrent-check.js',
   './styles.css',
   './icon.svg',
   './manifest.webmanifest',

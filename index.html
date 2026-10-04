@@ -683,6 +683,33 @@
       </details>
 
       <div class="notice error" id="ed-problems" role="alert" hidden></div>
+
+      <section class="editor-section" id="ed-check" hidden>
+        <h3>Check files against this torrent</h3>
+        <p class="hint">Pick its files, or the folder that holds them: every piece is hashed again here and
+          compared with the one the torrent lists. Nothing leaves this device.</p>
+        <div class="details-actions">
+          <label class="btn small file-btn">
+            <input id="ed-check-files" type="file" multiple />
+            Pick files
+          </label>
+          <label class="btn small file-btn" id="ed-check-folder-btn">
+            <input id="ed-check-folder" type="file" webkitdirectory multiple />
+            Pick a folder
+          </label>
+        </div>
+        <div class="progress" id="ed-check-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" hidden><div class="bar"></div></div>
+        <p class="hint" id="ed-check-state" role="status"></p>
+        <div class="check-result" id="ed-check-result" hidden>
+          <p class="check-summary" id="ed-check-summary"></p>
+          <dl class="kv" id="ed-check-counts"></dl>
+          <ul class="editor-files" id="ed-check-problems"></ul>
+        </div>
+        <div class="details-actions">
+          <button id="ed-check-stop" class="btn small" type="button" hidden>Stop</button>
+          <button id="ed-check-back" class="btn small ghost" type="button">Back to editing</button>
+        </div>
+      </section>
     </div>
 
     <footer class="editor-foot">
@@ -692,6 +719,7 @@
       <details class="menu" id="ed-menu">
         <summary class="btn" aria-label="More actions" title="More actions">⋯</summary>
         <div class="menu-list">
+          <button id="ed-check-open" class="btn small ghost" type="button">Check files…</button>
           <button id="ed-reset" class="btn small ghost" type="button">Reset</button>
         </div>
       </details>

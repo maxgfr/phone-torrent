@@ -1157,6 +1157,42 @@ try {
     // Stored with the settings (the page's init script would write them over on a reload).
     assert.deepEqual(await ed.evaluate(() => JSON.parse(localStorage.getItem('phone-torrent:settings')).presets.map((p) => [p.name, p.comment])), [['My tracker', 'from the preset']], 'the preset stored');
     log('editor: a preset made in Settings fills the trackers and comment; the PTP rule shown and its source one tap away');
+
+    // Files checked against a torrent: whole, then with a byte changed, then with one missing.
+    const firstFile = noise(30000, 77);
+    const secondFile = noise(25000, 78);
+    const pairPieces = [];
+    const pairBytes = Buffer.concat([firstFile, secondFile]);
+    for (let off = 0; off < pairBytes.length; off += 16384) pairPieces.push(createHash('sha1').update(pairBytes.subarray(off, off + 16384)).digest());
+    const pair = bencode({ announce: trackerUrl, info: { name: 'pair', 'piece length': 16384, pieces: Buffer.concat(pairPieces), files: [{ length: firstFile.length, path: ['first.bin'] }, { length: secondFile.length, path: ['second.bin'] }] } });
+    await ed.setInputFiles('#edit-file-input', { name: 'pair.torrent', mimeType: 'application/x-bittorrent', buffer: pair });
+    await ed.waitForSelector('#editor-dialog[open][data-mode="torrent"]');
+    await ed.click('#ed-menu summary');
+    await ed.click('#ed-check-open');
+    await ed.waitForSelector('#editor-dialog[data-mode="check"]');
+    assert.equal(await ed.isVisible('#ed-save'), false, 'checking, not editing: no Save in the way');
+    const checked = async (files) => {
+      await ed.setInputFiles('#ed-check-files', files.map(([name, buffer]) => ({ name, mimeType: 'application/octet-stream', buffer })));
+      await ed.waitForSelector('#ed-check-result:not([hidden])', { timeout: 15000 });
+      return { summary: await ed.textContent('#ed-check-summary'), counts: await ed.textContent('#ed-check-counts'), problems: await ed.$$eval('#ed-check-problems li', (els) => els.map((e) => e.textContent)) };
+    };
+    const whole = await checked([['first.bin', firstFile], ['second.bin', secondFile]]);
+    assert.equal(whole.summary, 'All 4 pieces are good: these files are this torrent, ready to seed.');
+    const corrupt = Buffer.from(secondFile);
+    corrupt[24000] ^= 0xff;
+    await ed.evaluate(() => { document.querySelector('#ed-check-result').hidden = true; });
+    const damaged = await checked([['first.bin', firstFile], ['second.bin', corrupt]]);
+    assert.equal(damaged.summary, '75% good: 3 of 4 pieces, 1 bad.', 'a byte changed: its piece is bad');
+    assert.match(damaged.counts, /Bad pieces1/);
+    await ed.evaluate(() => { document.querySelector('#ed-check-result').hidden = true; });
+    const lacking = await checked([['first.bin', firstFile]]);
+    assert.match(lacking.summary, /^25% good: 1 of 4 pieces, 3 missing\.$/);
+    assert.deepEqual(lacking.problems, ['Not found: second.bin']);
+    await ed.click('#ed-check-back');
+    await ed.waitForSelector('#editor-dialog[data-mode="torrent"]');
+    assert.equal(await ed.isVisible('#ed-save'), true, 'and back to editing');
+    await ed.click('#ed-close');
+    log('editor: files checked against a torrent — all good, a changed byte as one bad piece, a missing file named');
     await edCtx.close();
   }
 

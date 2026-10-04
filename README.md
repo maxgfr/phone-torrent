@@ -85,6 +85,10 @@ and saved to the device file by file or as one `.zip`.
   private trackers that [mkbrr](https://github.com/autobrr/mkbrr) knows — largest piece, size of the
   `.torrent`, the source they expect: shown under the trackers, a file that breaks one is said so, and
   the expected source is one tap away (never set by itself, as it makes a new torrent).
+  **⋯ → Check files…** checks files against the torrent open — picked one by one, or a whole folder
+  where the browser can pick one: every piece hashed again off the page, with progress and a stop, and
+  the result in words — how much is good, how many pieces are bad or missing, the files not found and
+  the ones of another size.
 - **Pause, resume, remove**, per‑torrent and total speeds, ETA, peer counts, and a details panel with
   the info hash, ratio, pieces, trackers and an event log. Pausing really pauses: a connection that
   was already in flight is dropped rather than allowed to resume the transfer — and it stays paused
@@ -351,7 +355,8 @@ progress and a stop; a torrent made with the info hash of a hand‑made one, and
 `create-torrent` for a folder (its name taken from it, `.DS_Store` left out and `Thumbs.db` kept, as
 there), every option written where it goes, and a private tracker's own piece table; and the Seed &
 share options, folded into their line, giving the app's trackers when none are written and a rule's
-source when none is set.
+source when none is set; and files checked against a torrent — matched by folder, path or name, whole,
+with a byte changed, with a file missing and with one cut short.
 
 `test/e2e.mjs` boots a WebSocket tracker and a static server, seeds a two‑file torrent through the
 UI of one browser context and downloads it in a second, phone‑sized one — the real UI throughout. It
@@ -433,7 +438,8 @@ opened from its **Edit .torrent**, and made private with a warning; two `.torren
 tracker added and a comment cleared with their info hashes kept, then a source set with a new hash
 each, both times unzipped from the `.zip` saved; a preset made in Settings (Enter keeping it, not
 closing Settings) filling the trackers and comment, the PTP rule it brings shown and its source set in
-one tap, never by itself; a private torrent with a source made in Seed & share, saved alone with
+one tap, never by itself; files checked against a two‑file torrent — all good, a byte changed as one bad
+piece, a file missing named; a private torrent with a source made in Seed & share, saved alone with
 **Only make the .torrent** (its piece size the one sharing always used, nothing shared), then the same
 files shared — the same info hash, its card private, announced to its own tracker alone, the options
 remembered — and downloaded from the saved file by another page, byte for byte; and at 320px, four tabs and the
@@ -506,6 +512,7 @@ require it.
 | `lib/presets.js` | presets, and their list and form in Settings |
 | `lib/torrent-hash.js`, `lib/hash-worker.js` | the SHA‑1 of every piece, across files, in a Worker, with progress and a stop |
 | `lib/create-options.js` | Seed & share's torrent options, folded into one line |
+| `lib/torrent-check.js` | files checked against a torrent, piece by piece |
 | `sw.js` | turns that stream into a download, and receives Web Share Target posts |
 | `server/` | the real BitTorrent client, its API and its Dockerfile |
 | `cloudflare/` | the Worker and container config for `wrangler deploy` |

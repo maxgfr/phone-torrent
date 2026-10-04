@@ -13,6 +13,7 @@ import {
 } from '../lib/torrent-meta.js';
 import { normalizePreset, normalizePresets, presetSummary } from '../lib/presets.js';
 import { hashInline } from '../lib/torrent-hash.js';
+import { matchFiles, checkTorrent } from '../lib/torrent-check.js';
 import { createSummary, creationOptions, normalizeCreate } from '../lib/create-options.js';
 import createTorrentPackage from 'create-torrent';
 import { bencode, makeTorrent } from './torrents.mjs';
@@ -343,6 +344,49 @@ const u8 = (b) => new Uint8Array(b.buffer, b.byteOffset, b.byteLength);
   assert.equal(creationOptions({ trackers: 'https://tracker.passthepopcorn.me/k/announce', source: 'mine' }).source, 'mine', 'unless one is set');
   assert.deepEqual(normalizeCreate({ pieceMode: 'nonsense', pieceSize: 3, targetCount: -5 }), { ...normalizeCreate({}), targetCount: 1 });
   log('Seed & share options: one line for the defaults, the app\'s trackers when none are written, the rule\'s source');
+}
+
+/* ---------- checking files against a torrent ---------- */
+{
+  const one = body(30000, 51);
+  const two = body(25000, 52);
+  const pieceLength = 16384;
+  const all = Buffer.concat([one, two]);
+  const pieces = [];
+  for (let off = 0; off < all.length; off += pieceLength) pieces.push(createHash('sha1').update(all.subarray(off, off + pieceLength)).digest());
+  const model = await readTorrent(u8(bencode({ info: { name: 'pair', 'piece length': pieceLength, pieces: Buffer.concat(pieces), files: [{ length: one.length, path: ['one.bin'] }, { length: two.length, path: ['sub', 'two.bin'] }] } })));
+  const picked = (files) => files.map(([path, data]) => Object.assign(new File([data], path.split('/').pop()), { webkitRelativePath: path }));
+  const hash = hashInline;
+
+  // Matched by their place in the folder picked, by their path, or by their name alone.
+  const byFolder = matchFiles(model.fields, picked([['pair/one.bin', one], ['pair/sub/two.bin', two], ['pair/extra.txt', 'x']]));
+  assert.deepEqual(byFolder.map((f) => f?.name), ['one.bin', 'two.bin']);
+  assert.deepEqual(matchFiles(model.fields, [new File([two], 'two.bin'), new File([one], 'one.bin')]).map((f) => f?.name), ['one.bin', 'two.bin'], 'by name, in any order');
+  const lone = await readTorrent(u8(makeTorrent(one, { name: 'clip.mkv' }).buf));
+  assert.equal(matchFiles(lone.fields, [new File([one], 'renamed.mkv')])[0]?.name, 'renamed.mkv', 'one file for a one-file torrent, whatever its name');
+
+  const whole = await checkTorrent(model, picked([['pair/one.bin', one], ['pair/sub/two.bin', two]]), { hash });
+  assert.deepEqual({ ...whole, files: undefined }, { pieces: 4, good: 4, bad: 0, missing: 0, percent: 100, missingFiles: [], wrongSizes: [], files: undefined });
+
+  const corrupt = Buffer.from(two);
+  corrupt[20000] ^= 0xff;
+  const damaged = await checkTorrent(model, picked([['pair/one.bin', one], ['pair/sub/two.bin', corrupt]]), { hash });
+  assert.equal(damaged.bad, 1, 'one byte changed: one bad piece');
+  assert.equal(damaged.good, 3);
+  assert.equal(damaged.percent, 75);
+
+  const gone = await checkTorrent(model, picked([['pair/one.bin', one]]), { hash });
+  assert.deepEqual(gone.missingFiles, ['sub/two.bin']);
+  assert.equal(gone.missing, 3, 'a missing file: every piece that needs it');
+  assert.equal(gone.good, 1);
+
+  const short = await checkTorrent(model, picked([['pair/one.bin', one.subarray(0, 20000)], ['pair/sub/two.bin', two]]), { hash });
+  assert.deepEqual(short.wrongSizes, [{ path: 'one.bin', size: 20000, length: 30000 }]);
+  assert.ok(short.missing > 0 && short.good > 0, 'a short file: its missing end is missing pieces, the rest still checked');
+
+  const v2only = await readTorrent(u8(bencode({ info: { name: 'x', 'piece length': pieceLength, 'meta version': 2, 'file tree': { x: { '': { length: 5 } } } } })));
+  await assert.rejects(checkTorrent(v2only, [new File(['hello'], 'x')], { hash }), /BitTorrent v2/);
+  log('checking files: matched by folder, path or name; whole, a byte changed, a file missing, a file short');
 }
 
 console.log('\nAll .torrent workshop checks passed.');

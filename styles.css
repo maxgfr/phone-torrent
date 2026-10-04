@@ -526,3 +526,12 @@ body {
 .torrent-options-body { display: grid; gap: 12px; margin-top: 12px; }
 .torrent-options-body .hint { margin: 0; }
 .torrent-options-body > .btn { justify-self: start; }
+
+/* ---- the editor checking files ---- */
+#editor-dialog[data-mode="check"] .editor-body > :not(#ed-check),
+#editor-dialog[data-mode="check"] .editor-foot { display: none; }
+.details-actions .file-btn { width: auto; }
+.check-result { display: grid; gap: 8px; padding: 10px 12px; border: 1px solid var(--warn); border-radius: 10px; }
+.check-result.all-good { border-color: var(--ok); }
+.check-summary { margin: 0; font-weight: 600; }
+#ed-check .progress { margin: 0; }
