@@ -26,6 +26,8 @@ jobs:
       - run: npm run test:server
       # The .torrent workshop's reading and writing, without a browser: a second or two.
       - run: npm run test:unit
+      # The command line and the MCP server on .torrent files, without a server: a few seconds.
+      - run: npm run test:cli
       - run: npm test
         env:
           BROWSER: ${{ matrix.browser }}

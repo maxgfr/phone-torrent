@@ -22,6 +22,9 @@ import dgram from 'node:dgram';
 import WebTorrent from 'webtorrent';
 import { Server as TrackerServer } from 'bittorrent-tracker';
 import proxyWorker from '../proxy/cloudflare-worker.js';
+import { infoHashOf } from '../lib/bencode.js';
+import { Client as McpClient } from '@modelcontextprotocol/sdk/client/index.js';
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const TOKEN = 'test-server-token';
@@ -919,6 +922,137 @@ try {
   assert.equal((await api(`/api/transfers/${trioId}`, { method: 'DELETE' })).status, 200);
   await new Promise((resolve) => slowSeeder.destroy(resolve));
   log('a file chosen again is fetched');
+
+  /* ---------- the command line and the MCP server, driving this server ---------- */
+
+  const cli = (args, env = {}) => new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [path.join(HERE, '..', 'cli', 'swarmdeck.mjs'), ...args], { env: { ...process.env, SWARMDECK_URL: '', SWARMDECK_TOKEN: '', ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (d) => { stdout += d; });
+    child.stderr.on('data', (d) => { stderr += d; });
+    child.once('error', reject);
+    child.once('exit', (code) => {
+      let parsed;
+      try { parsed = JSON.parse(stdout); } catch { parsed = undefined; }
+      resolve({ code, stdout, stderr, json: parsed });
+    });
+  });
+  const cliDir = path.join(tmp, 'Cli');
+  mkdirSync(cliDir);
+  const cliBytes = [randomBytes(40000), randomBytes(30000), randomBytes(20000)];
+  cliBytes.forEach((bytes, i) => writeFileSync(path.join(cliDir, `${'abc'[i]}.bin`), bytes));
+  const cliSeeded = await new Promise((resolve) => seeder.seed(cliDir, { announce: [trackerUrl], pieceLength: 16 * 1024 }, resolve));
+  const cliId = cliSeeded.infoHash;
+  const cliMagnet = `magnet:?xt=urn:btih:${cliId}&dn=Cli&tr=${encodeURIComponent(trackerUrl)}`;
+  const at = ['--server', serverUrl, '--json'];
+  const withToken = { SWARMDECK_TOKEN: TOKEN };
+  const cliOut = path.join(tmp, 'cli-out');
+
+  const noToken = await cli(['list', '--server', serverUrl]);
+  assert.equal(noToken.code, 1, 'no token, an error');
+  assert.match(noToken.stderr, /401.*SWARMDECK_TOKEN/, 'that says which setting is missing');
+  const cliStatus = await cli(['status', ...at], withToken);
+  assert.equal(cliStatus.code, 0, cliStatus.stderr);
+  assert.equal(cliStatus.json.ok, true);
+  assert.ok(cliStatus.json.features.includes('select'), 'status says what the server can do');
+
+  const cliAdded = await cli(['add', cliMagnet, ...at, '--token', TOKEN]);
+  assert.equal(cliAdded.code, 0, cliAdded.stderr);
+  assert.equal(cliAdded.json.created, true);
+  assert.equal(cliAdded.json.transfer.id, cliId);
+  const short = cliId.slice(0, 10);
+  const cliMeta = await cli(['wait', short, '--for', 'metadata', '--timeout', '30', ...at], withToken);
+  assert.equal(cliMeta.code, 0, `wait --for metadata: ${cliMeta.stderr}`);
+  assert.equal(cliMeta.json.metadata, true);
+  assert.equal(cliMeta.json.name, 'Cli');
+  const cliOnly = await cli(['select', 'Cli', '--only', '0', ...at], withToken);
+  assert.equal(cliOnly.code, 0, cliOnly.stderr);
+  assert.deepEqual(cliOnly.json.deselected, [1, 2], 'select --only 0, by its name, leaves the others out');
+  const cliBadIndex = await cli(['select', short, '--only', '5', ...at], withToken);
+  assert.equal(cliBadIndex.code, 1);
+  assert.match(cliBadIndex.stderr, /files 0 to 2/, 'a file it does not have is named as such');
+  const cliPaused = await cli(['pause', short, ...at], withToken);
+  assert.equal(cliPaused.json.paused, true);
+  assert.equal(cliPaused.json.state, 'paused');
+  const cliResumed = await cli(['resume', short, ...at], withToken);
+  assert.equal(cliResumed.json.paused, false);
+  const cliDone = await cli(['wait', short, '--timeout', '60', ...at], withToken);
+  assert.equal(cliDone.code, 0, `wait until done: ${cliDone.stderr}`);
+  assert.equal(cliDone.json.ready, true);
+  assert.ok((await cli(['list', ...at], withToken)).json.some((t) => t.id === cliId), 'list has it');
+  const cliShown = await cli(['show', short, ...at], withToken);
+  assert.deepEqual(cliShown.json.detail.files.map((f) => f.selected), [true, false, false]);
+  const cliText = await cli(['show', short, '--server', serverUrl], withToken);
+  assert.match(cliText.stdout, /\[0\] ✓ .*Cli\/a\.bin/, 'read as text, its files are numbered');
+  const cliTorrent = await cli(['torrent', short, '-o', `${cliOut}/`, ...at], withToken);
+  assert.equal(cliTorrent.code, 0, cliTorrent.stderr);
+  assert.equal(cliTorrent.json.path, path.join(cliOut, 'Cli.torrent'));
+  assert.equal(await infoHashOf(new Uint8Array(readFileSync(cliTorrent.json.path))), cliId, 'torrent saves its .torrent');
+  const cliMetadata = await cli(['metadata', cliMagnet, '-o', path.join(cliOut, 'from-magnet.torrent'), ...at], withToken);
+  assert.equal(cliMetadata.code, 0, cliMetadata.stderr);
+  assert.equal(cliMetadata.json.infoHash, cliId, 'metadata turns the magnet into its .torrent');
+  const cliCopied = await cli(['download', short, '-o', cliOut, ...at], withToken);
+  assert.equal(cliCopied.code, 0, cliCopied.stderr);
+  assert.deepEqual(cliCopied.json.files.map((f) => f.index), [0], 'download copies the complete files it fetches');
+  assert.equal(sha(readFileSync(path.join(cliOut, 'Cli', 'a.bin'))), sha(cliBytes[0]), 'byte for byte, at its path in the torrent');
+  const cliLink = await cli(['link', short, '0', '--server', serverUrl], withToken);
+  assert.equal(cliLink.code, 0, cliLink.stderr);
+  const linkUrl = cliLink.stdout.trim();
+  assert.ok(linkUrl.startsWith(`${serverUrl}/api/transfers/${cliId}/files/0?`) && !linkUrl.includes(TOKEN), `link prints the file's signed address alone, without the token (${linkUrl})`);
+  assert.equal(sha(Buffer.from(await (await fetch(linkUrl)).arrayBuffer())), sha(cliBytes[0]), 'which a player opens with no token');
+  assert.deepEqual((await cli(['link', short, ...at], withToken)).json.files.map((f) => f.index), [0], 'every file it fetches, with no index');
+  const cliReveal = await cli(['reveal', short, ...at], withToken);
+  assert.equal(cliReveal.code, 1, 'reveal on a server that is not --local is refused');
+  assert.match(cliReveal.stderr, /403.*--local/);
+  const pausedMagnet = randomBytes(20).toString('hex');
+  assert.equal((await cli(['add', pausedMagnet, '--paused', ...at], withToken)).json.transfer.paused, true);
+  const cliStuck = await cli(['wait', pausedMagnet, '--for', 'metadata', ...at], withToken);
+  assert.equal(cliStuck.code, 1, 'waiting for the metadata of a paused magnet ends at once');
+  assert.match(cliStuck.stderr, /paused before its metadata/);
+  const cliStuckMeta = await cli(['metadata', `magnet:?xt=urn:btih:${pausedMagnet}`, '-o', `${cliOut}/`, ...at], withToken);
+  assert.equal(cliStuckMeta.code, 1, 'and so does asking the swarm for its .torrent, which the server would ask through that transfer');
+  assert.match(cliStuckMeta.stderr, /on the server already, paused/);
+  assert.equal((await cli(['remove', pausedMagnet, ...at], withToken)).code, 0);
+  const cliRemoved = await cli(['remove', short, ...at], withToken);
+  assert.equal(cliRemoved.code, 0, cliRemoved.stderr);
+  assert.equal(cliRemoved.json.filesDeleted, false);
+  assert.equal((await api(`/api/transfers/${cliId}`)).status, 404, 'remove takes it off the server');
+  assert.ok(existsSync(path.join(downloads, 'Cli', 'a.bin')), 'and leaves its files on the disk unless told');
+  log('CLI: status, add a magnet, wait for its metadata, select, pause, resume, wait, show, torrent, metadata, download, remove keeping the files');
+
+  // The same server through the MCP server, the .torrent the CLI saved added back paused.
+  const mcp = new McpClient({ name: 'swarmdeck-test', version: '1.0.0' });
+  await mcp.connect(new StdioClientTransport({
+    command: process.execPath,
+    args: [path.join(HERE, '..', 'mcp', 'server.mjs')],
+    env: { ...process.env, SWARMDECK_URL: serverUrl, SWARMDECK_TOKEN: TOKEN },
+    stderr: 'pipe',
+  }));
+  try {
+    const call = async (name, args) => {
+      const r = await mcp.callTool({ name, arguments: args });
+      assert.ok(!r.isError, `${name}: ${r.content?.[0]?.text}`);
+      return JSON.parse(r.content[0].text);
+    };
+    const mcpAdded = await call('add_transfer', { source: cliTorrent.json.path, paused: true });
+    assert.equal(mcpAdded.created, true);
+    assert.equal(mcpAdded.transfer.paused, true, 'add_transfer adds it paused');
+    assert.deepEqual((await call('select_files', { id: short, only: [0, 2] })).deselected, [1]);
+    assert.equal((await call('resume_transfer', { id: 'Cli' })).paused, false);
+    assert.equal((await call('wait_transfer', { id: short, until: 'done', timeout: 60 })).ready, true);
+    assert.deepEqual((await call('list_transfers', { id: short })).detail.files.map((f) => f.selected), [true, false, true]);
+    const mcpLinks = await call('file_links', { id: short });
+    assert.deepEqual(mcpLinks.files.map((f) => f.index), [0, 2], 'file_links gives the files it fetches');
+    assert.equal(sha(Buffer.from(await (await fetch(mcpLinks.files[1].url)).arrayBuffer())), sha(cliBytes[2]), 'at addresses that open with no token');
+    const removed = await call('remove_transfer', { id: short, deleteFiles: true });
+    assert.equal(removed.filesDeleted, true);
+    await waitFor(() => !existsSync(path.join(downloads, 'Cli')), { label: 'the files remove_transfer was told to delete to go', timeout: 5000 });
+  } finally {
+    await mcp.close();
+  }
+  await new Promise((resolve) => seeder.remove(cliId, { destroyStore: false }, resolve));
+  log('MCP: add a .torrent paused, select, resume, wait, list, remove deleting the files');
 
   // A restart picks every transfer up again, handlers and all: with SEED_AFTER_DONE=0 a
   // resumed download that is complete stops seeding, as a fresh one does. The only seeder

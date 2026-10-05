@@ -24,6 +24,11 @@ export default [
     rules: { 'no-undef': 'error', 'no-unused-vars': 'error', 'no-unreachable': 'error' },
   },
   {
+    files: ['cli/*.mjs', 'mcp/*.mjs'],
+    languageOptions: { ecmaVersion: 2024, sourceType: 'module', globals: { ...globals.node } },
+    rules: { 'no-undef': 'error', 'no-unused-vars': ['error', { args: 'none' }], 'no-unreachable': 'error', eqeqeq: 'error' },
+  },
+  {
     files: ['test/*.mjs'],
     languageOptions: { ecmaVersion: 2024, sourceType: 'module', globals: { ...globals.node, ...globals.browser } },
     rules: { 'no-undef': 'error', 'no-unused-vars': ['error', { args: 'none' }], 'no-unreachable': 'error' },
