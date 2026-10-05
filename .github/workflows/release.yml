@@ -1,0 +1,51 @@
+name: Release
+
+# A release for every feat: or fix: that reaches main (semantic-release, conventional commits): the
+# version in package.json is bumped and committed back, the tag made on that commit, and its GitHub
+# release published. The Homebrew formula (maxgfr/homebrew-tap) picks the release up by itself.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm run lint
+      # What the release ships: the .torrent workshop, the command line and the MCP server, and the
+      # server they drive. The page's browser tests run in test.yml.
+      - run: npm run test:unit
+      - run: npm run test:cli
+      - run: npm run test:server
+
+  release:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: cycjimmy/semantic-release-action@v6
+        with:
+          extra_plugins: |
+            @semantic-release/git
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
