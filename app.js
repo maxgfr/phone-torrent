@@ -5280,9 +5280,21 @@ async function metadataFromPeers(magnet, { signal, onProgress = () => {} } = {})
 }
 
 /**
+ * Why the torrent caches gave nothing, or '' when none is set. The default one sends no CORS headers:
+ * from a page it fails every time, and only a CORS proxy reaches it.
+ */
+function cacheMisses(misses) {
+  if (!misses.length) return '';
+  const said = misses.map(({ url, err }) => `${new URL(url).host}: ${err.message}`).join('; ');
+  const proxy = !(settings.corsProxy || '').trim() && misses.some(({ err }) => /CORS/.test(err.message));
+  return `Torrent cache ${said}.${proxy ? ' Set a CORS proxy in Settings and it is asked through it.' : ''}`;
+}
+
+/**
  * A magnet's metadata: from the torrent in the list that has it, or else from the torrent caches, or
  * else from its peers — asked last, as the caches answer at once and peers are only told of the info
- * hash when they must be. `onProgress` hears where it looks: 'caches', then 'peers' and how many.
+ * hash when they must be. `onProgress` hears where it looks: 'caches', then 'peers', how many, and
+ * why the caches gave nothing — said while the peers are asked, not a minute later.
  */
 async function metadataFor(infoHash, { magnet = `magnet:?xt=urn:btih:${infoHash}`, signal, onProgress = () => {} } = {}) {
   const torrent = listed(infoHash);
@@ -5291,10 +5303,14 @@ async function metadataFor(infoHash, { magnet = `magnet:?xt=urn:btih:${infoHash}
   // WebTorrent takes a torrent once: the one in the list is the one that gets its metadata.
   if (torrent && !torrent.metadata) throw new Error('It is in the list, still waiting for its metadata: open it from its card once it has it.');
   onProgress('caches');
-  const cached = await fetchMetadataFallback(infoHash);
+  const misses = [];
+  const cached = await fetchMetadataFallback(infoHash, (url, err) => { if (err) misses.push({ url, err }); });
   if (cached) return cached;
   signal?.throwIfAborted();
-  return metadataFromPeers(magnet, { signal, onProgress: (n) => onProgress('peers', n) });
+  const caches = cacheMisses(misses);
+  const fromPeers = await metadataFromPeers(magnet, { signal, onProgress: (n) => onProgress('peers', n, caches) });
+  if (!fromPeers && caches) throw new Error(`no peer sent it within a minute. ${caches}`);
+  return fromPeers;
 }
 
 const editor = createEditor({
