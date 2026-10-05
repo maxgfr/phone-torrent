@@ -320,6 +320,8 @@ try {
     const localHealth = await (await fetch(`http://127.0.0.1:${localPort}/api/health`)).json();
     assert.equal(localHealth.local, true, 'its health says it is the local one');
     assert.deepEqual(localHealth.features, ['pause', 'select', 'keep-files', 'detail', 'url']);
+    // Where its files are, for the command line and an AI to say: behind the token, as the account is.
+    assert.equal((await (await fetch(`http://127.0.0.1:${localPort}/api/account`)).json()).downloadDir, localDir, 'its account says where its downloads are');
     // A .torrent at an address the page could not fetch (no CORS header, as archive.org sends none) is
     // fetched by the server of the computer itself.
     const torrentHost = http.createServer((req, res) => {
@@ -400,6 +402,7 @@ try {
   assert.equal((await (await fetch(`${serverUrl}/api/health`)).json()).ok, true, 'health needs no token');
   assert.equal((await api('/api/transfers')).status, 200);
   assert.equal((await fetch(`${serverUrl}/api/transfers`)).status, 401, 'no token, no answer');
+  assert.equal((await (await api('/api/account')).json()).downloadDir, undefined, 'a server that is not this computer\'s keeps its paths to itself');
   log('health and auth OK');
 
   // The app itself is served from the same origin: that is what makes one container a product.
@@ -1019,6 +1022,12 @@ try {
   assert.equal(cliCopied.code, 0, cliCopied.stderr);
   assert.deepEqual(cliCopied.json.files.map((f) => f.index), [0], 'download copies the complete files it fetches');
   assert.equal(sha(readFileSync(path.join(cliOut, 'Cli', 'a.bin'))), sha(cliBytes[0]), 'byte for byte, at its path in the torrent');
+  // With no -o, into the folder npm run local downloads to: ~/Downloads/Swarmdeck (a home of the test's own).
+  const cliHome = path.join(tmp, 'home');
+  const cliDefault = await cli(['download', short, ...at], { ...withToken, HOME: cliHome });
+  assert.equal(cliDefault.code, 0, cliDefault.stderr);
+  assert.equal(cliDefault.json.files[0].path, path.join(cliHome, 'Downloads', 'Swarmdeck', 'Cli', 'a.bin'), 'download goes to ~/Downloads/Swarmdeck by default');
+  assert.equal(sha(readFileSync(cliDefault.json.files[0].path)), sha(cliBytes[0]));
   const cliLink = await cli(['link', short, '0', '--server', serverUrl], withToken);
   assert.equal(cliLink.code, 0, cliLink.stderr);
   const linkUrl = cliLink.stdout.trim();

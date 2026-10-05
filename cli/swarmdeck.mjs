@@ -26,7 +26,8 @@ The server's transfers (SWARMDECK_URL, default ${DEFAULT_SERVER}; SWARMDECK_TOKE
   reveal <id>                     show its files in the Finder (npm run local only)
   torrent <id> [-o file|dir]      save its .torrent
   metadata <magnet> [-o file|dir] a magnet's .torrent, asked of the swarm, without adding it
-  download <id> [index] [-o dir]  copy its complete files (or that one) from the server
+  download <id> [index] [-o dir]  copy its complete files (or that one) from the server, into
+                                  ~/Downloads/Swarmdeck unless -o says otherwise
   link <id> [index]               the address of its files (or that one), to play or share;
                                   it never contains the token
   wait <id> [--for metadata|done] [--timeout s]
@@ -169,6 +170,7 @@ async function run(argv) {
       const lines = [`Swarmdeck at ${s.server}: ${s.ok ? 'running' : 'not ok'}${s.local ? ' (this computer)' : ''}, ${s.torrents} transfer${s.torrents === 1 ? '' : 's'}`];
       lines.push(`  can also: ${(s.features || []).join(', ') || 'nothing more'}`);
       if (s.account?.detail) lines.push(`  ${s.account.detail}`);
+      if (s.account?.downloadDir) lines.push(`  downloads in ${s.account.downloadDir}`);
       if (s.account?.error) lines.push(`  account: ${s.account.error}`);
       return { result: s, text: lines.join('\n') };
     }
@@ -231,8 +233,8 @@ async function run(argv) {
     case 'download': {
       need(args, 1, 'a transfer');
       if (args[1] !== undefined && !/^\d+$/.test(args[1])) throw new UsageError('the file to copy is its number (see show)');
-      const r = await server().download(args[0], { index: args[1] === undefined ? undefined : Number(args[1]), outDir: o.out || '.' });
-      return { result: r, text: r.files.map((f) => `wrote ${f.path} (${formatSize(f.size)})`).join('\n') };
+      const r = await server().download(args[0], { index: args[1] === undefined ? undefined : Number(args[1]), outDir: o.out });
+      return { result: r, text: r.files.map((f) => `${f.copied ? 'wrote' : 'already there:'} ${f.path} (${formatSize(f.size)})`).join('\n') };
     }
     case 'link': {
       need(args, 1, 'a transfer');

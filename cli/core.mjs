@@ -9,6 +9,7 @@
  */
 import { createWriteStream, openAsBlob } from 'node:fs';
 import { mkdir, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -17,6 +18,9 @@ import { hashInline } from '../lib/torrent-hash.js';
 import { checkTorrent, describeCheck, isAllGood } from '../lib/torrent-check.js';
 
 export const DEFAULT_SERVER = 'http://127.0.0.1:8080';
+
+/** Where `download` copies to when told nowhere: the folder `npm run local` downloads to. */
+export const defaultDownloadDir = () => path.join(os.homedir(), 'Downloads', 'Swarmdeck');
 
 const HEX_HASH = /^[a-f0-9]{40}$/i;
 const BASE32_HASH = /^[a-z2-7]{32}$/i;
@@ -217,10 +221,12 @@ export function connect({ server, token } = {}) {
     },
 
     /**
-     * Copy its files from the server to `outDir`, each at its path in the torrent: file `index`, or
-     * else every file wanted that is complete. A file still downloading is not copied half-done.
+     * Copy its files from the server to `outDir` (~/Downloads/Swarmdeck when told nowhere), each at
+     * its path in the torrent: file `index`, or else every file wanted that is complete. A file still
+     * downloading is not copied half-done. The server on this computer writing to that very folder
+     * has them there already: nothing is copied, and each file says where it is (copied: false).
      */
-    async download(ref, { index, outDir = '.' } = {}) {
+    async download(ref, { index, outDir } = {}) {
       const transfer = await api.show(ref);
       if (!transfer.metadata) throw new Error(`${transfer.name} has no metadata yet: it has no files to copy`);
       const files = transfer.detail.files;
@@ -234,18 +240,24 @@ export function connect({ server, token } = {}) {
         chosen = files.filter((f) => f.done && f.selected);
         if (!chosen.length) throw new Error(`${transfer.name} has no complete file yet (${Math.floor(transfer.progress * 100)}%)`);
       }
-      const root = path.resolve(outDir);
+      const root = path.resolve(outDir || defaultDownloadDir());
+      const { downloadDir } = await request('GET', '/api/account').catch(() => ({}));
+      const inPlace = Boolean(downloadDir) && path.resolve(downloadDir) === root;
       const written = [];
       for (const f of chosen) {
         const parts = String(f.path).split(/[\\/]/).map((p) => safeName(p, '_')).filter((p) => p !== '..');
         const target = path.join(root, ...parts);
         if (!target.startsWith(root + path.sep)) throw new Error(`refusing to write ${f.path} outside ${root}`);
+        if (inPlace) {
+          written.push({ index: f.id, path: target, size: f.size, copied: false });
+          continue;
+        }
         await mkdir(path.dirname(target), { recursive: true });
         const res = await request('GET', `/api/transfers/${transfer.id}/files/${f.id}`, { raw: true, timeout: 0 });
         const partial = `${target}.part`;
         await pipeline(Readable.fromWeb(res.body), createWriteStream(partial));
         await rename(partial, target);
-        written.push({ index: f.id, path: target, size: f.size });
+        written.push({ index: f.id, path: target, size: f.size, copied: true });
       }
       return { infoHash: transfer.id, name: transfer.name, files: written };
     },

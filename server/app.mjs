@@ -977,6 +977,9 @@ async function handle(req, res) {
         who: 'your server',
         detail: [`${active} transfer${active === 1 ? '' : 's'}`, free].filter(Boolean).join(' · '),
         version: 1,
+        // Where the files are, for the command line and an AI on this computer to say. A server
+        // elsewhere keeps its paths to itself: they mean nothing to whoever asks.
+        ...(LOCAL ? { downloadDir: DOWNLOAD_DIR } : {}),
       });
     }
 

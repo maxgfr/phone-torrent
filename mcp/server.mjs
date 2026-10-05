@@ -19,7 +19,7 @@ const INSTRUCTIONS = `Swarmdeck is a BitTorrent client running as a server; thes
 - Files are numbered as list_transfers({ id }).detail.files lists them; when "the first file" or "the video" is ambiguous, say which number you chose.
 - remove_transfer keeps the downloaded files. Pass deleteFiles: true only when the user explicitly asks for the files to be deleted; it cannot be undone.
 - A transfer stuck below 100% with downloadSpeed 0 for minutes: pause_transfer then resume_transfer asks its trackers and web seeds again.
-- The files are in the server's download folder (~/Downloads/Swarmdeck for npm run local, unless DOWNLOAD_DIR says otherwise); a file_links address stops working once its transfer is removed.
+- The files are in the server's download folder: swarmdeck_status gives it as account.downloadDir for the server on this computer (npm run local). download_files copies a transfer's files to ~/Downloads/Swarmdeck unless told another folder, and from the server on this computer that already writes there it copies nothing and says where each file is. A file_links address stops working once its transfer is removed.
 - Out of reach: torrents running inside a browser tab, the web page's settings, and its cloud services.`;
 
 const server = new McpServer({ name: 'swarmdeck', version }, { instructions: INSTRUCTIONS });
@@ -44,7 +44,7 @@ function tool(name, description, inputSchema, annotations, run) {
 
 /* ---------- the server's transfers ---------- */
 
-tool('swarmdeck_status', 'Whether the Swarmdeck server answers, what it can do (features), how many transfers it has and how much disk is free. Call it first: an error here says how to start the server.', {}, read,
+tool('swarmdeck_status', 'Whether the Swarmdeck server answers, what it can do (features), how many transfers it has and how much disk is free, and, for the server on this computer, the folder its downloads are in (account.downloadDir). Call it first: an error here says how to start the server.', {}, read,
   () => api.status());
 
 tool('list_transfers', 'Every transfer on the server (id, name, size, progress 0-1, state, ready, paused, metadata, peers, speeds). With `id`, that one transfer with every file numbered in detail.files ({ id, path, size, progress, done, selected }): the numbers select_files and download_files take.', {
@@ -88,10 +88,10 @@ tool('fetch_metadata', `Turn a magnet into a .torrent file: the server asks the 
   out: z.string().optional().describe('File or folder to write to'),
 }, local, ({ magnet: m, out }) => api.metadata(m, { out }));
 
-tool('download_files', `Copy a transfer's files from the server to a folder here, each at its path in the torrent: file \`index\`, or every complete file it fetches. Useful when the server is another machine; with npm run local the files are already in its download folder (reveal_transfer shows them). ${paths}`, {
+tool('download_files', `Copy a transfer's files from the server to a folder here (~/Downloads/Swarmdeck unless outDir says otherwise), each at its path in the torrent: file \`index\`, or every complete file it fetches. From the server on this computer, which already writes there, nothing is copied and each file says where it is (copied: false). ${paths}`, {
   id,
   index: z.number().int().min(0).optional().describe('Only this file (its number in detail.files)'),
-  outDir: z.string().describe('Folder to copy into'),
+  outDir: z.string().optional().describe('Folder to copy into; ~/Downloads/Swarmdeck by default'),
 }, local, ({ id: ref, index, outDir }) => api.download(ref, { index, outDir }));
 
 tool('file_links', 'The address of each file a transfer fetches (or of file `index`), to play in a player such as VLC or open on another device. Signed for that one file and a day when the server has a token, and never containing the token. A file still downloading plays as its pieces arrive.', {
