@@ -3,6 +3,7 @@
   "version": "1.0.1",
   "private": true,
   "description": "Torrents in the browser, on a phone or a computer: download, seed, edit and make .torrent files, with an optional server of your own. Static site.",
+  "license": "MIT",
   "type": "module",
   "bin": {
     "swarmdeck": "cli/swarmdeck.mjs",
