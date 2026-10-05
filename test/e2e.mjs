@@ -4726,20 +4726,26 @@ try {
   await local.waitForTimeout(1500);
   assert.equal(await cardOf('Alpha').locator('.state').textContent(), 'paused', 'a late listing does not undo the pause');
   assert.equal(await cardOf('Alpha').locator('.files li').nth(1).locator('input[type="checkbox"]').isChecked(), false, 'nor the box unticked');
+  // A change the server never made is not shown for ever: once the hold is over, the card says what
+  // the server says.
+  const secondBox = cardOf('Alpha').locator('.files li').nth(1).locator('input[type="checkbox"]');
+  await waitFor(async () => (await cardOf('Alpha').locator('.state').textContent()) !== 'paused' && (await secondBox.isChecked()), { label: 'the card to follow the server once the hold is over', timeout: 8000 });
   localApplies = true;
   await cardOf('Alpha').locator('.pause-btn').click();
-  await waitFor(() => sentTo(localA).length === 3, { label: 'the resume to be sent', timeout: 5000 });
-  assert.deepEqual(sentTo(localA)[2], { paused: false });
-  await cardOf('Alpha').locator('.files li').nth(1).locator('input[type="checkbox"]').uncheck();
-  await waitFor(() => localList.get(localA).deselected.length === 1, { label: 'the server to take the file left out', timeout: 5000 });
-  await local.waitForTimeout(1500);
-  assert.equal(await cardOf('Alpha').locator('.files li').nth(1).locator('input[type="checkbox"]').isChecked(), false, 'once it has, the listing says so too');
+  await secondBox.uncheck();
+  await waitFor(() => localList.get(localA).paused && localList.get(localA).deselected.length === 1, { label: 'the server to take the pause and the file left out', timeout: 5000 });
+  assert.deepEqual(sentTo(localA).slice(2), [{ paused: true }, { deselected: [1] }]);
+  await local.waitForTimeout(4000);
+  assert.equal(await cardOf('Alpha').locator('.state').textContent(), 'paused', 'once it has, the listing says so too');
+  assert.equal(await secondBox.isChecked(), false);
+  await cardOf('Alpha').locator('.pause-btn').click();
+  await waitFor(() => localList.get(localA).paused === false, { label: 'the resume to be taken', timeout: 5000 });
 
   // Several selected, paused together: one request each.
   for (const id of [localA, localB]) await rowOfLocal(id).locator('input[type="checkbox"]').click();
   await local.click('#bulk-pause');
-  await waitFor(() => sentTo(localB).length === 1 && sentTo(localA).length === 5, { label: 'one pause sent per torrent selected', timeout: 5000 });
-  assert.deepEqual([sentTo(localA)[4], sentTo(localB)[0]], [{ paused: true }, { paused: true }]);
+  await waitFor(() => sentTo(localB).length === 1 && sentTo(localA).length === 6, { label: 'one pause sent per torrent selected', timeout: 5000 });
+  assert.deepEqual([sentTo(localA)[5], sentTo(localB)[0]], [{ paused: true }, { paused: true }]);
   await local.click('#bulk-clear');
 
   // Save reads the file from the server.
