@@ -4,15 +4,21 @@
   "private": true,
   "description": "Torrents in the browser, on a phone or a computer: download, seed, edit and make .torrent files, with an optional server of your own. Static site.",
   "type": "module",
+  "bin": {
+    "swarmdeck": "cli/swarmdeck.mjs"
+  },
   "scripts": {
     "start": "node test/serve.mjs",
     "local": "node server/app.mjs --local",
+    "cli": "node cli/swarmdeck.mjs",
+    "mcp": "node mcp/server.mjs",
     "test": "node test/e2e.mjs",
-    "lint": "eslint app.js saver.js lib/*.js sw.js proxy/cloudflare-worker.js server/app.mjs cloudflare/worker.js test/*.mjs",
+    "lint": "eslint app.js saver.js lib/*.js sw.js proxy/cloudflare-worker.js server/app.mjs cloudflare/worker.js cli/*.mjs mcp/*.mjs test/*.mjs",
     "test:server": "node test/server.mjs",
     "test:unit": "node test/meta.mjs",
+    "test:cli": "node test/cli.mjs",
     "smoke:archive": "node test/archive-smoke.mjs",
-    "test:all": "npm run test:unit && npm run test:server && npm test"
+    "test:all": "npm run test:unit && npm run test:cli && npm run test:server && npm test"
   },
   "devDependencies": {
     "bittorrent-tracker": "^11.0.0",
@@ -23,5 +29,9 @@
   },
   "overrides": {
     "uint8-util": "2.2.5"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "zod": "^4.6.5"
   }
 }

@@ -354,6 +354,40 @@ service it shows is this same server, says the transfers are in the list rather 
 A server in Docker or on a NAS is not this: its health does not say `local`, and it stays the cloud
 service of option 2.
 
+### From a terminal, or an AI
+
+The same client answers a command line, and an AI through MCP:
+
+```sh
+npm run local -- --no-open                      # the server, without opening the page
+npm run cli -- add 'magnet:?xt=urn:btih:…'      # or `npx swarmdeck`, or `npm link` for `swarmdeck`
+npm run cli -- wait <id> --for metadata
+npm run cli -- select <id> --only 0,2
+npm run cli -- list
+npm run cli -- remove <id>                      # its files stay unless --delete-files
+```
+
+`<id>` is an info hash, its first characters, or the transfer's name. There are also `status`, `show`,
+`pause`, `resume`, `reveal`, `torrent` (save a transfer's `.torrent`), `metadata` (a magnet's `.torrent`,
+without adding it) and `download` (copy its files from a server elsewhere); and, with no server at all,
+`inspect`, `magnet`, `edit` (trackers, web seeds, comment, name, private flag, source, date, on several
+files at once), `create` and `check`, with the page's own code. `--json` prints the raw result.
+`swarmdeck help` lists it all. The server is `SWARMDECK_URL` (`http://127.0.0.1:8080` by default) or
+`--server`, with `SWARMDECK_TOKEN` when it has an `AUTH_TOKEN`: the same commands drive a server in
+Docker or on a NAS.
+
+`mcp/server.mjs` is an MCP server over stdio with a tool for each of these, and `.mcp.json` registers
+it for Claude Code opened in this folder; `.claude/skills/swarmdeck/` teaches an AI how to use them,
+and what never to do without being asked (delete the files). Elsewhere:
+
+```json
+{ "mcpServers": { "swarmdeck": { "command": "node", "args": ["/path/to/swarmdeck/mcp/server.mjs"],
+  "env": { "SWARMDECK_URL": "http://127.0.0.1:8080" } } } }
+```
+
+Neither reaches what lives in the page: the torrents running in a browser tab, the page's settings,
+and the cloud services set up there.
+
 ---
 
 ## When something does not work
@@ -476,6 +510,7 @@ npm run lint          # undefined and unused symbols, across the app, the server
 npm test              # the app, in a real browser
 npm run test:server   # the server, against a real peer
 npm run test:unit     # the .torrent workshop, the list's rules, drops and folder saves, no browser
+npm run test:cli      # the command line and the MCP server on .torrent files, no server
 npm run smoke:archive # the local server against archive.org, for real; not in CI
 ```
 
@@ -705,6 +740,9 @@ require it.
 | `lib/folder-save.js` | a torrent's files written into a folder of the computer |
 | `sw.js` | turns that stream into a download, and receives Web Share Target posts |
 | `server/` | the real BitTorrent client, its API and its Dockerfile |
+| `cli/` | the command line, and `core.mjs`, what it and the MCP server do |
+| `mcp/` | the MCP server, for an AI |
+| `.claude/skills/swarmdeck/` | how an AI drives Swarmdeck |
 | `cloudflare/` | the Worker and container config for `wrangler deploy` |
 | `proxy/` | the optional CORS proxy, as a Cloudflare Worker |
 | `vendor/` | WebTorrent and client‑zip, vendored (MIT) |

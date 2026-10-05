@@ -1,4 +1,6 @@
 node_modules/
+# Claude Code's worktrees: the skill in .claude/skills is the repository's, they are not.
+.claude/worktrees/
 test/.tmp/
 # What the server writes when it runs from the checkout (its default DOWNLOAD_DIR).
 downloads/
