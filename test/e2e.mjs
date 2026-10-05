@@ -1018,6 +1018,9 @@ try {
     // The pane beside holds what to do instead, square with the card and with the top bar, at every width.
     for (const width of [1024, 1280, 1700]) {
       await desk.setViewportSize({ width, height: 800 });
+      // The list, and the pane with it, is drawn on the next frame, which WebKit can hold back for a
+      // page that is not the one in front: measured once it is drawn, not before.
+      await desk.waitForFunction(() => document.querySelector('#detail-empty').getBoundingClientRect().height > 0, null, { polling: 100, timeout: 10000 });
       const edges = await desk.evaluate(() => {
         const box = (sel) => document.querySelector(sel).getBoundingClientRect();
         return { card: box('#drop-zone'), pane: box('#detail-empty'), logo: box('.brand img'), gear: box('#settings-btn'), sentence: box('#empty-state').height };
