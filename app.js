@@ -2597,7 +2597,12 @@ async function addTorrent(id, { record, seeding = false } = {}) {
   }
   const problem = typeof id === 'string' && /^magnet:/i.test(id) ? magnetProblem(id) : '';
   if (problem) throw new Error(problem);
-  const existing = await client.get(id).catch(() => null);
+  let existing = await client.get(id).catch(() => null);
+  // A magnet the editor is asking peers about, added for real: that search stops, and this goes on.
+  if (existing && probes.get(existing.infoHash)?.torrent === existing) {
+    await stopProbe(existing.infoHash, 'The torrent was added to the list: its card gets the metadata now.');
+    existing = null;
+  }
   if (existing) {
     // The .torrent of a magnet still waiting for its metadata is what that magnet is waiting for —
     // its card says to add it — so it fills that card in instead of being turned away.
@@ -2713,7 +2718,9 @@ async function seedFiles(files, { name, options = settings.createOptions, picked
   if (!handedOver) warnRules(made, created);
   // Files already being shared make the same torrent. Picked again to get the link back, that is
   // where it is.
-  const existing = client.torrents.find((t) => t !== torrent && t.infoHash === created.infoHash);
+  // The editor asking peers for this torrent's metadata gives way: it is here, being shared.
+  await stopProbe(created.infoHash, 'The torrent is being shared from this device now: open it from the list.');
+  const existing = client.torrents.find((t) => t !== torrent && views.has(t) && t.infoHash === created.infoHash);
   if (existing) {
     // Its card goes now, not when WebTorrent is done closing it: one card for one torrent.
     removeView(torrent);
@@ -3617,7 +3624,8 @@ let awaySince = 0;
 let wokenUntil = 0;
 
 function needsPeers(torrent) {
-  return !torrent.destroyed && !torrent.paused && !preparing(torrent) && wantsData(torrent);
+  // A search for the editor (see probes) has no card to come back to.
+  return views.has(torrent) && !torrent.destroyed && !torrent.paused && !preparing(torrent) && wantsData(torrent);
 }
 
 async function pickUpWhereWeLeftOff(why) {
@@ -4253,6 +4261,11 @@ function torrentFor({ sid, infoHash }) {
     || null;
 }
 
+/** The torrents in the list: a search the editor runs (see probes) is not one. */
+function shownCount() {
+  return client.torrents.filter((t) => views.has(t)).length;
+}
+
 function torrentState(view) {
   const { torrent } = view;
   const metadata = Boolean(torrent.metadata);
@@ -4306,7 +4319,7 @@ function lastState() {
     lead: copyId,
     since: leadSince,
     torrents: shown.map(torrentState),
-    totals: { down: client.downloadSpeed, up: client.uploadSpeed, peers: client.torrents.reduce((n, t) => n + t.numPeers, 0), count: client.torrents.length },
+    totals: { down: client.downloadSpeed, up: client.uploadSpeed, peers: client.torrents.reduce((n, t) => n + t.numPeers, 0), count: shownCount() },
   };
 }
 
@@ -4409,6 +4422,22 @@ async function runCall(message, from = '') {
       // Shown again, a follower says so; what was woken a moment ago is already on its way back.
       if (Date.now() >= wokenUntil) pickUpWhereWeLeftOff(String(message.why || 'back'));
       return null;
+    case 'metadata': {
+      // The editor of a copy that follows, asking peers for a magnet's metadata — or closed meanwhile.
+      const key = `${from} ${message.infoHash || parseMagnet(String(message.magnet || '')).infoHash}`;
+      if (message.stop) {
+        probeAsks.get(key)?.abort();
+        return null;
+      }
+      const ask = new AbortController();
+      probeAsks.get(key)?.abort();
+      probeAsks.set(key, ask);
+      try {
+        return { bytes: await metadataFromPeers(String(message.magnet || ''), { signal: ask.signal }) };
+      } finally {
+        if (probeAsks.get(key) === ask) probeAsks.delete(key);
+      }
+    }
     default:
       throw new Error(`Nothing to do for "${message.op}".`);
   }
@@ -5127,11 +5156,145 @@ async function torrentBytesOf(torrent) {
 
 const listed = (infoHash) => [...views.keys()].find((t) => t.infoHash === infoHash) || null;
 
-/** A magnet's metadata: from the torrent in the list that has it, or else from the torrent caches. */
-async function metadataFor(infoHash) {
+/** How long the peers of a magnet are given to send its metadata, when no torrent cache has it. */
+const METADATA_PEER_TIMEOUT = 60000;
+
+/**
+ * Magnets the editor asks peers about, by info hash: each added to WebTorrent for its metadata alone
+ * (no card, nothing remembered, nothing written to storage), and removed as soon as it has it, gives
+ * up, or is no longer wanted. Two asks for the same magnet share one; adding it to the list, or
+ * sharing the same torrent, stops it first.
+ */
+const probes = new Map();
+/** What the editors of the copies that follow are waiting for, by copy and info hash: closed, they stop. */
+const probeAsks = new Map();
+
+/** Stop asking peers about a magnet (see probes); resolves once it is out of WebTorrent. */
+function stopProbe(infoHash, why) {
+  return probes.get(infoHash)?.stop(new Error(why)) || Promise.resolve();
+}
+
+/**
+ * A .torrent of a torrent's info alone, checked against its info hash. The file WebTorrent rebuilds
+ * has the app's wss:// trackers merged in; the editor puts the magnet's own trackers and web seeds back.
+ */
+async function infoTorrent(torrentFile, infoHash) {
+  const bytes = new Uint8Array(torrentFile);
+  const [start, end] = findInfoSpan(bytes);
+  const head = new TextEncoder().encode('d4:info');
+  const out = new Uint8Array(head.length + end - start + 1);
+  out.set(head);
+  out.set(bytes.subarray(start, end), head.length);
+  out[out.length - 1] = 0x65; // e
+  return verifyTorrentBytes(out, infoHash);
+}
+
+/** The store of a probe: in memory, and its own — never the pieces a removed torrent left there. */
+class ProbeChunkStore extends MemoryChunkStore {
+  constructor(chunkLength) {
+    super(chunkLength);
+  }
+}
+
+/** The probe for a magnet, started unless one runs already: `done` resolves with its info, or null. */
+function probeFor(magnet, infoHash) {
+  if (probes.has(infoHash)) return probes.get(infoHash);
+  const torrent = client.add(magnet, { store: ProbeChunkStore, deselect: true, destroyStoreOnDestroy: true, announce: effectiveTrackers() });
+  const probe = { torrent, users: 0 };
+  let settled = false;
+  let removed = null;
+  probe.done = new Promise((resolve, reject) => {
+    let timer = null;
+    const finish = (err, value) => {
+      if (!settled) {
+        settled = true;
+        clearTimeout(timer);
+        if (probes.get(infoHash) === probe) probes.delete(infoHash);
+        if (err) reject(err);
+        else resolve(value);
+      }
+      // Its pieces are being checked once the metadata is in, and WebTorrent stumbles over a check that
+      // ends after the torrent is gone: it goes once they are done.
+      const checked = torrent.metadata && !torrent.ready
+        ? new Promise((done) => { torrent.once('ready', done); torrent.once('close', done); setTimeout(done, 10000); })
+        : Promise.resolve();
+      removed ||= checked.then(() => (torrent.destroyed ? null : client.remove(torrent, { destroyStore: true }).catch(() => {})));
+      return removed;
+    };
+    probe.stop = (err) => finish(err);
+    timer = setTimeout(() => finish(null, null), METADATA_PEER_TIMEOUT);
+    torrent.once('metadata', () => infoTorrent(torrent.torrentFile, infoHash).then((bytes) => finish(null, bytes), finish));
+    // Said to whoever asked, not as a toast of its own; and removed by something else (another copy
+    // taking the lead over, everything deleted), it has nothing more to say.
+    torrent.on('error', finish);
+    torrent.once('close', () => finish(new Error('The search for its peers was stopped.')));
+  });
+  probes.set(infoHash, probe);
+  return probe;
+}
+
+/** A promise, or the signal's reason as soon as it is aborted. */
+function abortable(promise, signal) {
+  if (!signal) return promise;
+  let onAbort = null;
+  const aborted = new Promise((resolve, reject) => {
+    onAbort = () => reject(signal.reason);
+    signal.addEventListener('abort', onAbort, { once: true });
+    if (signal.aborted) onAbort();
+  });
+  return Promise.race([promise, aborted]).finally(() => signal.removeEventListener('abort', onAbort));
+}
+
+/**
+ * A magnet's metadata from its peers, for the editor: resolves with a .torrent of its info alone, or
+ * null when none sent it within METADATA_PEER_TIMEOUT. `onProgress` hears how many are connected.
+ */
+async function metadataFromPeers(magnet, { signal, onProgress = () => {} } = {}) {
+  const { infoHash } = parseMagnet(magnet);
+  // The copy that runs the torrents asks them (see LEAD_LOCK); how many peers it has is not said here.
+  if (!(await leading) || follower) {
+    onProgress(null);
+    const stop = () => askLead({ op: 'metadata', infoHash, stop: true }).catch(() => {});
+    signal?.addEventListener('abort', stop, { once: true });
+    try {
+      const { bytes } = await abortable(askLead({ op: 'metadata', magnet }), signal);
+      return bytes ? new Uint8Array(bytes) : null;
+    } finally {
+      signal?.removeEventListener('abort', stop);
+    }
+  }
+  signal?.throwIfAborted();
+  const probe = probeFor(magnet, infoHash);
+  probe.users += 1;
+  const tick = () => onProgress(probe.torrent.numPeers || 0);
+  tick();
+  const ticker = setInterval(tick, 1000);
+  try {
+    return await abortable(probe.done, signal);
+  } finally {
+    clearInterval(ticker);
+    // One that stops waiting leaves the others to it; the last to go stops it.
+    probe.users -= 1;
+    if (probe.users === 0) probe.stop(new Error('No longer wanted.'));
+  }
+}
+
+/**
+ * A magnet's metadata: from the torrent in the list that has it, or else from the torrent caches, or
+ * else from its peers — asked last, as the caches answer at once and peers are only told of the info
+ * hash when they must be. `onProgress` hears where it looks: 'caches', then 'peers' and how many.
+ */
+async function metadataFor(infoHash, { magnet = `magnet:?xt=urn:btih:${infoHash}`, signal, onProgress = () => {} } = {}) {
   const torrent = listed(infoHash);
   const bytes = torrent ? await torrentBytesOf(torrent).catch(() => null) : null;
-  return bytes || fetchMetadataFallback(infoHash);
+  if (bytes) return bytes;
+  // WebTorrent takes a torrent once: the one in the list is the one that gets its metadata.
+  if (torrent && !torrent.metadata) throw new Error('It is in the list, still waiting for its metadata: open it from its card once it has it.');
+  onProgress('caches');
+  const cached = await fetchMetadataFallback(infoHash);
+  if (cached) return cached;
+  signal?.throwIfAborted();
+  return metadataFromPeers(magnet, { signal, onProgress: (n) => onProgress('peers', n) });
 }
 
 const editor = createEditor({
@@ -5143,6 +5306,7 @@ const editor = createEditor({
   makeZip,
   getPresets: () => settings.presets || [],
   isShared: (infoHash) => Boolean(listed(infoHash)),
+  appTrackers: effectiveTrackers,
 });
 
 async function editTorrent(torrent) {
@@ -5572,7 +5736,7 @@ els.settingsBtn.addEventListener('click', async () => {
     : `Files are assembled in memory before saving, so very large files may fail. ${saver.reason}`;
   els.clientInfo.textContent = follower
     ? `WebTorrent ${WebTorrent.VERSION || ''} · the torrents run in another open copy of this app, and show here · ${leadTotals.count} torrent${leadTotals.count === 1 ? '' : 's'} · ↓ ${formatSpeed(leadTotals.down)} ↑ ${formatSpeed(leadTotals.up)}`
-    : `WebTorrent ${WebTorrent.VERSION || ''} · peer ${client.peerId ? client.peerId.slice(0, 12) + '…' : '—'} · ${client.torrents.length} torrent${client.torrents.length === 1 ? '' : 's'} · ↓ ${formatSpeed(client.downloadSpeed)} ↑ ${formatSpeed(client.uploadSpeed)}`;
+    : `WebTorrent ${WebTorrent.VERSION || ''} · peer ${client.peerId ? client.peerId.slice(0, 12) + '…' : '—'} · ${shownCount()} torrent${shownCount() === 1 ? '' : 's'} · ↓ ${formatSpeed(client.downloadSpeed)} ↑ ${formatSpeed(client.uploadSpeed)}`;
   if (!opfsOk) {
     els.storageInfo.textContent = 'This browser does not provide private file storage, so downloaded pieces are kept in memory: they are lost on reload and very large torrents may not fit.';
   } else {
@@ -5984,7 +6148,7 @@ function refreshAll() {
     down: client.downloadSpeed,
     up: client.uploadSpeed,
     peers: client.torrents.reduce((n, t) => n + t.numPeers, 0),
-    count: client.torrents.length,
+    count: shownCount(),
   };
   els.netStatus.textContent = !navigator.onLine ? 'offline'
     : down > 512 || up > 512

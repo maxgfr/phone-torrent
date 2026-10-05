@@ -1747,7 +1747,7 @@ try {
     assert.equal(await ed.inputValue('#ed-dn'), 'Cached');
     assert.equal(await ed.inputValue('#ed-trackers'), 'wss://magnet.example');
     assert.equal(await ed.isVisible('#ed-identity'), false, 'no identity to edit without the metadata');
-    assert.equal(await ed.isDisabled('#ed-save'), true, 'nor a .torrent to save');
+    assert.equal(await ed.isDisabled('#ed-save'), false, 'a .torrent can be saved: its metadata is fetched first');
     await ed.click('#ed-get-metadata');
     await ed.waitForSelector('#editor-dialog[data-mode="torrent"]', { timeout: 15000 });
     assert.equal(await hashShown(), fetched.infoHash);
@@ -2780,6 +2780,78 @@ try {
   for (const t of await phone.$$('.torrent .remove-btn')) await t.click();
   await waitFor(() => phone.$$('.torrent').then((l) => l.length === 0), { label: 'clean slate for magnet test' });
   const mainHash = await seeder.evaluate(() => window.__swarmdeck.client.torrents[0].infoHash);
+
+  /* ---------- a magnet saved as a .torrent from Edit: its metadata from peers, the list left alone ---------- */
+  {
+    const fromPeersCtx = await context({ acceptDownloads: true, serviceWorkers: 'block' });
+    const fromPeers = await fromPeersCtx.newPage();
+    const pageErrors = [];
+    fromPeers.on('pageerror', (e) => {
+      // What WebKit says of its storage here, on every page of this suite, is not this one's to answer for.
+      if (!/unknown transient reason/.test(e.message)) pageErrors.push(e.message);
+      console.error('magnet-to-torrent page error:', e);
+    });
+    // No torrent cache: only the seeder has the metadata. The app's second tracker is its own, not the magnet's.
+    await fromPeers.addInitScript(({ t, rtc }) => localStorage.setItem('swarmdeck:settings', JSON.stringify({ trackers: [t, 'ws://127.0.0.1:2/app-only'], trackerList: false, rtcConfig: rtc, metadataSources: [] })), { t: trackerUrl, rtc: rtcConfig });
+    await fromPeers.goto(site.url);
+    await fromPeers.waitForFunction(() => window.__swarmdeck?.client);
+    await fromPeers.waitForFunction(() => window.__swarmdeck.saver.mode === 'stream' || window.__swarmdeck.saver.reason, null, { timeout: 15000 });
+    await fromPeers.click('.tab[data-tab="edit"]');
+    await fromPeers.fill('#edit-magnet-input', `magnet:?xt=urn:btih:${mainHash}&dn=From%20peers&tr=${encodeURIComponent(trackerUrl)}&tr=wss%3A%2F%2Fmagnet-only.example`);
+    await fromPeers.click('#edit-magnet-form button[type="submit"]');
+    await fromPeers.waitForSelector('#editor-dialog[open][data-mode="magnet"]');
+    assert.equal(await fromPeers.isDisabled('#ed-save'), false, 'a magnet can be saved as a .torrent at once');
+    let download = null;
+    fromPeers.waitForEvent('download', { timeout: 0 }).then((d) => { download = d; }, () => {});
+    await fromPeers.click('#ed-save');
+    try {
+      await waitForFromSeeder(async () => {
+        if (download) return true;
+        // Peers are asked for a minute; the seeder, slow to be found here at times, is given another.
+        const again = await fromPeers.evaluate(() => document.querySelector('#editor-dialog').dataset.mode === 'magnet' && document.querySelector('#ed-save').textContent === 'Save .torrent');
+        if (again) await fromPeers.click('#ed-save');
+        return false;
+      }, { label: 'the .torrent of a magnet, its metadata from the seeder', timeout: 180000 });
+    } catch (err) {
+      console.error('magnet-to-torrent:', JSON.stringify(await fromPeers.evaluate(() => ({
+        state: document.querySelector('#ed-metadata-state').textContent,
+        mode: document.querySelector('#editor-dialog').dataset.mode,
+        save: document.querySelector('#ed-save').textContent,
+        saver: window.__swarmdeck.saver.mode,
+        torrents: window.__swarmdeck.client.torrents.map((t) => ({ infoHash: t.infoHash, peers: t.numPeers, wires: t.wires.length, metadata: Boolean(t.metadata), ready: t.ready, announce: t.announce })),
+      }))));
+      throw err;
+    }
+    assert.equal(download.suggestedFilename(), 'Swarmdeck Test.torrent');
+    const where = path.join(TMP, `from-peers-${Date.now()}.torrent`);
+    await download.saveAs(where);
+    const buf = readFileSync(where);
+    const [start, end] = decodeBencode(new Uint8Array(buf), { spans: true }).spans.get('info');
+    assert.equal(createHash('sha1').update(buf.subarray(start, end)).digest('hex'), mainHash, 'the .torrent of that magnet');
+    const root = decodeBencode(new Uint8Array(buf));
+    const trackers = [root.get('announce'), ...(root.get('announce-list') || []).flat()].filter(Boolean).map((u) => Buffer.from(u).toString());
+    assert.deepEqual([...new Set(trackers)], [trackerUrl, 'wss://magnet-only.example'], 'the magnet\'s trackers, not the app\'s');
+    assert.equal(await fromPeers.$('.torrent'), null, 'nothing added to the list');
+    await waitFor(() => fromPeers.evaluate(() => window.__swarmdeck.client.torrents.length === 0), { label: 'the search for peers gone once it is saved', timeout: 5000 });
+    await fromPeers.click('#ed-close');
+
+    // Closed while peers are asked: they stop being asked.
+    const nobody = createHash('sha1').update(`nobody has this ${Date.now()}`).digest('hex');
+    await fromPeers.fill('#edit-magnet-input', `magnet:?xt=urn:btih:${nobody}&tr=${encodeURIComponent(trackerUrl)}`);
+    await fromPeers.click('#edit-magnet-form button[type="submit"]');
+    await fromPeers.waitForSelector('#editor-dialog[open][data-mode="magnet"]');
+    await fromPeers.click('#ed-save');
+    await waitFor(async () => /Asking peers/.test(await fromPeers.textContent('#ed-metadata-state')), { label: 'peers asked', timeout: 10000 });
+    assert.equal(await fromPeers.textContent('#ed-save'), 'Fetching metadata…');
+    assert.equal(await fromPeers.evaluate(() => window.__swarmdeck.client.torrents.length), 1, 'one search, for that magnet');
+    await fromPeers.click('#ed-close');
+    await waitFor(() => fromPeers.evaluate(() => window.__swarmdeck.client.torrents.length === 0), { label: 'the search stopped with the editor', timeout: 5000 });
+    assert.equal(await fromPeers.$('.torrent'), null, 'and still nothing in the list');
+    assert.deepEqual(pageErrors, [], 'the searches come and go without an error');
+    await fromPeersCtx.close();
+    log('editor: a magnet saved as a .torrent in one click, its metadata from peers; closed, the search stops');
+  }
+
   await phone.fill('#magnet-input', `magnet:?xt=urn:btih:${mainHash}`);
   await phone.click('#magnet-form button[type="submit"]');
   // A magnet has no metadata of its own: it comes from the seeder, so this waits like a download.

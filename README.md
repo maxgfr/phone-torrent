@@ -87,7 +87,8 @@ and saved to the device file by file or as one `.zip`.
   and a tier of its own (not for a private torrent). An inspector shows the pieces, sizes, files and
   unknown keys; **Copy magnet**, **Share…** (the `.torrent` itself, where the device shares files) and
   **Save .torrent** take the result. A magnet opens with what it has — name, trackers, web seeds — and
-  **Get metadata** fetches the rest from the list or the torrent caches. Several `.torrent` files open
+  **Get metadata** fetches the rest from the list, the torrent caches, or else its peers (for a minute,
+  without adding it to the list); **Save .torrent** does that and saves, in one click. Several `.torrent` files open
   together: each field is kept in all of them until you set it, clear it or (trackers, web seeds) add
   to it, each file says whether its info hash changes, and they are saved as one `.zip`.
   **Apply preset** fills in what a preset holds. The first tracker is matched against the rules of
@@ -537,7 +538,9 @@ And the `.torrent` editor, read back from what it saves: a `.torrent`'s trackers
 changed with the same info hash and an unknown key kept; its source changed for a new one, marked as
 such, and the one marked being the one saved; private, with no public trackers and no magnet; public
 trackers added once each, from the app, the `wss://` list and newTrackon; a magnet with only its name,
-trackers and web seeds until **Get metadata** fetches it from a cache, its tracker kept; a card's torrent
+trackers and web seeds until **Get metadata** fetches it from a cache, its tracker kept; a magnet no cache
+has saved as a `.torrent` in one click, its metadata from the seeder, with the magnet's trackers and not
+the app's, the list left empty, and the search for peers stopped when the editor closes; a card's torrent
 opened from its **Edit .torrent**, and made private with a warning; two `.torrent` files at once, a
 tracker added and a comment cleared with their info hashes kept, then a source set with a new hash
 each, both times unzipped from the `.zip` saved; a preset made in Settings (Enter keeping it, not
