@@ -112,12 +112,31 @@ const NO_WEBRTC = (WebTorrent.WEBRTC_SUPPORT ?? typeof RTCPeerConnection === 'fu
   : 'WebRTC is turned off in this browser, so it cannot reach any peer: only web seeds can send a torrent here. '
     + 'The Cloud tab still works.';
 
+/*
+ * Started with `npm run local`, the server is this computer's own torrent client, and the page it
+ * serves is its window (see detectLocalServer). What the cards say of where its transfers are.
+ */
+const MAC = /Mac/i.test(navigator.userAgentData?.platform || navigator.platform || navigator.userAgent);
+const THIS_COMPUTER = MAC ? 'this Mac' : 'this computer';
+const ON_THIS_COMPUTER = MAC ? 'On this Mac' : 'On this computer';
+const SHOW_IN_FILES = MAC ? 'Show in Finder' : 'Show in folder';
+/** This computer's server, once its health says it is one: null anywhere else. */
+let localServer = null;
+/** Its transfers, by info hash: what stands for each in the list (see serverTorrent). */
+const serverTorrents = new Map();
+/** Why it last did not answer; '' while it does. */
+let serverError = '';
+
 const els = {
   torrents: $('#torrents'),
   empty: $('#empty-state'),
   fileInput: $('#torrent-file-input'),
   magnetForm: $('#magnet-form'),
   magnetInput: $('#magnet-input'),
+  addTarget: $('#add-target'),
+  browserHint: $('#browser-hint'),
+  serverHint: $('#server-hint'),
+  removeDialog: $('#remove-dialog'),
   seedFileInput: $('#seed-file-input'),
   seedFolderInput: $('#seed-folder-input'),
   seedFolderBtn: $('#seed-folder-btn'),
@@ -1962,14 +1981,18 @@ let cloudItemsShape = '';
 async function cloudSend({ bytes, name, magnet }) {
   const ctx = cloudCtx();
   const id = await ctx.api.submit(ctx, { bytes, name, magnet });
-  toast(`Sent to ${ctx.api.label}. It downloads there; the library below shows the progress.`);
+  toast(cloudIsLocalServer()
+    ? `Sent to the server on ${THIS_COMPUTER}. It downloads there; its card is in the list below.`
+    : `Sent to ${ctx.api.label}. It downloads there; the library below shows the progress.`);
   await refreshCloudLibrary();
   return id;
 }
 
 async function refreshCloudLibrary({ quiet = false } = {}) {
-  if (!cloudReady()) {
+  if (!cloudReady() || cloudIsLocalServer()) {
     renderCloudLibrary();
+    // Sent from the Cloud tab to the server that runs the list's transfers: the list shows it.
+    if (cloudIsLocalServer()) syncServer();
     return;
   }
   const ctx = cloudCtx();
@@ -2230,6 +2253,15 @@ function renderCloudLibrary() {
   if (!cloudReady()) {
     els.cloudList.textContent = '';
     cloudRows.clear();
+    return;
+  }
+  // The account is this computer's own server: each of its transfers has its card in the list already,
+  // and a second row of it here would only say the same twice.
+  if (cloudIsLocalServer()) {
+    els.cloudList.textContent = '';
+    cloudRows.clear();
+    els.cloudEmpty.hidden = false;
+    els.cloudEmpty.textContent = `This is the server on ${THIS_COMPUTER}: what it downloads is in the list below, with the rest.`;
     return;
   }
   // The library is on every tab, and the Cloud tab's own error line is not: a listing that failed says
@@ -3001,6 +3033,12 @@ function setAllSelected(torrent, selected) {
 
 /** The ticks on a card changed: the torrent, its record and the card follow, in the copy that runs it. */
 function selectionChanged(view) {
+  if (view.torrent.onServer) {
+    view.ticksSentAt = Date.now(); // a listing already on its way predates them
+    changeOnServer(view.torrent, { deselected: deselectedFiles(view) });
+    refreshView(view);
+    return;
+  }
   if (view.torrent.remote) {
     view.ticksSentAt = Date.now(); // the next word from the leading copy may predate them
     tellLead({ op: 'select', ...refOf(view.torrent), deselected: deselectedFiles(view) });
@@ -3025,7 +3063,8 @@ function persistTorrent(view) {
   const { torrent } = view;
   // A card that was removed — here, or in another open copy of the app — must not write its record
   // back; nor may one that only shows a torrent another copy runs.
-  if (torrent.remote || view.seeding || !torrent.infoHash || torrent.destroyed || views.get(torrent) !== view) return;
+  // A transfer of this computer's server is that server's to remember.
+  if (!runsHere(torrent) || view.seeding || !torrent.infoHash || torrent.destroyed || views.get(torrent) !== view) return;
   // Before the file list exists (pending magnet, or metadata not yet processed) keep the saved selection.
   const deselected = deselectedFiles(view);
   view.record = {
@@ -3074,7 +3113,8 @@ function refreshView(view) {
     if (!torrent.remote) {
       logEvent(view, 'download complete');
       if (!view.seeding && view.sawIncomplete) toast(`"${torrent.name}" finished downloading.`);
-      if (!view.seeding && !settings.seedAfterDone && !torrent.paused) {
+      // This computer's server stops by its own rule (SEED_AFTER_DONE), not this page's.
+      if (!view.seeding && !settings.seedAfterDone && !torrent.paused && !torrent.onServer) {
         view.autoStopped = true; // finished and idle by policy, not paused by the user
         stopTransfer(torrent);
       }
@@ -3086,7 +3126,13 @@ function refreshView(view) {
   el.classList.toggle('paused', Boolean(torrent.paused));
 
   let state;
-  if (selected.length === 0 && torrent.files.length) state = 'nothing selected';
+  // What the server says, but for what it has not heard yet: a pause just sent, or no answer at all.
+  if (torrent.onServer) state = serverError ? `the server on ${THIS_COMPUTER} is not answering`
+    : torrent.failed ? `failed: ${torrent.state}`
+      : torrent.paused ? 'paused'
+        : selected.length === 0 && torrent.files.length ? 'nothing selected'
+          : torrent.state;
+  else if (selected.length === 0 && torrent.files.length) state = 'nothing selected';
   else if (torrent.paused && !view.autoStopped) state = 'paused';
   else if (view.seeding && !torrent.ready) state = view.hashed !== undefined && view.hashed < 1 ? `hashing ${Math.floor(view.hashed * 100)}%` : 'hashing';
   else if (complete) state = torrent.numPeers ? `seeding to ${torrent.numPeers}` : (view.seeding ? 'seeding · waiting for peers' : 'complete');
@@ -3116,7 +3162,8 @@ function refreshView(view) {
   // When the .torrent itself says no browser can reach its swarm, or this browser has no WebRTC to
   // reach any, say so at once instead of making the user wait out the no-peers delay.
   const reason = unreachableReason(view.reach) || NO_WEBRTC;
-  const stuck = !complete && !torrent.paused && torrent.numPeers === 0
+  // A server reaches every peer a page cannot, and has nothing to retry here: never stuck in this sense.
+  const stuck = runsHere(torrent) && !complete && !torrent.paused && torrent.numPeers === 0
     && !(view.cloud && view.cloud.ready) // the cloud already has it; the peer hunt is moot
     // A long check of the pieces already here is not a hunt for peers that failed, and offline,
     // trackers, caches and web seeds are not the problem: the state line says what is.
@@ -3144,8 +3191,10 @@ function refreshView(view) {
       ? 'Save all as .zip'
       : `Save ${selected.length} selected as .zip`;
   }
-  $('.folder-btn', el).hidden = !canPickFolder();
+  // Its files are in a folder of this computer already: Show in Finder, rather than copied to another.
+  $('.folder-btn', el).hidden = !canPickFolder() || Boolean(torrent.onServer);
   if (!view.folderSaving) $('.folder-btn', el).disabled = !allSelectedDone;
+  if (torrent.onServer) $('.server-partial', el).hidden = selected.length === torrent.files.length;
 
   torrent.files.forEach((file, i) => {
     const li = view.fileEls[i];
@@ -3183,7 +3232,9 @@ function refreshView(view) {
  */
 let pendingKeys = 0;
 function keyOf(view) {
-  const key = view.torrent.infoHash || view.pendingKey || (view.pendingKey = `pending-${++pendingKeys}`);
+  // A transfer of this computer's server is another torrent than the same one run in the page.
+  const key = view.torrent.onServer ? `srv:${view.torrent.infoHash}`
+    : view.torrent.infoHash || view.pendingKey || (view.pendingKey = `pending-${++pendingKeys}`);
   if (view.key && view.key !== key) {
     if (focusedKey === view.key) focusedKey = key;
     if (selection.delete(view.key)) selection.add(key);
@@ -3218,6 +3269,7 @@ function rowOf(view, { pct = 0, progress = 0, complete = false, state = '', stuc
     seeding: !torrent.paused && (view.seeding || complete),
     problem: Boolean(stuck),
     addedAt: view.addedAt,
+    badge: torrent.onServer ? ON_THIS_COMPUTER : '',
   };
 }
 
@@ -3396,7 +3448,7 @@ els.viewTable.addEventListener('click', () => setListPrefs({ view: 'table' }));
 
 /** How many of a torrent's pieces are here, of how many; a copy that only shows it is told. */
 function pieceCounts(torrent) {
-  if (torrent.remote) return torrent.pieceCounts;
+  if (!runsHere(torrent)) return torrent.pieceCounts;
   return torrent.pieces ? { have: torrent.pieces.filter((p) => p === null).length, total: torrent.pieces.length } : null;
 }
 
@@ -3474,6 +3526,14 @@ function resumeAutoStopped(view) {
 function togglePause(torrent) {
   const view = views.get(torrent);
   if (!view) return;
+  if (torrent.onServer) {
+    // Shown at once, and kept while a listing sent before it may still say otherwise.
+    torrent.paused = !torrent.paused;
+    view.pauseSentAt = Date.now();
+    changeOnServer(torrent, { paused: torrent.paused });
+    refreshView(view);
+    return;
+  }
   if (torrent.remote) {
     tellLead({ op: 'pause', ...refOf(torrent), paused: !torrent.paused });
     return;
@@ -3626,8 +3686,9 @@ let awaySince = 0;
 let wokenUntil = 0;
 
 function needsPeers(torrent) {
-  // A search for the editor (see probes) has no card to come back to.
-  return views.has(torrent) && !torrent.destroyed && !torrent.paused && !preparing(torrent) && wantsData(torrent);
+  // A search for the editor (see probes) has no card to come back to, and a transfer of this
+  // computer's server never left its peers.
+  return views.has(torrent) && !torrent.onServer && !torrent.destroyed && !torrent.paused && !preparing(torrent) && wantsData(torrent);
 }
 
 async function pickUpWhereWeLeftOff(why) {
@@ -3800,7 +3861,17 @@ function removeTorrent(torrent) {
 
 /** Remove these torrents and delete their data, asked once for all of them. */
 async function removeTorrents(torrents) {
-  const list = torrents.filter((t) => views.has(t));
+  const present = torrents.filter((t) => views.has(t));
+  // This computer's server keeps its files in a folder of the user's: asked as a torrent client asks,
+  // whether they go too. Kept by default.
+  const onServer = present.filter((t) => t.onServer);
+  if (onServer.length) {
+    const choice = await askRemoveFromServer(onServer);
+    if (choice === 'keep' || choice === 'delete') {
+      for (const torrent of onServer) await removeFromServer(torrent, { keepFiles: choice === 'keep' });
+    }
+  }
+  const list = present.filter((t) => !t.onServer);
   if (!list.length) return;
   const seeds = list.filter((t) => views.get(t).seeding).length;
   let message;
@@ -4117,6 +4188,336 @@ function dropRemote(torrent) {
   removeView(torrent);
 }
 
+/* ---------- the torrent client of this computer (npm run local) ---------- */
+
+/*
+ * Run with `npm run local`, the server is this computer's torrent client, and the page it serves is that
+ * client's window: its transfers are cards in the list like any other. They run there, not here — they
+ * reach every peer a page cannot, keep their files in a folder of the user's, and go on with the tab
+ * closed — and the page shows them and sends what is done to them: a pause, the files ticked, a removal.
+ * Whether the server is one, its /api/health says (`local`): one in Docker or on a NAS is not, and stays
+ * the cloud service it always was. Each open copy of the page lists them from the server itself.
+ */
+
+/** A torrent this page runs: not one another open copy runs, nor one of this computer's server. */
+function runsHere(torrent) {
+  return !torrent.remote && !torrent.onServer;
+}
+
+const serverUrl = (pathname) => new URL(pathname, location.origin).toString();
+const serverCtx = () => cloudCtx({ provider: 'server', base: location.origin });
+function serverHeaders() {
+  const { key } = serverCtx();
+  return key ? { Authorization: `Bearer ${key}` } : {};
+}
+
+async function detectLocalServer() {
+  let health = null;
+  try {
+    const res = await fetch(serverUrl('/api/health'), { cache: 'no-store', signal: AbortSignal.timeout(4000) });
+    health = res.ok ? await res.json() : null;
+  } catch {
+    return false;
+  }
+  if (health?.ok !== true || health.local !== true) return false;
+  localServer = { features: Array.isArray(health.features) ? health.features : [] };
+  showAddTarget();
+  await syncServer();
+  return true;
+}
+
+/** What stands for one of its transfers: the fields the cards read, as the server last said them. */
+function serverTorrent(infoHash) {
+  const torrent = { onServer: true, infoHash, name: '', files: [], wires: [], announce: [], destroyed: false, paused: false };
+  torrent.on = () => torrent;
+  torrent.once = () => torrent;
+  return torrent;
+}
+
+/**
+ * One of its files. A save reads it from the server's link to it, and only once the save asks: what
+ * saves a file in the page (one file, a zip, a folder) reads it as it reads a torrent's.
+ */
+function serverFile() {
+  const file = {
+    select() {},
+    deselect() {},
+    stream() {
+      let reader = null;
+      return new ReadableStream({
+        async pull(controller) {
+          if (!reader) {
+            const res = await fetch(serverUrl(file.link), { cache: 'no-store' });
+            if (!res.ok || !res.body) throw new Error(`the server on ${THIS_COMPUTER} answered ${res.status}`);
+            reader = res.body.getReader();
+          }
+          const { done, value } = await reader.read();
+          if (done) controller.close();
+          else controller.enqueue(value);
+        },
+        cancel(reason) {
+          return reader?.cancel(reason);
+        },
+      });
+    },
+  };
+  return file;
+}
+
+/** Asked every second while the page is in front, every five behind it; less and less often while it does not answer. */
+const SERVER_POLL_MS = 1000;
+const SERVER_HIDDEN_POLL_MS = 5000;
+const SERVER_BACKOFF_MS = [2000, 4000, 8000, 30000];
+/** A click is not undone by a listing that left before the server heard of it. */
+const SERVER_HOLD_MS = 3000;
+let serverFailures = 0;
+let serverPolling = null;
+let serverAgain = false;
+let serverTimer = 0;
+/** Transfers removed from here, by when: a listing already on its way would bring their cards back. */
+const serverRemoved = new Map();
+
+/** List its transfers now: one listing at a time, and another right after when asked meanwhile. */
+function syncServer() {
+  if (!localServer) return Promise.resolve();
+  if (serverPolling) {
+    serverAgain = true;
+    return serverPolling;
+  }
+  clearTimeout(serverTimer);
+  serverPolling = (async () => {
+    try {
+      const { transfers } = await serverCtx().json(serverUrl('/api/transfers?detail=1'));
+      serverFailures = 0;
+      serverError = '';
+      showServerTransfers(Array.isArray(transfers) ? transfers : []);
+    } catch (err) {
+      // The cards stay, saying so: a server restarting comes back with them all.
+      serverFailures += 1;
+      serverError = err.message || String(err);
+      for (const torrent of serverTorrents.values()) {
+        const view = views.get(torrent);
+        if (view) refreshView(view);
+      }
+    } finally {
+      serverPolling = null;
+      if (serverAgain) {
+        serverAgain = false;
+        syncServer();
+      } else {
+        scheduleServerPoll();
+      }
+    }
+  })();
+  return serverPolling;
+}
+
+function scheduleServerPoll() {
+  clearTimeout(serverTimer);
+  if (!localServer) return;
+  const wait = serverFailures
+    ? SERVER_BACKOFF_MS[Math.min(serverFailures, SERVER_BACKOFF_MS.length) - 1]
+    : document.hidden ? SERVER_HIDDEN_POLL_MS : SERVER_POLL_MS;
+  serverTimer = setTimeout(syncServer, wait);
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (localServer && !document.hidden) syncServer();
+});
+
+/** Each transfer the server listed onto its card; a card goes only when a listing that worked has it no more. */
+function showServerTransfers(transfers) {
+  const now = Date.now();
+  for (const [id, at] of serverRemoved) if (now - at > SERVER_HOLD_MS) serverRemoved.delete(id);
+  const listed = new Set();
+  for (const t of transfers) {
+    if (!t || !t.id || serverRemoved.has(t.id)) continue;
+    listed.add(t.id);
+    let torrent = serverTorrents.get(t.id);
+    const fresh = !torrent;
+    if (fresh) {
+      torrent = serverTorrent(t.id);
+      serverTorrents.set(t.id, torrent);
+    }
+    const detail = t.detail || {};
+    Object.assign(torrent, {
+      name: t.name || t.id,
+      length: t.size || 0,
+      progress: t.progress || 0,
+      state: t.state || '',
+      failed: Boolean(t.failed),
+      metadata: Boolean(t.metadata),
+      // As in a torrent the page runs: ready once the pieces on the disk are checked; done once every file wanted is there.
+      ready: Boolean(t.metadata) && !t.checking,
+      done: Boolean(t.ready),
+      numPeers: t.peers || 0,
+      downloadSpeed: t.downloadSpeed || 0,
+      uploadSpeed: t.uploadSpeed || 0,
+      downloaded: t.downloaded || 0,
+      uploaded: t.uploaded || 0,
+      ratio: t.ratio || 0,
+      pieceLength: detail.pieceLength || 0,
+      pieceCounts: detail.pieces || null,
+      announce: detail.announce || [],
+      magnetURI: detail.magnetURI || `magnet:?xt=urn:btih:${t.id}`,
+    });
+    const files = Array.isArray(detail.files) ? detail.files : [];
+    if (torrent.files.length !== files.length) torrent.files = files.map(() => serverFile());
+    files.forEach((f, i) => Object.assign(torrent.files[i], { name: f.name, path: f.path, length: f.size, downloaded: f.downloaded, progress: f.progress, done: Boolean(f.done), link: f.link }));
+    if (fresh) {
+      const view = createTorrentView(torrent, { deselected: t.deselected || [], addedAt: t.addedAt }, false);
+      view.el.classList.add('on-server');
+      const badge = $('.server-badge', view.el);
+      badge.textContent = ON_THIS_COMPUTER;
+      badge.hidden = false;
+      const reveal = $('.reveal-btn', view.el);
+      reveal.textContent = SHOW_IN_FILES;
+      reveal.hidden = false;
+      reveal.addEventListener('click', () => revealOnServer(torrent));
+    }
+    const view = views.get(torrent);
+    if (!(now - (view.pauseSentAt || 0) < SERVER_HOLD_MS)) torrent.paused = Boolean(t.paused);
+    showServer(view, t);
+  }
+  for (const torrent of [...serverTorrents.values()]) if (!listed.has(torrent.infoHash)) dropServer(torrent);
+  updateEmptyState();
+}
+
+function showServer(view, transfer) {
+  const { torrent, el } = view;
+  view.addedAt = transfer.addedAt || view.addedAt;
+  if (!torrent.metadata) $('.name', el).textContent = torrent.name || torrent.infoHash;
+  if (torrent.metadata && !view.fileEls.length && torrent.files.length) {
+    view.record = { deselected: transfer.deselected || [] };
+    renderFiles(view);
+  } else if (!(Date.now() - (view.ticksSentAt || 0) < SERVER_HOLD_MS)) {
+    const off = new Set(transfer.deselected || []);
+    view.fileEls.forEach((li, i) => {
+      $('input[type="checkbox"]', li).checked = !off.has(i);
+      li.classList.toggle('deselected', off.has(i));
+    });
+  }
+  refreshView(view);
+}
+
+function dropServer(torrent) {
+  torrent.destroyed = true;
+  serverTorrents.delete(torrent.infoHash);
+  removeView(torrent);
+  updateEmptyState();
+}
+
+/** Pause it, or choose its files: set as asked, so that a request sent twice does the same. */
+async function changeOnServer(torrent, change) {
+  try {
+    await serverCtx().json(serverUrl(`/api/transfers/${torrent.infoHash}`), { method: 'POST', body: JSON.stringify(change), json: true });
+  } catch (err) {
+    toast(`The server on ${THIS_COMPUTER} did not take that: ${err.message}`, { error: true });
+  }
+  syncServer();
+}
+
+async function removeFromServer(torrent, { keepFiles }) {
+  try {
+    await serverCtx().json(serverUrl(`/api/transfers/${torrent.infoHash}${keepFiles ? '?keepFiles=1' : ''}`), { method: 'DELETE' });
+  } catch (err) {
+    // Gone already, from another open copy: what was asked.
+    if (err.status !== 404) {
+      toast(`Could not remove "${torrent.name || torrent.infoHash}": ${err.message}`, { error: true });
+      return;
+    }
+  }
+  serverRemoved.set(torrent.infoHash, Date.now());
+  dropServer(torrent);
+  syncServer();
+}
+
+/** Asked as a torrent client asks: its files stay (the default), go with it, or nothing happens. Resolves 'keep', 'delete' or 'cancel'. */
+function askRemoveFromServer(torrents) {
+  const dialog = els.removeDialog;
+  const one = torrents.length === 1;
+  $('.remove-title', dialog).textContent = one ? `Remove "${torrents[0].name || torrents[0].infoHash}"?` : `Remove these ${torrents.length} torrents?`;
+  $('.remove-text', dialog).textContent = `The server on ${THIS_COMPUTER} stops downloading and sharing ${one ? 'it' : 'them'}. `
+    + `${one ? 'Its files' : 'Their files'} can stay where ${one ? 'it' : 'they'} put them, or be deleted from ${THIS_COMPUTER} as well.`;
+  return new Promise((resolve) => {
+    dialog.returnValue = '';
+    dialog.addEventListener('close', () => resolve(dialog.returnValue || 'cancel'), { once: true });
+    askUser(() => dialog.showModal());
+    $('.remove-keep', dialog).focus();
+  });
+}
+
+async function revealOnServer(torrent) {
+  try {
+    await serverCtx().json(serverUrl(`/api/transfers/${torrent.infoHash}/reveal`), { method: 'POST', body: '{}', json: true });
+  } catch (err) {
+    toast(`Could not show its files: ${err.message}`, { error: true });
+  }
+}
+
+/** Where a torrent added now goes: to this computer's server, unless the switch by the field says this browser. */
+function addsToServer() {
+  return Boolean(localServer) && settings.addTarget !== 'browser';
+}
+
+/** Add a torrent where torrents are added: the field, a file picked or dropped, a link, a share. */
+function addHere(id) {
+  return addsToServer() ? addToServer(id) : addTorrent(id);
+}
+
+/** Send it to this computer's server; resolves with its card's torrent once listed. */
+async function addToServer(id) {
+  let bytes = typeof id === 'string' ? null : new Uint8Array(id);
+  const address = typeof id === 'string' && /^https?:\/\//i.test(id);
+  // A .torrent address the server fetches itself, with no CORS in its way (archive.org sends no CORS
+  // header); one from before it could is fetched here, through the CORS proxy if need be.
+  const byAddress = address && localServer.features.includes('url');
+  if (address && !byAddress) {
+    toast('Fetching that .torrent…');
+    bytes = await fetchTorrentUrl(id);
+  }
+  if (!bytes && !address) {
+    const problem = magnetProblem(id);
+    if (problem) throw new Error(problem);
+  }
+  const ctx = serverCtx();
+  const sent = bytes ? { body: bytes, contentType: 'application/x-bittorrent' } : { body: JSON.stringify(byAddress ? { url: id } : { magnet: id }), json: true };
+  const { transfer } = await ctx.json(serverUrl('/api/transfers'), { method: 'POST', ...sent });
+  if (!transfer?.id) throw new Error(`the server on ${THIS_COMPUTER} did not return a transfer`);
+  const already = serverTorrents.has(transfer.id);
+  serverRemoved.delete(transfer.id);
+  for (let i = 0; i < 3 && !serverTorrents.has(transfer.id); i++) await syncServer();
+  if (already) toast(`"${transfer.name || transfer.id}" is already in the list.`);
+  return serverTorrents.get(transfer.id) || null;
+}
+
+/** The switch by the field, shown where there is a server of this computer to send torrents to. */
+function showAddTarget() {
+  for (const label of $$('[data-target-label="server"]', els.addTarget)) label.textContent = THIS_COMPUTER;
+  for (const input of $$('input', els.addTarget)) input.checked = input.value === (addsToServer() ? 'server' : 'browser');
+  els.addTarget.hidden = false;
+  syncAddHint();
+}
+
+function syncAddHint() {
+  const server = addsToServer();
+  els.browserHint.hidden = server;
+  els.serverHint.hidden = !server;
+  els.serverHint.textContent = `The server on ${THIS_COMPUTER} downloads it, into its download folder: it reaches every peer, not only the browsers, and goes on with this tab closed.`;
+}
+
+els.addTarget.addEventListener('change', (event) => {
+  saveSettings({ ...settings, addTarget: event.target.value === 'browser' ? 'browser' : 'server' });
+  syncAddHint();
+});
+
+/** The cloud account is this computer's own server, whose transfers are in the list already. */
+function cloudIsLocalServer() {
+  if (!localServer) return false;
+  const ctx = cloudCtx();
+  return ctx.provider === 'server' && ctx.base === location.origin;
+}
+
 /** Hand a request to the leading copy; resolves with its answer. */
 function askLead(message) {
   return new Promise((resolve, reject) => {
@@ -4315,7 +4716,8 @@ function torrentState(view) {
 /** What runs here, in the order it is shown, as the followers are told it. */
 function lastState() {
   const order = [...els.torrents.children];
-  const shown = [...views.values()].filter((v) => !v.torrent.destroyed && !v.torrent.remote).sort((a, b) => order.indexOf(a.el) - order.indexOf(b.el));
+  // Not the transfers of this computer's server: every open copy lists those from the server itself.
+  const shown = [...views.values()].filter((v) => !v.torrent.destroyed && runsHere(v.torrent)).sort((a, b) => order.indexOf(a.el) - order.indexOf(b.el));
   return {
     type: 'state',
     lead: copyId,
@@ -4896,6 +5298,19 @@ async function saveToFolder(torrent) {
 }
 
 async function saveTorrentFile(torrent) {
+  if (torrent.onServer) {
+    if (!torrent.metadata) {
+      toast('The .torrent file is not available until metadata arrives.');
+      return;
+    }
+    try {
+      const bytes = await torrentBytesOf(torrent);
+      await saver.save({ name: `${torrent.name || torrent.infoHash}.torrent`, size: bytes.length, stream: () => new Blob([bytes]).stream() });
+    } catch (err) {
+      toast(`Could not save .torrent: ${err.message}`, { error: true });
+    }
+    return;
+  }
   const size = torrent.remote ? torrent.torrentFileSize : torrent.torrentFile?.byteLength;
   if (!torrent.metadata || !size) {
     toast('The .torrent file is not available until metadata arrives.');
@@ -4918,7 +5333,7 @@ async function saveTorrentFile(torrent) {
 /** addTorrent for ids handed to us by a link, a drop or another app: never throws, always explains. */
 async function tryAddTorrent(id) {
   try {
-    return await addTorrent(id);
+    return await addHere(id);
   } catch (err) {
     toast(err.message, { error: true, timeout: 9000 });
     return null;
@@ -4970,7 +5385,7 @@ async function addTorrentFiles(fileList) {
       continue;
     }
     try {
-      showCard(await addTorrent(buf));
+      showCard(await addHere(buf));
     } catch (err) {
       toast(`Could not add ${f.name}: ${err.message}`, { error: true });
     }
@@ -4994,7 +5409,7 @@ els.magnetForm.addEventListener('submit', async (event) => {
   // What could not be added comes back, to be fixed rather than pasted again from wherever it was.
   els.magnetInput.value = '';
   try {
-    showCard(await addTorrent(id));
+    showCard(await addHere(id));
   } catch (err) {
     if (!els.magnetInput.value) els.magnetInput.value = value;
     toast(err.message, { error: true, timeout: 9000 });
@@ -5149,6 +5564,12 @@ async function publicTrackers() {
 
 /** The .torrent of a torrent in the list: as it was added when it came as a file, or as WebTorrent has it. */
 async function torrentBytesOf(torrent) {
+  if (torrent.onServer) {
+    if (!torrent.metadata) return null;
+    const res = await fetch(serverUrl(`/api/transfers/${torrent.infoHash}/torrent`), { headers: serverHeaders(), cache: 'no-store' });
+    if (!res.ok) throw new Error(`the server on ${THIS_COMPUTER} answered ${res.status}`);
+    return new Uint8Array(await res.arrayBuffer());
+  }
   const view = views.get(torrent);
   if (view?.source?.type === 'torrent') return new Uint8Array(view.source.bytes);
   if (!torrent.metadata) return null;
@@ -5710,7 +6131,8 @@ function wantsWakeLock() {
   // The cards, not the client: a copy that follows keeps the screen on for what the leading one runs,
   // which a phone does not let hold the screen when it is not the one shown.
   return [...views.keys()].some((t) => {
-    if (t.paused) return false;
+    // This computer's server goes on with the screen off, and with the tab closed.
+    if (t.paused || t.onServer) return false;
     const view = views.get(t);
     if (view?.seeding) return true;
     // A finished download is seeding while someone is there to take it. One still to finish is
@@ -6220,12 +6642,18 @@ els.copyDiagBtn.addEventListener('click', async () => {
 
 function refreshAll() {
   for (const view of views.values()) refreshView(view);
-  const { down, up, peers, count } = follower ? leadTotals : {
+  const here = follower ? leadTotals : {
     down: client.downloadSpeed,
     up: client.uploadSpeed,
     peers: client.torrents.reduce((n, t) => n + t.numPeers, 0),
     count: shownCount(),
   };
+  // With what this computer's server runs: the same line for every torrent in the list.
+  const onServer = [...serverTorrents.values()];
+  const down = here.down + onServer.reduce((n, t) => n + (t.downloadSpeed || 0), 0);
+  const up = here.up + onServer.reduce((n, t) => n + (t.uploadSpeed || 0), 0);
+  const peers = here.peers + onServer.reduce((n, t) => n + (t.numPeers || 0), 0);
+  const count = here.count + onServer.length;
   els.netStatus.textContent = !navigator.onLine ? 'offline'
     : down > 512 || up > 512
       ? `↓ ${formatSpeed(down)} ↑ ${formatSpeed(up)}`
@@ -6358,7 +6786,7 @@ function beforeLeaving(event) {
 }
 
 async function updateLeaveWarning() {
-  const running = decided && !follower && [...views.keys()].some((t) => !t.remote && !t.destroyed && !t.paused);
+  const running = decided && !follower && [...views.keys()].some((t) => runsHere(t) && !t.destroyed && !t.paused);
   let handedOn = false;
   if (running && navigator.locks?.query) {
     try {
@@ -6401,6 +6829,8 @@ const started = (async function start() {
   leading = elected;
   // Asked alongside everything below; only the cloud part at the end waits for the answer.
   const ownServer = adoptOwnServer();
+  // Served by the torrent client of this computer (npm run local): its transfers are this list's too.
+  const localOne = detectLocalServer();
   // Storage housekeeping first, before anything can be added or seeded.
   storageReady = (async () => {
     opfsOk = await probeOpfs();
@@ -6445,7 +6875,7 @@ const started = (async function start() {
   updateWakeLock();
 
   // The cloud account is the one part of the app that exists without any local torrent.
-  await ownServer;
+  await Promise.all([ownServer, localOne]);
   renderCloudLibrary();
   if (cloudReady()) {
     cloudAccountLine();
@@ -6495,4 +6925,4 @@ if ('launchQueue' in window && typeof window.launchQueue?.setConsumer === 'funct
 }
 
 // Expose for debugging and tests.
-window.__swarmdeck = { editor, seedOptions, routeDrop, createTorrent, hashPieces, get follower() { return follower; }, get settings() { return settings; }, client, views, saver, started, addTorrent, askTrackersNow, seedFiles, torrentReach, unreachableReason, cloudCtx, CLOUD_PROVIDERS, cloudSend, refreshCloudLibrary, cloudRemoveItem, keyRefused, effectiveTrackers, refreshTrackerList, fetchMetadataFallback, verifyTorrentBytes, findInfoSpan, runNetworkCheck, cleanOrphanStores, isComplete, get opfsOk() { return opfsOk; } };
+window.__swarmdeck = { editor, seedOptions, routeDrop, createTorrent, hashPieces, get follower() { return follower; }, get settings() { return settings; }, client, views, saver, started, addTorrent, askTrackersNow, seedFiles, torrentReach, unreachableReason, cloudCtx, CLOUD_PROVIDERS, cloudSend, refreshCloudLibrary, cloudRemoveItem, keyRefused, effectiveTrackers, refreshTrackerList, fetchMetadataFallback, verifyTorrentBytes, findInfoSpan, runNetworkCheck, cleanOrphanStores, isComplete, get opfsOk() { return opfsOk; }, get localServer() { return localServer; }, serverTorrents, syncServer, addHere };

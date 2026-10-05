@@ -4346,6 +4346,11 @@ try {
   await own.evaluate(() => window.__swarmdeck.started);
   assert.deepEqual(await own.evaluate(() => { const c = window.__swarmdeck.cloudCtx(); return { provider: c.provider, base: c.base }; }),
     { provider: 'server', base: new URL(site.url).origin }, 'the server serving the page is the service, at this very address');
+  // A server whose health does not say `local` (Docker, a NAS) is a cloud service and nothing more: its
+  // transfers are no cards in the list, and torrents are added in the page.
+  assert.equal(await own.evaluate(() => window.__swarmdeck.localServer), null, 'it is not taken for the server of this computer');
+  assert.equal(await own.locator('#torrents .torrent').count(), 0, 'and lists nothing in the torrents');
+  assert.equal(await own.isHidden('#add-target'), true, 'nor offers to download on it');
   await own.click('.tab[data-tab="cloud"]');
   await waitFor(() => own.$eval('#cloud-account', (e) => e.textContent === 'My own server · your server · 0 transfers · 30 GB free'), { label: 'the Cloud tab to show the server', timeout: 5000 });
   assert.equal(await own.isVisible('#cloud-library'), true, 'and its library');
@@ -4641,6 +4646,136 @@ try {
   await down.click('#settings-dialog button[value="cancel"]');
   await downCtx.close();
   log('your own server not answering: said as such in the library, which lists it again once it is back');
+
+  /* ---------- the torrent client of this computer (npm run local) ---------- */
+  // server/app.mjs --local, stood in for by its answers: its health says `local`, and its transfers
+  // are cards in the list, run there. What the page sends it is recorded, and a listing can be made
+  // to lag behind what was sent, as one already on its way does.
+  const localCtx = await context({ serviceWorkers: 'block', viewport: { width: 1280, height: 900 }, acceptDownloads: true });
+  const localSent = [];
+  const localList = new Map();
+  let localApplies = true;
+  const localTransfer = (id, name) => ({
+    id, name, size: 3000, progress: 1 / 3, state: 'downloading', ready: false, paused: false, metadata: true, checking: false,
+    peers: 2, downloadSpeed: 2048, uploadSpeed: 0, downloaded: 1000, uploaded: 0, ratio: 0, deselected: [], addedAt: Date.now(), files: [],
+    detail: {
+      magnetURI: `magnet:?xt=urn:btih:${id}`, announce: [], pieceLength: 16384, pieces: { have: 1, total: 3 },
+      files: [0, 1, 2].map((i) => ({ id: i, name: `part${i}.bin`, path: `${name}/part${i}.bin`, size: 1000, downloaded: i ? 0 : 1000, progress: i ? 0 : 1, done: !i, selected: true, link: `/api/transfers/${id}/files/${i}` })),
+    },
+  });
+  const [localA, localB, localC] = ['a', 'b', 'c'].map((c) => c.repeat(40));
+  localList.set(localA, localTransfer(localA, 'Alpha'));
+  localList.set(localB, localTransfer(localB, 'Bravo'));
+  await localCtx.route(`${site.url}api/**`, async (route) => {
+    const req = route.request();
+    const { pathname, search } = new URL(req.url());
+    const json = (status, body) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
+    if (req.method() !== 'GET') localSent.push({ method: req.method(), path: `${pathname}${search}`, body: req.postData() ? JSON.parse(req.postData()) : null });
+    else if (/\/files\/\d+$/.test(pathname)) localSent.push({ method: 'GET', path: pathname });
+    if (pathname === '/api/health') return json(200, { ok: true, torrents: localList.size, local: true, features: ['pause', 'select', 'keep-files', 'detail', 'url'] });
+    if (pathname === '/api/account') return json(200, { who: 'your server', detail: `${localList.size} transfers` });
+    if (pathname === '/api/transfers' && req.method() === 'GET') return json(200, { transfers: [...localList.values()] });
+    if (pathname === '/api/transfers' && req.method() === 'POST') {
+      localList.set(localC, localTransfer(localC, 'Charlie'));
+      return json(201, { transfer: localList.get(localC) });
+    }
+    const file = pathname.match(/^\/api\/transfers\/([a-f0-9]{40})\/files\/(\d+)$/);
+    if (file) return route.fulfill({ status: 200, contentType: 'application/octet-stream', body: 'x'.repeat(1000) });
+    const one = pathname.match(/^\/api\/transfers\/([a-f0-9]{40})$/);
+    const transfer = one && localList.get(one[1]);
+    if (!transfer) return json(404, { error: 'no such transfer' });
+    if (req.method() === 'DELETE') {
+      localList.delete(one[1]);
+      return json(200, { ok: true });
+    }
+    if (req.method() === 'POST') {
+      const change = JSON.parse(req.postData());
+      if (localApplies) {
+        if (change.paused !== undefined) Object.assign(transfer, { paused: change.paused, state: change.paused ? 'paused' : 'downloading' });
+        if (change.deselected) transfer.deselected = change.deselected;
+      }
+      return json(200, { transfer });
+    }
+    return json(200, { transfer });
+  });
+  const local = await localCtx.newPage();
+  local.on('pageerror', (e) => console.error('local server page error:', e));
+  local.on('dialog', (d) => d.accept());
+  await local.addInitScript(({ t, rtc }) => localStorage.setItem('swarmdeck:settings', JSON.stringify({ trackers: [t], trackerList: false, rtcConfig: rtc, metadataSources: [] })), { t: trackerUrl, rtc: rtcConfig });
+  await local.goto(site.url);
+  await local.waitForFunction(() => window.__swarmdeck?.client);
+  await local.evaluate(() => window.__swarmdeck.started);
+  await local.locator('#torrents .torrent.on-server').nth(1).waitFor({ state: 'attached', timeout: 10000 });
+  const cardOf = (name) => local.locator('#torrents .torrent.on-server', { has: local.locator('.name', { hasText: name }) });
+  const rowOfLocal = (id) => local.locator(`.tl-row[data-key="srv:${id}"]`);
+  assert.match(await cardOf('Alpha').locator('.server-badge').textContent(), /^On this (Mac|computer)$/, 'its card says where it runs');
+  assert.match(await rowOfLocal(localA).locator('.tl-badge').textContent(), /^On this (Mac|computer)$/, 'and so does its row in the list');
+  assert.equal(await local.evaluate(() => window.__swarmdeck.client.torrents.length), 0, 'run on the server, none in the page');
+  assert.equal(await local.isVisible('#add-target'), true, 'and the page offers to download on this computer');
+  assert.match(await local.textContent('#cloud-empty'), /what it downloads is in the list below/, 'whose transfers are not listed twice, in the Cloud library too');
+  const sentTo = (id) => localSent.filter((s) => s.method === 'POST' && s.path === `/api/transfers/${id}`).map((s) => s.body);
+
+  // Paused, and a file unticked: sent as states to set, and held while a listing that left before the
+  // server heard of them still says otherwise.
+  localApplies = false;
+  await rowOfLocal(localA).click();
+  await cardOf('Alpha').locator('.pause-btn').click();
+  await cardOf('Alpha').locator('.files li').nth(1).locator('input[type="checkbox"]').uncheck();
+  await waitFor(() => sentTo(localA).length === 2, { label: 'the pause and the ticks to be sent', timeout: 5000 });
+  assert.deepEqual(sentTo(localA), [{ paused: true }, { deselected: [1] }], 'a pause and the files left out, as states');
+  await local.waitForTimeout(1500);
+  assert.equal(await cardOf('Alpha').locator('.state').textContent(), 'paused', 'a late listing does not undo the pause');
+  assert.equal(await cardOf('Alpha').locator('.files li').nth(1).locator('input[type="checkbox"]').isChecked(), false, 'nor the box unticked');
+  // A change the server never made is not shown for ever: once the hold is over, the card says what
+  // the server says.
+  const secondBox = cardOf('Alpha').locator('.files li').nth(1).locator('input[type="checkbox"]');
+  await waitFor(async () => (await cardOf('Alpha').locator('.state').textContent()) !== 'paused' && (await secondBox.isChecked()), { label: 'the card to follow the server once the hold is over', timeout: 8000 });
+  localApplies = true;
+  await cardOf('Alpha').locator('.pause-btn').click();
+  await secondBox.uncheck();
+  await waitFor(() => localList.get(localA).paused && localList.get(localA).deselected.length === 1, { label: 'the server to take the pause and the file left out', timeout: 5000 });
+  assert.deepEqual(sentTo(localA).slice(2), [{ paused: true }, { deselected: [1] }]);
+  await local.waitForTimeout(4000);
+  assert.equal(await cardOf('Alpha').locator('.state').textContent(), 'paused', 'once it has, the listing says so too');
+  assert.equal(await secondBox.isChecked(), false);
+  await cardOf('Alpha').locator('.pause-btn').click();
+  await waitFor(() => localList.get(localA).paused === false, { label: 'the resume to be taken', timeout: 5000 });
+
+  // Several selected, paused together: one request each.
+  for (const id of [localA, localB]) await rowOfLocal(id).locator('input[type="checkbox"]').click();
+  await local.click('#bulk-pause');
+  await waitFor(() => sentTo(localB).length === 1 && sentTo(localA).length === 6, { label: 'one pause sent per torrent selected', timeout: 5000 });
+  assert.deepEqual([sentTo(localA)[5], sentTo(localB)[0]], [{ paused: true }, { paused: true }]);
+  await local.click('#bulk-clear');
+
+  // Save reads the file from the server.
+  await rowOfLocal(localB).click();
+  await cardOf('Bravo').locator('.files li').first().locator('.save-btn').click();
+  await waitFor(() => localSent.some((s) => s.path === `/api/transfers/${localB}/files/0`), { label: 'Save to fetch the file from the server', timeout: 10000 });
+
+  // Removed as a torrent client removes: asked whether the files go too, kept by default.
+  await rowOfLocal(localA).click();
+  await cardOf('Alpha').locator('.remove-btn').click();
+  await local.waitForSelector('#remove-dialog[open]');
+  assert.equal(await local.evaluate(() => document.activeElement?.classList.contains('remove-keep')), true, 'keeping the files is the answer Enter gives');
+  await local.click('#remove-dialog .remove-keep');
+  await waitFor(() => localSent.some((s) => s.method === 'DELETE' && s.path === `/api/transfers/${localA}?keepFiles=1`), { label: 'a remove that keeps the files', timeout: 5000 });
+  await waitFor(async () => (await cardOf('Alpha').count()) === 0, { label: 'its card to go', timeout: 5000 });
+
+  // A magnet typed in goes to the server, and nothing runs in the page; switched to this browser, it runs here.
+  await local.fill('#magnet-input', `magnet:?xt=urn:btih:${localC}&dn=Charlie`);
+  await local.click('#magnet-form button[type="submit"]');
+  await waitFor(() => localSent.some((s) => s.method === 'POST' && s.path === '/api/transfers' && s.body?.magnet?.includes(localC)), { label: 'the magnet to go to the server', timeout: 5000 });
+  await cardOf('Charlie').waitFor({ state: 'attached', timeout: 5000 });
+  assert.equal(await local.evaluate(() => window.__swarmdeck.client.torrents.length), 0, 'with no torrent in the page');
+  await local.check('#add-target input[value="browser"]');
+  const posted = localSent.filter((s) => s.path === '/api/transfers').length;
+  await local.fill('#magnet-input', `magnet:?xt=urn:btih:${'d'.repeat(40)}&dn=InTheBrowser`);
+  await local.click('#magnet-form button[type="submit"]');
+  await local.waitForFunction(() => window.__swarmdeck.client.torrents.length === 1, null, { timeout: 5000 });
+  assert.equal(localSent.filter((s) => s.path === '/api/transfers').length, posted, 'and switched to this browser, nothing is sent to the server');
+  await localCtx.close();
+  log('the server of this computer: its transfers are cards, paused, chosen, saved and removed from the page, and torrents added there');
 
   /* ---------- the installed app, on https, pointed at a server's http:// address ---------- */
   // The browser refuses the call outright (mixed content), before anything is sent: ALLOWED_ORIGINS,

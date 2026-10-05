@@ -45,7 +45,7 @@ function base32(buf) {
 }
 const log = (...a) => console.log('•', ...a);
 
-const WATCHDOG_MS = 3 * 60 * 1000;
+const WATCHDOG_MS = 5 * 60 * 1000;
 setTimeout(() => {
   console.error(`\nWATCHDOG: the server suite exceeded ${WATCHDOG_MS / 60000} minutes`);
   process.exit(2);
@@ -162,7 +162,7 @@ function startServer(extraEnv = {}) {
     const text = String(d);
     serverLog += text;
     process.stdout.write(`  server: ${text}`);
-    const m = text.match(/http:\/\/0\.0\.0\.0:(\d+)/);
+    const m = text.match(/swarmdeck server on http:\/\/\S+:(\d+)/);
     if (m) serverUrl = `http://127.0.0.1:${m[1]}`;
   });
   server.stderr.on('data', (d) => {
@@ -220,6 +220,33 @@ function raw(pathname, { method = 'GET', headers = {}, body } = {}) {
   });
 }
 
+/**
+ * A web seed on this machine, as archive.org is one for every item: plain HTTP ranges, each answered
+ * after `delay` ms so that a download takes long enough to be paused in the middle. It counts what it is
+ * asked, to tell a download that stopped from one that only slowed down.
+ */
+async function webSeed(bytes, { delay = 150 } = {}) {
+  const seen = { requests: 0 };
+  const srv = http.createServer((req, res) => {
+    seen.requests += 1;
+    const m = /^bytes=(\d+)-(\d+)$/.exec(req.headers.range || '');
+    const start = m ? Number(m[1]) : 0;
+    const end = m ? Math.min(Number(m[2]), bytes.length - 1) : bytes.length - 1;
+    setTimeout(() => {
+      res.writeHead(m ? 206 : 200, {
+        'Content-Length': end - start + 1,
+        'Accept-Ranges': 'bytes',
+        ...(m ? { 'Content-Range': `bytes ${start}-${end}/${bytes.length}` } : {}),
+      });
+      res.end(bytes.subarray(start, end + 1));
+    }, delay);
+  });
+  await new Promise((resolve) => srv.listen(0, '127.0.0.1', resolve));
+  seen.url = `http://127.0.0.1:${srv.address().port}/file.bin`;
+  seen.close = () => new Promise((resolve) => { srv.closeAllConnections(); srv.close(resolve); });
+  return seen;
+}
+
 let failed = false;
 try {
   // A download directory the server cannot write to (a disk mounted over it that belongs to
@@ -273,6 +300,61 @@ try {
   const withoutUtp = await startAside({ NODE_OPTIONS: `--require ${noUtpHook}`, TORRENT_PORT: String(await freePort()), DHT_PORT: String(await freePort()) }, { until: /BitTorrent on port .*\n/ });
   assert.match(withoutUtp.output, /BitTorrent on port \d+ \(TCP only/, `a server without uTP does not claim it (it said: ${withoutUtp.output.match(/BitTorrent.*/)?.[0]})`);
   log('a build without uTP says it runs TCP only');
+
+  // Run as the torrent client of the user's own computer: on that machine only, saying so to the app,
+  // and in a download directory of the test's own — never ~/Downloads. Started a second time on the
+  // same port, it finds itself running and leaves, with no error, instead of failing on every port.
+  const localDir = mkdtempSync(path.join(tmpdir(), 'swarmdeck-local-'));
+  const localEnv = { ...process.env, PORT: '0', AUTH_TOKEN: '', DOWNLOAD_DIR: localDir, WEB_DIR: path.join(HERE, '..'), TORRENT_PORT: String(await freePort()), DHT_PORT: String(await freePort()), DHT_BOOTSTRAP: `127.0.0.1:${dhtRouterPort}`, HOST: '' };
+  const local = spawn(process.execPath, [path.join(HERE, '..', 'server', 'app.mjs'), '--local', '--no-open'], { env: localEnv, stdio: ['ignore', 'pipe', 'pipe'] });
+  let localLog = '';
+  local.stdout.on('data', (d) => { localLog += d; });
+  local.stderr.on('data', (d) => { localLog += d; });
+  try {
+    const localPort = await waitFor(() => localLog.match(/swarmdeck server on http:\/\/127\.0\.0\.1:(\d+)/)?.[1], { label: 'the local server to listen on 127.0.0.1', timeout: 20000 });
+    assert.match(localLog, new RegExp(`Swarmdeck runs on this computer: http://127\\.0\\.0\\.1:${localPort}/`), 'it says where to open it');
+    assert.match(localLog, new RegExp(`downloads in ${localDir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`), 'and keeps its files where it was told');
+    const localHealth = await (await fetch(`http://127.0.0.1:${localPort}/api/health`)).json();
+    assert.equal(localHealth.local, true, 'its health says it is the local one');
+    assert.deepEqual(localHealth.features, ['pause', 'select', 'keep-files', 'detail', 'url']);
+    // A .torrent at an address the page could not fetch (no CORS header, as archive.org sends none) is
+    // fetched by the server of the computer itself.
+    const torrentHost = http.createServer((req, res) => {
+      if (req.url === '/release.torrent') res.end(seeded.torrentFile);
+      else res.writeHead(404).end('<html>not found</html>');
+    });
+    await new Promise((resolve) => torrentHost.listen(0, '127.0.0.1', resolve));
+    const at = (p) => `http://127.0.0.1:${torrentHost.address().port}${p}`;
+    const byUrl = (address) => fetch(`http://127.0.0.1:${localPort}/api/transfers?paused=1`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url: address, paused: true }) });
+    const fetched = await byUrl(at('/release.torrent'));
+    assert.equal(fetched.status, 201, 'a .torrent is added from its address');
+    assert.equal((await fetched.json()).transfer.id, seeded.infoHash);
+    const notTorrent = await byUrl(at('/missing.torrent'));
+    assert.equal(notTorrent.status, 400);
+    assert.match((await notTorrent.json()).error, /answered 404/, 'an address that does not answer with one says so');
+    assert.equal((await byUrl('file:///etc/passwd')).status, 400, 'and only http and https are fetched');
+    torrentHost.close();
+    const unknown = randomBytes(20).toString('hex');
+    assert.equal((await fetch(`http://127.0.0.1:${localPort}/api/transfers/${unknown}/reveal`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })).status, 404, 'it shows the files of a transfer it has');
+    assert.equal((await fetch(`http://127.0.0.1:${localPort}/api/transfers/${unknown}/reveal`, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: '{}' })).status, 415, 'asked as JSON');
+    const twiceStarted = await new Promise((resolve) => {
+      const second = spawn(process.execPath, [path.join(HERE, '..', 'server', 'app.mjs'), '--local', '--no-open'], { env: { ...localEnv, PORT: localPort }, stdio: ['ignore', 'pipe', 'pipe'] });
+      let said = '';
+      second.stdout.on('data', (d) => { said += d; });
+      second.stderr.on('data', (d) => { said += d; });
+      const timer = setTimeout(() => second.kill('SIGKILL'), 10000);
+      second.once('exit', (code) => { clearTimeout(timer); resolve({ code, said }); });
+    });
+    assert.equal(twiceStarted.code, 0, `started again, it leaves without an error (it said: ${twiceStarted.said.trim()})`);
+    assert.match(twiceStarted.said, new RegExp(`already runs on http://127\\.0\\.0\\.1:${localPort}/`), 'and says where the one running is');
+  } finally {
+    local.kill('SIGTERM');
+    await new Promise((resolve) => (local.exitCode !== null ? resolve() : local.once('exit', resolve)));
+    rmSync(localDir, { recursive: true, force: true });
+  }
+  const docker = await startAside({ TORRENT_PORT: String(await freePort()), DHT_PORT: String(await freePort()), HOST: '' }, { until: /downloads in .*\n/ });
+  assert.match(docker.output, /swarmdeck server on http:\/\/0\.0\.0\.0:\d+/, 'without --local it still listens on every interface, as in Docker');
+  log('--local listens on 127.0.0.1 in the directory it is given, says so in its health, and a second start opens the first');
 
   await startServer();
   const api = (path, init = {}) => fetch(`${serverUrl}${path}`, {
@@ -682,6 +764,161 @@ try {
   rmSync(path.dirname(blockedDir), { recursive: true, force: true });
   rmSync(path.join(downloads, 'Blocked'), { recursive: true, force: true });
   log('a failed transfer stays listed with its reason until it is deleted, and takes only its own files');
+
+  /* ---------- a torrent client's controls: files left out, pause, remove keeping the files ---------- */
+
+  const json = (body) => ({ method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const transferOf = async (id, detail = true) => (await (await api(`/api/transfers/${id}${detail ? '?detail=1' : ''}`)).json()).transfer;
+  const change = (id, body) => api(`/api/transfers/${id}`, json(body));
+
+  // Three files whose edges fall inside pieces: the middle one shares its first piece with the first
+  // file and its last with the third. Left out, it must not take those pieces with it, or the files
+  // around it never finish. Seeded slowly, so that it cannot be finished before it is left out.
+  const slowSeeder = new WebTorrent({ dht: false, torrentPort: await freePort() });
+  slowSeeder.throttleUpload(256 * 1024);
+  const trioDir = path.join(tmp, 'Trio');
+  mkdirSync(trioDir);
+  const trio = [randomBytes(40000), randomBytes(50000), randomBytes(30000)];
+  trio.forEach((bytes, i) => writeFileSync(path.join(trioDir, `${'abc'[i]}.bin`), bytes));
+  const trioSeeded = await new Promise((resolve) => slowSeeder.seed(trioDir, { announce: [trackerUrl], pieceLength: 16 * 1024 }, resolve));
+  // Added paused: nothing is fetched until it is told what to fetch.
+  const trioAdd = await api('/api/transfers?paused=1', { method: 'POST', headers: { 'Content-Type': 'application/x-bittorrent' }, body: trioSeeded.torrentFile });
+  assert.equal(trioAdd.status, 201);
+  const trioId = trioSeeded.infoHash;
+  await waitFor(async () => !(await transferOf(trioId)).checking, { label: 'the trio to be checked', timeout: 15000 });
+  await new Promise((r) => setTimeout(r, 1500));
+  const pausedAtAdd = await transferOf(trioId);
+  assert.equal(pausedAtAdd.paused, true, 'added with paused, it is paused');
+  assert.equal(pausedAtAdd.state, 'paused');
+  assert.equal(pausedAtAdd.downloaded, 0, 'and fetches nothing');
+  assert.equal(pausedAtAdd.peers, 0, 'from no one');
+  assert.equal(pausedAtAdd.detail.files.length, 3, 'its detail lists every file');
+  assert.deepEqual(pausedAtAdd.files, [], 'and its files only the ones that are there');
+  assert.ok(JSON.parse(readFileSync(path.join(downloads, 'transfers.json'), 'utf8')).find((row) => row.id === trioId).paused, 'the pause is saved');
+  log('a transfer added paused fetches nothing');
+
+  // The middle file left out — twice, as a client that resends it would: the same thing both times.
+  for (let i = 0; i < 2; i++) {
+    const left = await change(trioId, { deselected: [1] });
+    assert.equal(left.status, 200);
+    assert.deepEqual((await left.json()).transfer.deselected, [1]);
+  }
+  assert.equal((await change(trioId, { paused: false })).status, 200);
+  const trioDone = await waitFor(async () => {
+    const t = await transferOf(trioId);
+    return t.ready ? t : false;
+  }, { label: 'the files around the one left out to finish', timeout: 30000 });
+  assert.equal(trioDone.progress, 1, 'progress is about the files wanted');
+  assert.equal(trioDone.state, 'seeding');
+  assert.deepEqual(trioDone.detail.files.map((f) => [f.done, f.selected]), [[true, true], [false, false], [true, true]], 'the files wanted are there, the one left out is not');
+  assert.deepEqual(trioDone.files.map((f) => f.id), [0, 2], 'and only they are listed as files to fetch');
+  for (const i of [0, 2]) {
+    const served = Buffer.from(await (await api(`/api/transfers/${trioId}/files/${i}`)).arrayBuffer());
+    assert.equal(sha(served), sha(trio[i]), `file ${i} is the one seeded, byte for byte`);
+  }
+  log('a file left out leaves the files around it whole: they finish, and the transfer is ready');
+
+  // Paused in the middle of a download from a peer and a web seed at once: the wires close, the web
+  // seed with them, and nothing more arrives until it is resumed; then it goes on to the end.
+  const bigBytes = randomBytes(3 * 1024 * 1024);
+  const bigDir = path.join(tmp, 'big');
+  mkdirSync(bigDir);
+  writeFileSync(path.join(bigDir, 'big.bin'), bigBytes);
+  const seedServer = await webSeed(bigBytes);
+  const big = await new Promise((resolve) => slowSeeder.seed(path.join(bigDir, 'big.bin'), { announce: [trackerUrl], urlList: [seedServer.url], pieceLength: 32 * 1024 }, resolve));
+  assert.equal((await api('/api/transfers', { method: 'POST', headers: { 'Content-Type': 'application/x-bittorrent' }, body: big.torrentFile })).status, 201);
+  await waitFor(async () => {
+    const t = await transferOf(big.infoHash, false);
+    return t.downloaded > 256 * 1024 && t.peers >= 2;
+  }, { label: 'the download to be under way from the peer and the web seed', timeout: 30000 });
+  assert.equal((await change(big.infoHash, { paused: true })).status, 200);
+  await waitFor(async () => (await transferOf(big.infoHash, false)).peers === 0, { label: 'every wire to close', timeout: 2000, interval: 100 });
+  // A request already sent may still land: from a moment after the pause, nothing more.
+  await new Promise((r) => setTimeout(r, 500));
+  const stoppedAt = await transferOf(big.infoHash, false);
+  const askedAt = seedServer.requests;
+  await new Promise((r) => setTimeout(r, 3000));
+  const stillStopped = await transferOf(big.infoHash, false);
+  assert.ok(stoppedAt.downloaded < bigBytes.length, 'paused before the end');
+  assert.equal(stillStopped.downloaded, stoppedAt.downloaded, 'nothing arrives while it is paused');
+  assert.equal(seedServer.requests, askedAt, 'and the web seed is asked nothing');
+  assert.equal(stillStopped.state, 'paused');
+  assert.equal(stillStopped.peers, 0);
+  log(`a pause closes every wire, the web seed's too: nothing arrives for 3 s (${stoppedAt.downloaded} of ${bigBytes.length} B)`);
+  assert.equal((await change(big.infoHash, { paused: false })).status, 200);
+  await waitFor(async () => seedServer.requests > askedAt, { label: 'the web seed to be asked again', timeout: 5000 });
+  await waitFor(async () => (await transferOf(big.infoHash, false)).ready, { label: 'the resumed download to finish', timeout: 60000 });
+  assert.equal(sha(Buffer.from(await (await api(`/api/transfers/${big.infoHash}/files/0`)).arrayBuffer())), sha(bigBytes), 'resumed, it finishes with the file seeded');
+  log('resumed, the web seed is back and the download goes on to the end');
+
+  // Removed with its files kept, as a torrent client removes a torrent: the file stays, and the same
+  // torrent added again, with no one left to fetch it from, has it at once from the disk.
+  assert.equal((await api(`/api/transfers/${big.infoHash}?keepFiles=1`, { method: 'DELETE' })).status, 200);
+  assert.equal((await api(`/api/transfers/${big.infoHash}`)).status, 404, 'removed');
+  assert.ok(existsSync(path.join(downloads, 'big.bin')), 'with its file kept');
+  await new Promise((resolve) => slowSeeder.remove(big.infoHash, { destroyStore: false }, resolve));
+  await seedServer.close();
+  assert.equal((await api('/api/transfers', { method: 'POST', headers: { 'Content-Type': 'application/x-bittorrent' }, body: big.torrentFile })).status, 201);
+  await waitFor(async () => (await transferOf(big.infoHash, false)).ready, { label: 'the file kept to be found on the disk', timeout: 15000 });
+  assert.equal((await api(`/api/transfers/${big.infoHash}`, { method: 'DELETE' })).status, 200);
+  await waitFor(() => !existsSync(path.join(downloads, 'big.bin')), { label: 'the file to go with a plain delete', timeout: 5000 });
+  log('removed keeping its files, a transfer added again finishes from the disk; a plain delete still takes them');
+
+  // The changes a page may send are checked like an add: from this server's page or a script only,
+  // as JSON only, and only what makes sense.
+  const crossSiteChange = await api(`/api/transfers/${trioId}`, { method: 'POST', headers: { Origin: 'https://elsewhere.example', 'Sec-Fetch-Site': 'cross-site', 'Content-Type': 'application/json' }, body: '{"paused":true}' });
+  assert.equal(crossSiteChange.status, 403, 'another website may not pause a transfer');
+  assert.equal((await api(`/api/transfers/${trioId}`, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: '{"paused":true}' })).status, 415, 'nor may a body sent without asking');
+  assert.equal((await change(trioId, { deselected: [3] })).status, 400, 'a file it does not have is refused');
+  assert.equal((await change(trioId, { deselected: [-1] })).status, 400);
+  assert.equal((await change(trioId, { deselected: ['1'] })).status, 400);
+  assert.equal((await change(trioId, { paused: 'yes' })).status, 400, 'a pause is true or false');
+  assert.equal((await api(`/api/transfers/${trioId}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{nope' })).status, 400, 'a body that is not JSON is refused');
+  const noMeta = randomBytes(20).toString('hex');
+  assert.equal((await api('/api/transfers', json({ magnet: noMeta, paused: true }))).status, 201);
+  assert.equal((await change(noMeta, { deselected: [0] })).status, 409, 'files are chosen once they are known');
+  assert.equal((await change(noMeta, { paused: false })).status, 200, 'a pause needs no metadata');
+  assert.equal((await api(`/api/transfers/${noMeta}`, { method: 'DELETE' })).status, 200);
+  assert.equal((await transferOf(trioId)).paused, false, 'and nothing refused changed anything');
+  assert.equal((await api(`/api/transfers/${trioId}/reveal`, json({}))).status, 403, 'a server not started with --local shows no files');
+  const noFetch = await api('/api/transfers', json({ url: `${serverUrl}/` }));
+  assert.equal(noFetch.status, 400, 'nor fetches an address for whoever holds its token');
+  assert.match((await noFetch.json()).error, /fetches no address/);
+  assert.ok(!(await (await fetch(`${serverUrl}/api/health`)).json()).features.includes('url'), 'and its health does not offer to');
+  const trioTorrent = await api(`/api/transfers/${trioId}/torrent`);
+  assert.equal(trioTorrent.headers.get('content-type'), 'application/x-bittorrent');
+  assert.equal(sha(Buffer.from(await trioTorrent.arrayBuffer())), sha(Buffer.from(trioSeeded.torrentFile)), 'its .torrent is the one it was added with');
+  log('a change from another website, not JSON, or naming a file that is not there is refused');
+
+  // A restart keeps the pause and the files left out, and fetches no more than before it.
+  assert.equal((await change(trioId, { paused: true })).status, 200);
+  const rows = JSON.parse(readFileSync(path.join(downloads, 'transfers.json'), 'utf8'));
+  assert.deepEqual(rows.find((row) => row.id === trioId).deselected, [1], 'the files left out are saved');
+  assert.ok(rows.filter((row) => row.id !== trioId).every((row) => !('paused' in row) && !('deselected' in row)), 'and nothing is written for the transfers that have neither');
+  await stopServer();
+  await startServer();
+  const trioBack = await waitFor(async () => {
+    const t = await transferOf(trioId);
+    return t && !t.checking && t.metadata ? t : false;
+  }, { label: 'the trio to be checked after the restart', timeout: 15000 });
+  assert.equal(trioBack.paused, true, 'still paused after a restart');
+  assert.deepEqual(trioBack.deselected, [1], 'with the same file left out');
+  assert.equal(trioBack.ready, true, 'and the files wanted all there');
+  assert.equal((await change(trioId, { paused: false })).status, 200);
+  await new Promise((r) => setTimeout(r, 3000));
+  const trioAfter = await transferOf(trioId);
+  assert.equal(trioAfter.detail.files[1].done, false, 'resumed, the file left out is still not fetched');
+  assert.equal(trioAfter.state, 'seeding');
+  log('a restart keeps the pause and the files left out');
+
+  // A file chosen again is fetched, and the transfer is unfinished until it is there.
+  assert.equal((await change(trioId, { deselected: [] })).status, 200);
+  await waitFor(async () => (await transferOf(trioId)).detail.files[1].done, { label: 'the file chosen again to arrive', timeout: 30000 });
+  assert.equal(sha(Buffer.from(await (await api(`/api/transfers/${trioId}/files/1`)).arrayBuffer())), sha(trio[1]), 'whole');
+  assert.ok(!('deselected' in JSON.parse(readFileSync(path.join(downloads, 'transfers.json'), 'utf8')).find((row) => row.id === trioId)), 'and nothing left out is saved');
+  assert.equal((await api(`/api/transfers/${trioId}`, { method: 'DELETE' })).status, 200);
+  await new Promise((resolve) => slowSeeder.destroy(resolve));
+  log('a file chosen again is fetched');
 
   // A restart picks every transfer up again, handlers and all: with SEED_AFTER_DONE=0 a
   // resumed download that is complete stops seeding, as a fresh one does. The only seeder

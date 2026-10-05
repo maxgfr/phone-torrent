@@ -65,7 +65,14 @@
                  aria-label="Magnet link or info hash" spellcheck="false" />
           <button class="btn" type="submit">Add</button>
         </form>
-        <p class="hint">
+        <!-- Shown only on the page this computer's own server serves (npm run local). -->
+        <div class="add-target" id="add-target" role="radiogroup" aria-label="Download on" hidden>
+          <span class="add-target-label">Download on</span>
+          <label><input type="radio" name="add-target" value="server" checked /> <span data-target-label="server">this computer</span></label>
+          <label><input type="radio" name="add-target" value="browser" /> <span>this browser</span></label>
+        </div>
+        <p class="hint" id="server-hint" hidden></p>
+        <p class="hint" id="browser-hint">
           Everything happens in your browser: nothing is uploaded to a server. Browsers can only reach
           <strong>WebRTC-capable peers</strong> (other browsers, WebTorrent Desktop, or hybrid seeders),
           so a torrent that only has classic seeders may find no peers here.
@@ -269,7 +276,7 @@
       <header class="torrent-head">
         <div class="torrent-title">
           <h3 class="name"></h3>
-          <div class="meta"><span class="size"></span> · <span class="state"></span></div>
+          <div class="meta"><span class="badge server-badge" hidden></span><span class="size"></span> · <span class="state"></span></div>
         </div>
         <div class="head-actions">
           <button class="icon-btn pause-btn" type="button" aria-label="Pause" title="Pause">
@@ -294,6 +301,7 @@
       <div class="actions">
         <button class="btn primary zip-btn" type="button" disabled>Save selected as .zip</button>
         <button class="btn folder-btn" type="button" disabled hidden>Save to a folder…</button>
+        <button class="btn reveal-btn" type="button" hidden>Show in Finder</button>
         <button class="btn primary share-link-btn" type="button">Share link</button>
         <button class="btn ghost select-all-btn" type="button">All</button>
         <button class="btn ghost select-none-btn" type="button">None</button>
@@ -326,6 +334,8 @@
         </div>
       </div>
       <ul class="files"></ul>
+      <p class="hint server-partial" hidden>A file left out can still appear in the download folder, partly written:
+        the pieces it shares with the files kept are fetched with them.</p>
       <div class="cloud" hidden>
         <p class="hint cloud-state"></p>
         <ul class="cloud-files"></ul>
@@ -814,6 +824,19 @@
         <kbd>Ctrl</kbd>- or <kbd>⌘</kbd>-click one more or one less. Files and folders can be dropped anywhere on the page.</p>
       <div class="dialog-actions">
         <button class="btn primary" value="close">Close</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Removing a transfer of this computer's server: its files can stay, as in any torrent client. -->
+  <dialog id="remove-dialog" class="dialog remove-dialog" aria-labelledby="remove-title">
+    <form method="dialog" class="dialog-body">
+      <h2 id="remove-title" class="remove-title"></h2>
+      <p class="remove-text"></p>
+      <div class="dialog-actions">
+        <button class="btn ghost" value="cancel">Cancel</button>
+        <button class="btn danger" value="delete">Remove and delete the files</button>
+        <button class="btn primary remove-keep" value="keep">Remove, keep the files</button>
       </div>
     </form>
   </dialog>

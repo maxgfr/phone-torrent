@@ -66,6 +66,23 @@ is. A folder of yours mounted there, files and all, keeps its owner: the server
 then says it cannot write there, and `--user <uid>:<gid>` runs it as that
 owner instead, which skips that step.
 
+### On your own computer, without Docker
+
+```sh
+npm install && npm run local      # from a clone, at the root of the repository
+```
+
+`node server/app.mjs --local`, or `SWARMDECK_LOCAL=1`: the torrent client of the
+machine it runs on. It listens on `127.0.0.1` (`HOST` to change it), keeps the
+files in `~/Downloads/Swarmdeck` (`DOWNLOAD_DIR` to change it) and opens
+`http://127.0.0.1:PORT/` in the browser (`--no-open` not to). Started again while
+it runs on the same `PORT`, it opens the copy that runs and exits with code 0; a
+`PORT` taken by anything else is said by name, with exit code 1. Its
+`/api/health` says `local: true`, which is how the app knows to list its
+transfers as cards and drive them as a torrent client's (the main README says
+what that gives); it alone fetches a `.torrent` from its address (`url`), and
+shows a transfer's files in the Finder (`reveal`), to the machine it runs on only.
+
 ## Point the app at it
 
 **Settings → Cloud fetch → service “My own server”**, `AUTH_TOKEN` as the key
@@ -88,17 +105,26 @@ device gets, rather than the key to the whole server.
 
 | | |
 |---|---|
-| `GET /api/health` | no token; `{ ok, torrents }`, or `503` once the BitTorrent client has stopped |
+| `GET /api/health` | no token; `{ ok, torrents, features }` — what it does besides add, list and delete: `pause`, `select`, `keep-files`, `detail`, and `url` with `--local` — with `local: true` when started with `--local`; or `503` once the BitTorrent client has stopped |
 | `GET /api/account` | `{ who, detail }` — transfer count and free space |
-| `GET /api/transfers` | `{ transfers: [...] }` |
-| `POST /api/transfers` | `{"magnet": "..."}` as `application/json`, or the `.torrent` bytes as `application/x-bittorrent`; anything else is `415`, whatever follows a `;` |
+| `GET /api/transfers` | `{ transfers: [...] }`; with `?detail=1`, each with its `detail` |
+| `POST /api/transfers` | `{"magnet": "..."}` as `application/json`, or the `.torrent` bytes as `application/x-bittorrent`; anything else is `415`, whatever follows a `;`. `"paused": true` beside the magnet, or `?paused=1` beside the bytes, adds it paused. With `--local`, `{"url": "https://…"}` has the server fetch the `.torrent` at that address itself |
 | `POST /api/metadata` | `{"magnet": "..."}` (or an info hash) as `application/json`: `{ torrent }`, the `.torrent` as base64 — from the transfer that has it, or else from the DHT and the magnet's trackers, asked for a minute without making a transfer of it — or `null` when nobody sent it; the app's editor asks it to save a magnet as a `.torrent` |
-| `GET /api/transfers/{infoHash}` | one transfer |
-| `DELETE /api/transfers/{infoHash}` | removes it **and its files**, and the folders they leave empty; nothing it did not write, whatever its name |
+| `GET /api/transfers/{infoHash}` | one transfer; `?detail=1` as above |
+| `POST /api/transfers/{infoHash}` | `{"paused": true\|false, "deselected": [indexes]}` as `application/json`, either or both: sets the pause and the files not fetched (`[]` fetches them all), rather than flipping them, so the same request twice does the same; kept across a restart. `400` for an index it does not have, `409` for files chosen before the metadata is in; answers the transfer with its `detail` |
+| `DELETE /api/transfers/{infoHash}` | removes it **and its files**, and the folders they leave empty; nothing it did not write, whatever its name. `?keepFiles=1` removes the transfer alone, as a torrent client does: added again, it finds them on the disk |
 | `GET /api/transfers/{infoHash}/files/{index}` | the file, with `Range` support; the token, or the file's signed `link` |
+| `GET /api/transfers/{infoHash}/torrent` | its `.torrent`, once the metadata is in (`409` before) |
+| `POST /api/transfers/{infoHash}/reveal` | with `--local`, and from the machine itself only: shows its files in the Finder (`explorer`, `xdg-open` elsewhere), at the place the server works out — the request names none. `403` otherwise |
 
-A transfer is `{ id, name, size, progress, state, ready, peers, downloadSpeed, receivedAt, files: [{ id, name, size, link }] }`,
-`receivedAt` being when data last arrived for it (absent until some has, since
+A transfer is `{ id, name, size, progress, state, ready, paused, metadata, checking, peers, downloadSpeed, uploadSpeed, downloaded, uploaded, ratio, deselected, receivedAt, addedAt, files: [{ id, name, size, link }] }`.
+`progress`, `ready` and `state` are about the files wanted: with one left out, `ready` is true once
+the others are all there. `state` is one of `paused`, `fetching metadata`, `looking for peers`,
+`checking files`, `nothing selected`, `downloading`, `seeding`, `completed` (`SEED_AFTER_DONE=0`).
+Its `detail` is `{ magnetURI, announce, pieceLength, pieces: { have, total }, files: [{ id, name, path, size, downloaded, progress, done, selected, link }] }`,
+every file this time. A pause closes every connection, web seeds included, and resume brings them
+back; a file left out may still be partly written, by the pieces it shares with the files kept.
+`receivedAt` is when data last arrived for it (absent until some has, since
 the server started): that is how the Cloudflare Worker tells a download still
 getting somewhere from one that is not, with no request coming in.
 `files` lists each file as soon as it is complete, so the first episode of a
@@ -122,10 +148,12 @@ and the server starts with no transfers.
 | variable | default | |
 |---|---|---|
 | `PORT` | `8080` | |
+| `HOST` | `0.0.0.0`; `127.0.0.1` with `--local` | the address it listens on |
+| `SWARMDECK_LOCAL` | *(none)* | `1` does what `--local` does |
 | `AUTH_TOKEN` | *(none)* | set it whenever the server is not alone on your machine |
 | `ALLOWED_ORIGINS` | *(none)* | comma-separated origins allowed to call the API from a browser, such as `https://<user>.github.io` (a page's address is cut down to its origin, and the log lists what was taken); none means only the page this server serves, `*` means any |
 | `ALLOWED_HOSTS` | *(none)* | with no `AUTH_TOKEN`, comma-separated host names the API answers at besides `localhost` and IP addresses, e.g. `nas.local` (written as the address bar shows it, `nas.local:8080`, it is the name alone that counts, and the log lists the names it took) |
-| `DOWNLOAD_DIR` | `/data/downloads` | where files land (`downloads/` beside `server/` when run from a checkout; never served as static files); a server that cannot write there says so and does not start |
+| `DOWNLOAD_DIR` | `downloads/` beside `server/`; `/data/downloads` in the image; `~/Downloads/Swarmdeck` with `--local` | where files land (never served as static files); a server that cannot write there says so and does not start |
 | `WEB_DIR` | the app | the static files served at `/` |
 | `SEED_AFTER_DONE` | `1` | keep seeding once a download finishes |
 | `TORRENT_PORT` | `6881` | BitTorrent over TCP and uTP (the log says `TCP only` in a build without uTP) |

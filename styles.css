@@ -707,3 +707,21 @@ kbd {
   font: 0.8rem ui-monospace, SFMono-Regular, Menlo, monospace; padding: 1px 6px; border-radius: 6px;
   border: 1px solid var(--border); border-bottom-width: 2px; background: var(--bg); color: var(--text);
 }
+
+/* ---- the torrent client of this computer (npm run local): its transfers in the same list ---- */
+.badge {
+  display: inline-block; margin-right: 6px; padding: 0 7px; border-radius: 999px; vertical-align: 1px;
+  font-size: 0.72rem; font-weight: 600; line-height: 1.5; white-space: nowrap;
+  color: var(--primary); background: var(--row-selected);
+}
+.tl-row > .tl-name { grid-template-columns: auto minmax(0, 1fr); align-items: center; }
+.tl-row > .tl-name > .tl-sub,
+.tl-row > .tl-name > .tl-badge[hidden] + .tl-title { grid-column: 1 / -1; }
+/* What only a torrent run in the page can do: find it peers again, a web seed, the cloud. */
+.torrent.on-server :is(.retry-btn, .webseed-btn, .cloud-btn, .nopeers, .cloud) { display: none; }
+.add-target { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 16px; margin: 0 0 10px; font-size: 0.9rem; }
+.add-target-label { color: var(--muted); }
+.add-target label { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; cursor: pointer; }
+.add-target input { width: 16px; height: 16px; margin: 0; accent-color: var(--primary); }
+.remove-dialog { max-width: 32rem; }
+.remove-dialog .remove-text { margin: 0; color: var(--muted); }

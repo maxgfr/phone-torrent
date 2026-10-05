@@ -12,7 +12,7 @@ anywhere on the window, the keyboard, and files saved straight into a folder.
 The page itself is static — HTML, CSS and two vendored libraries, hosted on GitHub Pages. Everything
 else is optional and yours: nothing is enabled until you give it a key or an address.
 
-## Four ways to use it
+## Five ways to use it
 
 | | what you need | private and `http(s)` trackers | best for |
 |---|---|---|---|
@@ -20,6 +20,7 @@ else is optional and yours: nothing is enabled until you give it a key or an add
 | **2. Your own server** | one `docker compose up -d` on a machine you own | yes — a real client, TCP, UDP and DHT | everything, with the files staying on your disk |
 | **3. A quick deploy** | one click or one command: Render, Fly, or Cloudflare | yes | any device, from anywhere, with no machine at home |
 | **4. A cloud service** | a TorBox, put.io, Real‑Debrid or AllDebrid key | yes | no machine and no deploy at all |
+| **5. On your computer** | Node 20 and a clone: `npm install && npm run local` | yes | a torrent client on your Mac, its files in `~/Downloads/Swarmdeck`, with no Docker |
 
 They are the same page. **Settings → Cloud fetch** takes one service, one key and one address, and
 the **Cloud** tab drives whatever is behind it. With neither, the app is the page alone.
@@ -318,6 +319,41 @@ them without an API call. Anyone who has such a link can use your whole account,
 for your own devices, not for sharing. Real‑Debrid and AllDebrid links carry no key, and your own
 server hands out a link signed for one file, which opens that file for a day and nothing else.
 
+## 5. On your computer
+
+```sh
+git clone https://github.com/maxgfr/swarmdeck && cd swarmdeck
+npm install
+npm run local                 # opens http://127.0.0.1:8080/
+```
+
+The server of option 2, without Docker, as the torrent client of the machine it runs on. It listens
+on that machine only (`127.0.0.1`), keeps the files in `~/Downloads/Swarmdeck`, and opens the app in
+the browser; started again while it runs, it opens the copy that runs instead of failing on its ports.
+`DOWNLOAD_DIR`, `PORT`, `HOST` and every other setting of [`server/README.md`](server/README.md) still
+apply. The first time, macOS asks whether `node` may use the Downloads folder and accept connections:
+say yes to both, or peers cannot connect to you.
+
+The page it opens knows it is that client's window (its `/api/health` says `local`), and its
+transfers are cards in the list like any other, marked **On this Mac**, in the table and the search,
+selected several at once:
+
+- **Pause and resume**: the connections close, web seeds included, and come back on resume.
+- **Choose the files**: untick one and it is not fetched, while the files around it still finish. The
+  pieces it shares with them are fetched with them, so it may appear in the folder, partly written.
+- **Remove** asks whether the files go too; kept by default, as a torrent client does.
+- **Save**, **Save .torrent**, **Edit .torrent**, and **Show in Finder**.
+- **Close the tab**, or the browser: the downloads go on. Ctrl‑C stops the server; `npm run local`
+  picks everything up again, paused or not, with the same files chosen.
+
+What is added on the Download tab — a magnet, an info hash, a `.torrent` file or its address, a drop,
+a share — goes to that client; **Download on: this browser**, beside the field, keeps it in the page
+instead. A `.torrent` address is fetched by the server itself, so one with no CORS header (archive.org
+sends none) needs no proxy. Seed & share and Edit stay in the page. The Cloud library, when the
+service it shows is this same server, says the transfers are in the list rather than show them twice.
+A server in Docker or on a NAS is not this: its health does not say `local`, and it stays the cloud
+service of option 2.
+
 ---
 
 ## When something does not work
@@ -440,7 +476,15 @@ npm run lint          # undefined and unused symbols, across the app, the server
 npm test              # the app, in a real browser
 npm run test:server   # the server, against a real peer
 npm run test:unit     # the .torrent workshop, the list's rules, drops and folder saves, no browser
+npm run smoke:archive # the local server against archive.org, for real; not in CI
 ```
+
+`npm run smoke:archive` needs the network: it starts the server as `npm run local` does, in a folder of
+its own, and sends it the `.torrent` of an archive.org item in the public domain (`SMOKE_ITEM` names
+another). It leaves one file out, pauses as soon as anything arrives and checks that nothing more does,
+resumes, restarts, removes it keeping its files and adds it again from them, then removes it with them;
+what arrived is checked against the md5 and sha1 archive.org lists. Only media files are fetched: an
+item's other files change after its `.torrent` is made.
 
 `test/meta.mjs` reads and writes `.torrent` files built by a bencoder of the tests' own: decoded and
 encoded again byte for byte (integers past 2^53, names that are not UTF‑8, keys in their own order);
@@ -593,7 +637,15 @@ torrents that are not torrents, and must answer them; it must not serve its down
 nor answer another origin; it refuses a torrent that would overwrite its list of transfers; and it is
 restarted, and picks the transfer up again. A BitTorrent or DHT port already taken stops it with the
 setting to change; a build without uTP says it runs TCP only; `ALLOWED_HOSTS` is taken as written in
-an address bar. Then both Workers are called as plain modules, with no
+an address bar. As the client of a computer: a torrent of three files whose edges fall inside pieces,
+seeded slowly, added paused and fetching nothing, its middle file left out while the two around it
+finish byte for byte; a download from a peer and a web seed paused in the middle, every wire closed and
+nothing more arriving for three seconds, the web seed asked nothing, then resumed to the end; a remove
+that keeps the files, after which the same torrent comes back from the disk alone; the changes refused
+from another website, as text, or naming a file it does not have; the pause and the files left out kept
+through a restart, and a file chosen again fetched. Started with `--local`, it listens on `127.0.0.1`
+in the folder it is given, says `local` in its health, fetches a `.torrent` from its address, and a
+second start on its port leaves without an error. Then both Workers are called as plain modules, with no
 Cloudflare account: the Cloudflare one refuses to start the server without a token, and keeps its
 container up while a download is getting data, not for ever; the CORS proxy passes a web seed's
 preflight, and takes an allowed origin written as the app's address. CI runs both suites, the browser one on Chromium and on WebKit (`BROWSER=webkit npm test`).
@@ -663,8 +715,8 @@ require it.
 |---|---|---|
 | Add by magnet, info hash or `.torrent` | yes | yes |
 | Automatic trackers | yes | n/a |
-| Select the files to download | yes | on the page; the server fetches the whole torrent |
-| Pause, resume, remove | yes, one or several at once | remove, on the account |
+| Select the files to download | yes | on the page; the server fetches the whole torrent — but [on your computer](#5-on-your-computer), from its card |
+| Pause, resume, remove | yes, one or several at once | remove, on the account — [on your computer](#5-on-your-computer), all three, keeping the files or not |
 | A list with columns, search, filters, the keyboard | yes, on a computer | yes, on the page |
 | Speed limits, sequential download | yes | the service's own settings |
 | Seeding, creating a torrent | yes, while the page is open — piece size, private, source, trackers, or only the `.torrent` | the server keeps seeding after a download |
