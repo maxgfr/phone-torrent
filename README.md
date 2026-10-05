@@ -377,12 +377,25 @@ files at once), `create` and `check`, with the page's own code. `--json` prints 
 `--server`, with `SWARMDECK_TOKEN` when it has an `AUTH_TOKEN`: the same commands drive a server in
 Docker or on a NAS.
 
-`mcp/server.mjs` is an MCP server over stdio with a tool for each of these, and `.mcp.json` registers
-it for Claude Code opened in this folder; `.claude/skills/swarmdeck/` teaches an AI how to use them,
-and what never to do without being asked (delete the files). Elsewhere:
+Outside this checkout, Homebrew installs both commands, `swarmdeck` and `swarmdeck-mcp`:
+
+```sh
+brew install maxgfr/tap/swarmdeck
+swarmdeck status
+```
+
+`mcp/server.mjs` (`swarmdeck-mcp`) is an MCP server over stdio with a tool for each of these, and
+`.mcp.json` registers it for Claude Code opened in this folder; `.claude/skills/swarmdeck/` teaches an
+AI how to use them, and what never to do without being asked (delete the files). Elsewhere:
+
+```sh
+claude mcp add swarmdeck --env SWARMDECK_URL=http://127.0.0.1:8080 -- swarmdeck-mcp
+```
+
+or, in another client's configuration:
 
 ```json
-{ "mcpServers": { "swarmdeck": { "command": "node", "args": ["/path/to/swarmdeck/mcp/server.mjs"],
+{ "mcpServers": { "swarmdeck": { "command": "swarmdeck-mcp",
   "env": { "SWARMDECK_URL": "http://127.0.0.1:8080" } } } }
 ```
 

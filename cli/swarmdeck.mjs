@@ -4,6 +4,7 @@
  * result with --json. Exit code 0 when it worked, 1 when it did not (the reason on stderr), 2 when the
  * command itself is wrong.
  */
+import { readFile } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
 import { check, connect, create, edit, inspect, magnet, DEFAULT_SERVER } from './core.mjs';
 import { formatSize } from '../lib/torrent-meta.js';
@@ -48,6 +49,7 @@ Options
   --server URL   the server (or SWARMDECK_URL)
   --token TOKEN  its AUTH_TOKEN (or SWARMDECK_TOKEN, which keeps it out of your shell history)
   --json         the raw result, for scripts and AIs
+  --version      the version
   -h, --help     this
 `;
 
@@ -56,6 +58,7 @@ const OPTIONS = {
   token: { type: 'string' },
   json: { type: 'boolean' },
   help: { type: 'boolean', short: 'h' },
+  version: { type: 'boolean' },
   detail: { type: 'boolean' },
   paused: { type: 'boolean' },
   only: { type: 'string' },
@@ -147,6 +150,10 @@ async function run(argv) {
   }
   const { values: o, positionals } = parsed;
   const [command = 'help', ...args] = positionals;
+  if (o.version) {
+    const { version } = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
+    return { result: { version }, text: version };
+  }
   if (o.help || command === 'help') return { text: HELP };
   const server = () => connect({ server: o.server, token: o.token });
   const each = async (ids, fn) => {
