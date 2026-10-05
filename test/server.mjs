@@ -316,7 +316,24 @@ try {
     assert.match(localLog, new RegExp(`downloads in ${localDir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`), 'and keeps its files where it was told');
     const localHealth = await (await fetch(`http://127.0.0.1:${localPort}/api/health`)).json();
     assert.equal(localHealth.local, true, 'its health says it is the local one');
-    assert.deepEqual(localHealth.features, ['pause', 'select', 'keep-files', 'detail']);
+    assert.deepEqual(localHealth.features, ['pause', 'select', 'keep-files', 'detail', 'url']);
+    // A .torrent at an address the page could not fetch (no CORS header, as archive.org sends none) is
+    // fetched by the server of the computer itself.
+    const torrentHost = http.createServer((req, res) => {
+      if (req.url === '/release.torrent') res.end(seeded.torrentFile);
+      else res.writeHead(404).end('<html>not found</html>');
+    });
+    await new Promise((resolve) => torrentHost.listen(0, '127.0.0.1', resolve));
+    const at = (p) => `http://127.0.0.1:${torrentHost.address().port}${p}`;
+    const byUrl = (address) => fetch(`http://127.0.0.1:${localPort}/api/transfers?paused=1`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url: address, paused: true }) });
+    const fetched = await byUrl(at('/release.torrent'));
+    assert.equal(fetched.status, 201, 'a .torrent is added from its address');
+    assert.equal((await fetched.json()).transfer.id, seeded.infoHash);
+    const notTorrent = await byUrl(at('/missing.torrent'));
+    assert.equal(notTorrent.status, 400);
+    assert.match((await notTorrent.json()).error, /answered 404/, 'an address that does not answer with one says so');
+    assert.equal((await byUrl('file:///etc/passwd')).status, 400, 'and only http and https are fetched');
+    torrentHost.close();
     const unknown = randomBytes(20).toString('hex');
     assert.equal((await fetch(`http://127.0.0.1:${localPort}/api/transfers/${unknown}/reveal`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })).status, 404, 'it shows the files of a transfer it has');
     assert.equal((await fetch(`http://127.0.0.1:${localPort}/api/transfers/${unknown}/reveal`, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: '{}' })).status, 415, 'asked as JSON');
@@ -864,6 +881,10 @@ try {
   assert.equal((await api(`/api/transfers/${noMeta}`, { method: 'DELETE' })).status, 200);
   assert.equal((await transferOf(trioId)).paused, false, 'and nothing refused changed anything');
   assert.equal((await api(`/api/transfers/${trioId}/reveal`, json({}))).status, 403, 'a server not started with --local shows no files');
+  const noFetch = await api('/api/transfers', json({ url: `${serverUrl}/` }));
+  assert.equal(noFetch.status, 400, 'nor fetches an address for whoever holds its token');
+  assert.match((await noFetch.json()).error, /fetches no address/);
+  assert.ok(!(await (await fetch(`${serverUrl}/api/health`)).json()).features.includes('url'), 'and its health does not offer to');
   const trioTorrent = await api(`/api/transfers/${trioId}/torrent`);
   assert.equal(trioTorrent.headers.get('content-type'), 'application/x-bittorrent');
   assert.equal(sha(Buffer.from(await trioTorrent.arrayBuffer())), sha(Buffer.from(trioSeeded.torrentFile)), 'its .torrent is the one it was added with');

@@ -748,8 +748,45 @@ function authorized(req, url) {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
-/** What the app may ask of this server beyond a cloud service's add, list and delete. */
-const FEATURES = ['pause', 'select', 'keep-files', 'detail'];
+/**
+ * What the app may ask of this server beyond a cloud service's add, list and delete. Fetching a .torrent
+ * from its address (`url`) is for the server of the computer the page is on alone: a page cannot, for the
+ * many sites that send no CORS header, archive.org among them; and a server elsewhere — a NAS, a VPS —
+ * would be fetching addresses of its own network for whoever holds its token.
+ */
+const FEATURES = ['pause', 'select', 'keep-files', 'detail', ...(LOCAL ? ['url'] : [])];
+
+/** Far above any real .torrent, which is kilobytes to a few megabytes of piece hashes. */
+const TORRENT_FILE_MAX = 64 * 1024 * 1024;
+
+/** The .torrent at an http(s) address, fetched by this server: see FEATURES. */
+async function torrentAt(address) {
+  if (!LOCAL) throw new Error('this server fetches no address: send the .torrent file itself');
+  let target;
+  try {
+    target = new URL(String(address));
+  } catch {
+    throw new Error('that is not an address');
+  }
+  if (target.protocol !== 'http:' && target.protocol !== 'https:') throw new Error('only an http or https address');
+  let res;
+  try {
+    res = await fetch(target, { redirect: 'follow', signal: AbortSignal.timeout(30000) });
+  } catch (err) {
+    throw new Error(`could not fetch ${target.host}: ${err.cause?.code || err.message}`);
+  }
+  if (!res.ok) throw new Error(`${target.host} answered ${res.status}`);
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of res.body) {
+    size += chunk.length;
+    if (size > TORRENT_FILE_MAX) throw new Error('that address is not a .torrent file: far too large');
+    chunks.push(chunk);
+  }
+  const bytes = Buffer.concat(chunks);
+  if (!bytes.length || bytes[0] !== 0x64) throw new Error('that address did not return a .torrent file');
+  return bytes;
+}
 
 /**
  * A body's type as a browser decides from it whether to ask first: what comes before any ";".
@@ -961,11 +998,15 @@ async function handle(req, res) {
       try {
         if (type === 'application/json') {
           const body = JSON.parse((await readBody(req)).toString() || '{}');
-          const given = String(body.magnet || '').trim();
           if (body.paused === true) paused = true;
-          const isHash = /^[a-f0-9]{40}$/i.test(given) || /^[a-z2-7]{32}$/i.test(given);
-          if (!given || !(/^magnet:\?/i.test(given) || isHash)) throw new Error('need a magnet link or an info hash');
-          source = isHash ? `magnet:?xt=urn:btih:${given}` : given;
+          if (body.url !== undefined) {
+            source = `torrent:${(await torrentAt(body.url)).toString('base64')}`;
+          } else {
+            const given = String(body.magnet || '').trim();
+            const isHash = /^[a-f0-9]{40}$/i.test(given) || /^[a-z2-7]{32}$/i.test(given);
+            if (!given || !(/^magnet:\?/i.test(given) || isHash)) throw new Error('need a magnet link or an info hash');
+            source = isHash ? `magnet:?xt=urn:btih:${given}` : given;
+          }
         } else {
           const bytes = await readBody(req);
           if (!bytes.length || bytes[0] !== 0x64) throw new Error('that body is not a .torrent file');
