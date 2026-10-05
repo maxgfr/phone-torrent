@@ -2835,13 +2835,16 @@ try {
     await waitFor(() => fromPeers.evaluate(() => window.__swarmdeck.client.torrents.length === 0), { label: 'the search for peers gone once it is saved', timeout: 5000 });
     await fromPeers.click('#ed-close');
 
-    // Closed while peers are asked: they stop being asked.
+    // Closed while peers are asked: they stop being asked. A cache that cannot be read says so while
+    // they are, and what reaches it: itorrents.net, the default, sends no CORS headers.
     const nobody = createHash('sha1').update(`nobody has this ${Date.now()}`).digest('hex');
+    await fromPeers.evaluate(() => { window.__swarmdeck.settings.metadataSources = ['https://127.0.0.1:1/never/{INFOHASH}.torrent']; });
     await fromPeers.fill('#edit-magnet-input', `magnet:?xt=urn:btih:${nobody}&tr=${encodeURIComponent(trackerUrl)}`);
     await fromPeers.click('#edit-magnet-form button[type="submit"]');
     await fromPeers.waitForSelector('#editor-dialog[open][data-mode="magnet"]');
     await fromPeers.click('#ed-save');
     await waitFor(async () => /Asking peers/.test(await fromPeers.textContent('#ed-metadata-state')), { label: 'peers asked', timeout: 10000 });
+    assert.match(await fromPeers.textContent('#ed-metadata-state'), /Torrent cache 127\.0\.0\.1:1: blocked by CORS or unreachable\. Set a CORS proxy in Settings/, 'why the cache gave nothing, said at once');
     assert.equal(await fromPeers.textContent('#ed-save'), 'Fetching metadata…');
     assert.equal(await fromPeers.evaluate(() => window.__swarmdeck.client.torrents.length), 1, 'one search, for that magnet');
     await fromPeers.click('#ed-close');

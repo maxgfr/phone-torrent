@@ -88,7 +88,9 @@ and saved to the device file by file or as one `.zip`.
   unknown keys; **Copy magnet**, **Share…** (the `.torrent` itself, where the device shares files) and
   **Save .torrent** take the result. A magnet opens with what it has — name, trackers, web seeds — and
   **Get metadata** fetches the rest from the list, the torrent caches, or else its peers (for a minute,
-  without adding it to the list); **Save .torrent** does that and saves, in one click. Several `.torrent` files open
+  without adding it to the list); **Save .torrent** does that and saves, in one click. A cache that
+  cannot be read is named while the peers are asked: `itorrents.net`, the default, sends no CORS
+  headers and answers only through your CORS proxy. Several `.torrent` files open
   together: each field is kept in all of them until you set it, clear it or (trackers, web seeds) add
   to it, each file says whether its info hash changes, and they are saved as one `.zip`.
   **Apply preset** fills in what a preset holds. The first tracker is matched against the rules of
