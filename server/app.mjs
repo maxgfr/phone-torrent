@@ -16,6 +16,8 @@ import net from 'node:net';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import dns from 'node:dns';
+import os from 'node:os';
+import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import WebTorrent from 'webtorrent';
 import MemoryChunkStore from 'memory-chunk-store';
@@ -26,10 +28,16 @@ import MemoryChunkStore from 'memory-chunk-store';
 dns.setDefaultResultOrder('ipv4first');
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
+// Run on the user's own computer (`npm run local`), as the torrent client of that machine: it listens
+// on that machine only, keeps the files in ~/Downloads/Swarmdeck, opens the app in the browser, and
+// says so in /api/health, which is how the app knows it may show these transfers as its own.
+const LOCAL = process.argv.includes('--local') || process.env.SWARMDECK_LOCAL === '1';
+const OPEN_BROWSER = LOCAL && !process.argv.includes('--no-open');
 // 0 means "any free port", which is how the tests run it; `|| 8080` would eat that.
 const PORT = process.env.PORT === undefined || process.env.PORT === '' ? 8080 : Number(process.env.PORT);
+const HOST = process.env.HOST || (LOCAL ? '127.0.0.1' : '0.0.0.0');
 const TOKEN = (process.env.AUTH_TOKEN || '').trim();
-const DOWNLOAD_DIR = path.resolve(process.env.DOWNLOAD_DIR || path.join(HERE, '..', 'downloads'));
+const DOWNLOAD_DIR = path.resolve(process.env.DOWNLOAD_DIR || (LOCAL ? path.join(os.homedir(), 'Downloads', 'Swarmdeck') : path.join(HERE, '..', 'downloads')));
 const WEB_DIR = path.resolve(process.env.WEB_DIR || path.join(HERE, '..'));
 // Unset means same-origin only: the page this server serves needs no CORS at all, and
 // any other site the browser has open gets nothing. Name the origins that may call it.
@@ -85,6 +93,29 @@ try {
   process.exit(1);
 }
 
+/** Open the app in the browser: one address, always the same, so that what the page keeps is found again. */
+function openBrowser(address) {
+  const [command, args] = process.platform === 'darwin' ? ['open', [address]]
+    : process.platform === 'win32' ? ['cmd', ['/c', 'start', '', address]]
+      : ['xdg-open', [address]];
+  try {
+    spawn(command, args, { stdio: 'ignore', detached: true }).on('error', () => {}).unref();
+  } catch { /* no browser to open: the address is in the log */ }
+}
+
+// Started again while it runs — a second `npm run local`, a double click — this copy would find every
+// port taken and stop with an error about the BitTorrent one. The copy that runs is opened instead.
+if (LOCAL && PORT) {
+  const health = await fetch(`http://127.0.0.1:${PORT}/api/health`, { signal: AbortSignal.timeout(1500) })
+    .then((res) => res.json()).catch(() => null);
+  if (health && typeof health.ok === 'boolean') {
+    const address = `http://127.0.0.1:${PORT}/`;
+    console.log(`Swarmdeck already runs on ${address}${OPEN_BROWSER ? ': opening it' : ''}`);
+    if (OPEN_BROWSER) openBrowser(address);
+    process.exit(0);
+  }
+}
+
 const client = new WebTorrent({ dht: { bootstrap: DHT_BOOTSTRAP }, torrentPort: TORRENT_PORT, dhtPort: DHT_PORT });
 client.on('error', (err) => {
   console.error('client error:', err.message || err);
@@ -100,7 +131,11 @@ client.on('error', (err) => {
 
 /* ---------- what survives a restart ---------- */
 
-/** @type {Map<string, {id: string, source: string, addedAt: number}>} */
+/**
+ * A row of transfers.json per transfer. `paused` and `deselected` (the indexes of the files it does not
+ * fetch) are written only when set, so a list from before them reads as it always did.
+ * @type {Map<string, {id: string, source: string, addedAt: number, name?: string, paused?: boolean, deselected?: number[]}>}
+ */
 const records = new Map();
 
 /**
@@ -156,7 +191,7 @@ async function loadState() {
   for (const row of rows) {
     records.set(row.id, row);
     // The bytes are already on disk; WebTorrent verifies them instead of fetching again.
-    track(addToClient(row.source), row.id);
+    track(addToClient(row.source, row), row.id);
   }
   if (rows.length) console.log(`resumed ${rows.length} transfer(s)`);
 }
@@ -166,8 +201,13 @@ function torrentId(source) {
   return source.startsWith('torrent:') ? Buffer.from(source.slice('torrent:'.length), 'base64') : source;
 }
 
-function addToClient(source) {
-  return client.add(torrentId(source), { path: DOWNLOAD_DIR });
+/**
+ * Paused from the start when it was paused, and with nothing selected when some of its files are not
+ * wanted: WebTorrent would otherwise select every piece it finds missing while it checks the disk, and
+ * fetch the files left out with the rest. track() selects what is wanted once that check is over.
+ */
+function addToClient(source, { paused = false, deselected = [] } = {}) {
+  return client.add(torrentId(source), { path: DOWNLOAD_DIR, paused: Boolean(paused), deselect: Boolean(deselected && deselected.length) });
 }
 
 /** transfers.json, or one of the files saving it goes through (see saveState and loadState). */
@@ -217,16 +257,31 @@ function track(torrent, id) {
     }
     return true;
   };
+  // The files it wants, once it has a list of them, and again once the disk is checked: the check
+  // selects each piece it finds missing, the ones of a file left out included.
+  const withFiles = () => {
+    applySelection(torrent);
+    for (const file of torrent.files) file.on('done', () => checkComplete(torrent));
+  };
   if (torrent.metadata) {
     if (!onMetadata()) return false;
+    withFiles();
   } else {
-    torrent.once('metadata', onMetadata);
+    torrent.once('metadata', () => {
+      if (onMetadata()) withFiles();
+    });
   }
-  torrent.on('download', () => receivedAt.set(torrent, Date.now()));
-  torrent.on('done', () => {
-    console.log(`done: ${torrent.name}`);
-    if (!SEED_AFTER_DONE) torrent.pause();
+  torrent.on('ready', () => {
+    applySelection(torrent);
+    checkComplete(torrent);
   });
+  // pause() only turns new peers away: a web seed added with the metadata, or a wire that was being
+  // set up as it came, would go on fetching.
+  torrent.on('wire', (wire) => {
+    if (torrent.paused) wire.destroy();
+  });
+  torrent.on('download', () => receivedAt.set(torrent, Date.now()));
+  torrent.on('done', () => checkComplete(torrent));
   torrent.on('error', async (err) => {
     const record = records.get(id);
     // Now, while the torrent still lists its files: WebTorrent empties the list as it tears it down.
@@ -255,6 +310,125 @@ function track(torrent, id) {
     await saveState();
   });
   return true;
+}
+
+/* ---------- a transfer as a torrent client runs it: paused, and only the files wanted ---------- */
+
+/** The indexes of a transfer's files it does not fetch. */
+function deselectedOf(torrent) {
+  const record = records.get(torrent.infoHash);
+  return (record && record.deselected) || [];
+}
+
+/** The files a transfer fetches. */
+function wanted(torrent) {
+  const off = new Set(deselectedOf(torrent));
+  return torrent.files.filter((_, i) => !off.has(i));
+}
+
+/**
+ * How far the files wanted are, in bytes: the torrent's own progress counts the files left out too,
+ * and would never reach 1. WebTorrent's File.downloaded counts one piece short for a file that ends on
+ * a piece boundary, so a file that is done counts whole.
+ */
+function selectedProgress(torrent) {
+  if (!torrent.files.length) return Number(torrent.progress) || 0;
+  const files = wanted(torrent);
+  const size = files.reduce((n, f) => n + f.length, 0);
+  const have = files.reduce((n, f) => n + (f.done ? f.length : Math.max(0, f.downloaded)), 0);
+  return size ? Math.min(1, have / size) : 0;
+}
+
+/** Every file wanted is there. torrent.done never is while a file is left out. */
+function isComplete(torrent) {
+  const files = wanted(torrent);
+  return Boolean(torrent.metadata) && files.length > 0 && files.every((f) => f.done);
+}
+
+/**
+ * Hand the files wanted to WebTorrent. Two neighbouring files share the piece where one ends and the
+ * next begins: deselecting a file drops that piece too, and the neighbour still wanted would never
+ * finish. So the files left out go first, and the ones wanted are selected after, which puts their
+ * edges back: what the app does in the browser.
+ */
+function applySelection(torrent) {
+  if (!torrent.metadata || torrent.destroyed || !torrent.files.length) return;
+  const off = new Set(deselectedOf(torrent));
+  torrent.files.forEach((file, i) => { if (off.has(i)) file.deselect(); });
+  torrent.files.forEach((file, i) => { if (!off.has(i)) file.select(); });
+}
+
+/** Stopped by SEED_AFTER_DONE=0 once complete: paused by no one, and started again by a file selected. */
+const autoStopped = new WeakSet();
+/** Said to be done, so that it is said once. */
+const finished = new WeakSet();
+
+/** pause() only turns new peers away: the wires open, web seeds among them, are closed too. */
+function stopTransfer(torrent) {
+  if (torrent.destroyed) return;
+  torrent.pause();
+  for (const wire of [...torrent.wires]) wire.destroy();
+}
+
+/**
+ * resume() only lifts the flag. The web seeds a pause closed are read once, with the metadata, and
+ * nothing adds them back; the peers found while paused were turned away, so the trackers and the DHT
+ * are asked again now rather than at their next announce.
+ */
+function startTransfer(torrent) {
+  if (torrent.destroyed) return;
+  torrent.resume();
+  if (torrent.metadata && client.enableWebSeeds !== false) {
+    for (const url of new Set(torrent.urlList || [])) {
+      if (!torrent._peers.has(url)) torrent.addWebSeed(url);
+    }
+  }
+  const { discovery } = torrent;
+  if (!discovery) return;
+  try { discovery.tracker?.update(); } catch { /* a tracker that is gone */ }
+  try { if (discovery.dht) discovery._dhtAnnounce(); } catch { /* no DHT */ }
+}
+
+function checkComplete(torrent) {
+  if (torrent.destroyed) return;
+  if (!isComplete(torrent)) {
+    finished.delete(torrent);
+    return;
+  }
+  if (finished.has(torrent)) return;
+  finished.add(torrent);
+  console.log(`done: ${torrent.name}`);
+  if (!SEED_AFTER_DONE && !torrent.paused) {
+    autoStopped.add(torrent);
+    stopTransfer(torrent);
+  }
+}
+
+/** Set a transfer's pause, its files, or both: as told, never toggled, so a request sent twice does the same. */
+function setTransfer(torrent, { paused, deselected }) {
+  const record = records.get(torrent.infoHash);
+  if (!record) return;
+  if (deselected !== undefined) {
+    const list = [...new Set(deselected)].sort((a, b) => a - b);
+    if (list.length) record.deselected = list;
+    else delete record.deselected;
+    applySelection(torrent);
+    checkComplete(torrent);
+  }
+  if (paused === true) {
+    record.paused = true;
+    autoStopped.delete(torrent);
+    stopTransfer(torrent);
+  } else if (paused === false) {
+    delete record.paused;
+    autoStopped.delete(torrent);
+    if (torrent.paused) startTransfer(torrent);
+  }
+  // A file selected again: a torrent stopped for being complete has something to fetch.
+  if (autoStopped.has(torrent) && !isComplete(torrent) && wanted(torrent).length) {
+    autoStopped.delete(torrent);
+    startTransfer(torrent);
+  }
 }
 
 /* ---------- file links that do not carry the token ---------- */
@@ -329,24 +503,68 @@ async function forgetFiles({ files, folders }) {
   for (const folder of folders) await fsp.rmdir(folder).catch(() => {});
 }
 
-function describe(torrent) {
+function stateOf(torrent, record) {
+  if (record && record.paused) return 'paused';
+  if (!torrent.metadata) return torrent.numPeers ? 'fetching metadata' : 'looking for peers';
+  if (!torrent.ready) return 'checking files';
+  if (!wanted(torrent).length) return 'nothing selected';
+  if (isComplete(torrent)) return torrent.paused ? 'completed' : 'seeding';
+  return torrent.numPeers ? 'downloading' : 'looking for peers';
+}
+
+/**
+ * A transfer as the API shows it, `progress`, `ready` and `state` about the files wanted. With
+ * `detail`, every file and what a client's details pane shows besides, in the list the app on this
+ * machine polls every second.
+ */
+function describe(torrent, { detail = false } = {}) {
   const record = records.get(torrent.infoHash);
-  const ready = Boolean(torrent.done);
-  return {
+  const off = new Set(deselectedOf(torrent));
+  const downloaded = torrent.downloaded || 0;
+  const uploaded = torrent.uploaded || 0;
+  const described = {
     id: torrent.infoHash,
     name: torrent.name || (record && record.name) || torrent.infoHash,
     size: torrent.length || 0,
-    progress: Number(torrent.progress) || 0,
-    state: torrent.done ? (torrent.paused ? 'completed' : 'seeding') : (torrent.numPeers ? 'downloading' : 'looking for peers'),
-    ready,
+    progress: selectedProgress(torrent),
+    state: stateOf(torrent, record),
+    ready: isComplete(torrent),
+    paused: Boolean(record && record.paused),
+    metadata: Boolean(torrent.metadata),
+    checking: Boolean(torrent.metadata) && !torrent.ready,
     peers: torrent.numPeers,
     downloadSpeed: torrent.downloadSpeed,
+    uploadSpeed: torrent.uploadSpeed,
+    downloaded,
+    uploaded,
+    ratio: downloaded ? uploaded / downloaded : 0,
+    deselected: [...off],
     receivedAt: receivedAt.get(torrent),
     addedAt: record ? record.addedAt : undefined,
     // Each file as soon as it is complete, not once the whole torrent is: the first episode
     // of a season can be watched while the rest is still on its way.
     files: torrent.files.flatMap((f, i) => (f.done ? [{ id: i, name: f.name, size: f.length, link: fileLink(torrent.infoHash, i) }] : [])),
   };
+  if (detail) {
+    described.detail = {
+      magnetURI: torrent.magnetURI || '',
+      announce: torrent.announce || [],
+      pieceLength: torrent.pieceLength || 0,
+      pieces: torrent.metadata ? { have: torrent.pieces.filter((p) => p === null).length, total: torrent.pieces.length } : null,
+      files: torrent.files.map((f, i) => ({
+        id: i,
+        name: f.name,
+        path: f.path,
+        size: f.length,
+        downloaded: f.done ? f.length : Math.max(0, f.downloaded),
+        progress: f.done ? 1 : Math.max(0, Math.min(1, f.progress)),
+        done: Boolean(f.done),
+        selected: !off.has(i),
+        link: fileLink(torrent.infoHash, i),
+      })),
+    };
+  }
+  return described;
 }
 
 function findTorrent(id) {
@@ -530,6 +748,39 @@ function authorized(req, url) {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
+/** What the app may ask of this server beyond a cloud service's add, list and delete. */
+const FEATURES = ['pause', 'select', 'keep-files', 'detail'];
+
+/**
+ * A body's type as a browser decides from it whether to ask first: what comes before any ";".
+ * "text/plain; charset=application/json" is text/plain, sent from any page without asking.
+ */
+const contentType = (req) => String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+
+const isLoopback = (address) => /^(127\.|::1$|::ffff:127\.)/.test(String(address || ''));
+
+/**
+ * The place on disk that holds a transfer: its one file, or the folder its files are in; the download
+ * directory itself while it has none there yet.
+ */
+function whereOnDisk(torrent) {
+  if (!torrent.files.length) return DOWNLOAD_DIR;
+  const first = String(torrent.files[0].path).split(/[\\/]/)[0];
+  const top = torrent.files.length === 1 ? onDisk(torrent.files[0]) : path.join(DOWNLOAD_DIR, first);
+  return isInside(top, DOWNLOAD_DIR) && fs.existsSync(top) ? top : DOWNLOAD_DIR;
+}
+
+/** Show a file or a folder where the desktop shows files: selected in the Finder, on a Mac. */
+function revealInFiles(target) {
+  const isDir = target === DOWNLOAD_DIR;
+  const [command, args] = process.platform === 'darwin' ? ['open', isDir ? [target] : ['-R', target]]
+    : process.platform === 'win32' ? ['explorer', isDir ? [target] : [`/select,${target}`]]
+      : ['xdg-open', [isDir ? target : path.dirname(target)]];
+  try {
+    spawn(command, args, { stdio: 'ignore', detached: true }).on('error', () => {}).unref();
+  } catch { /* nothing to show it with */ }
+}
+
 async function readBody(req, limit = 8 * 1024 * 1024) {
   const chunks = [];
   let size = 0;
@@ -663,7 +914,7 @@ async function handle(req, res) {
   // moment before the process goes.
   if (pathname === '/api/health') {
     if (client.destroyed) return send(req, res, 503, { ok: false, error: 'the BitTorrent client stopped' });
-    return send(req, res, 200, { ok: true, torrents: transfers().length });
+    return send(req, res, 200, { ok: true, torrents: transfers().length, features: FEATURES, ...(LOCAL ? { local: true } : {}) });
   }
 
   if (pathname.startsWith('/api/')) {
@@ -689,8 +940,9 @@ async function handle(req, res) {
       });
     }
 
+    const detail = url.searchParams.get('detail') === '1';
     if (pathname === '/api/transfers' && req.method === 'GET') {
-      return send(req, res, 200, { transfers: [...transfers().map(describe), ...failures.values()] });
+      return send(req, res, 200, { transfers: [...transfers().map((t) => describe(t, { detail })), ...failures.values()] });
     }
 
     if (pathname === '/api/transfers' && req.method === 'POST') {
@@ -700,14 +952,17 @@ async function handle(req, res) {
       // page the browser has open add torrents to a server with no token. The browser goes
       // by what comes before any ";", so this does too: "text/plain; charset=application/json"
       // is text/plain, sent without asking.
-      const type = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+      const type = contentType(req);
       if (type !== 'application/json' && type !== 'application/x-bittorrent') {
         return send(req, res, 415, { error: 'send a magnet as application/json, or the .torrent file as application/x-bittorrent' });
       }
+      // Added paused: as a field beside the magnet, or in the query beside a .torrent's bytes.
+      let paused = url.searchParams.get('paused') === '1';
       try {
         if (type === 'application/json') {
-          const { magnet } = JSON.parse((await readBody(req)).toString() || '{}');
-          const given = String(magnet || '').trim();
+          const body = JSON.parse((await readBody(req)).toString() || '{}');
+          const given = String(body.magnet || '').trim();
+          if (body.paused === true) paused = true;
           const isHash = /^[a-f0-9]{40}$/i.test(given) || /^[a-z2-7]{32}$/i.test(given);
           if (!given || !(/^magnet:\?/i.test(given) || isHash)) throw new Error('need a magnet link or an info hash');
           source = isHash ? `magnet:?xt=urn:btih:${given}` : given;
@@ -731,7 +986,7 @@ async function handle(req, res) {
       if (existing) return send(req, res, 200, { transfer: describe(existing) });
       let torrent;
       try {
-        torrent = addToClient(source);
+        torrent = addToClient(source, { paused });
       } catch (err) {
         return send(req, res, 400, { error: err.message });
       }
@@ -761,7 +1016,7 @@ async function handle(req, res) {
       // Sent again after it failed (the disk has room now, say): a new try, not the old failure.
       failures.delete(id);
       if (!records.has(id)) {
-        records.set(id, { id, source, addedAt: Date.now() });
+        records.set(id, { id, source, addedAt: Date.now(), ...(paused ? { paused: true } : {}) });
         await saveState();
       }
       if (!track(torrent, id)) {
@@ -772,8 +1027,7 @@ async function handle(req, res) {
 
     if (pathname === '/api/metadata' && req.method === 'POST') {
       // JSON for the same reason as a transfer: a page on another site does not get past the preflight.
-      const type = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
-      if (type !== 'application/json') return send(req, res, 415, { error: 'send the magnet as application/json' });
+      if (contentType(req) !== 'application/json') return send(req, res, 415, { error: 'send the magnet as application/json' });
       let magnet;
       let infoHash;
       try {
@@ -804,22 +1058,74 @@ async function handle(req, res) {
         return send(req, res, 200, { ok: true });
       }
       if (!torrent) return send(req, res, 404, { error: 'no such transfer' });
-      if (req.method === 'GET') return send(req, res, 200, { transfer: describe(torrent) });
+      if (req.method === 'GET') return send(req, res, 200, { transfer: describe(torrent, { detail }) });
+      if (req.method === 'POST') {
+        // JSON, so that a page on another site does not get past the preflight; and fields that set
+        // a state rather than flip it, so that a request sent twice does what it did once.
+        if (contentType(req) !== 'application/json') return send(req, res, 415, { error: 'send the change as application/json' });
+        let change;
+        try {
+          change = JSON.parse((await readBody(req, 1024 * 1024)).toString() || '{}');
+          if (!change || typeof change !== 'object' || Array.isArray(change)) throw new Error('send an object');
+        } catch (err) {
+          return send(req, res, 400, { error: err.message });
+        }
+        const { paused, deselected } = change;
+        if (paused !== undefined && typeof paused !== 'boolean') return send(req, res, 400, { error: 'paused is true or false' });
+        if (deselected !== undefined) {
+          if (!Array.isArray(deselected) || !deselected.every(Number.isInteger)) return send(req, res, 400, { error: 'deselected is a list of file indexes' });
+          if (!torrent.metadata) return send(req, res, 409, { error: 'no metadata yet: its files are not known' });
+          if (deselected.some((i) => i < 0 || i >= torrent.files.length)) return send(req, res, 400, { error: `a file index is from 0 to ${torrent.files.length - 1}` });
+        }
+        setTransfer(torrent, { paused, deselected });
+        await saveState();
+        return send(req, res, 200, { transfer: describe(torrent, { detail: true }) });
+      }
       if (req.method === 'DELETE') {
         const record = records.get(torrent.infoHash);
         records.delete(torrent.infoHash);
         await saveState();
-        // Take the files with it: this is the delete of a cloud service, not a "stop". Its store is
-        // closed, not destroyed: the store's own delete removes every path the torrent names,
-        // folders and all — a .torrent called "Photos" took the user's Photos folder with it — and a
-        // file another transfer still has. forgetFiles takes what this one wrote, and only that.
-        const written = writtenBy(torrent, record);
+        // Take the files with it, as the delete of a cloud service does, unless told to keep them as a
+        // torrent client's "remove" does. Its store is closed, not destroyed: the store's own delete
+        // removes every path the torrent names, folders and all — a .torrent called "Photos" took the
+        // user's Photos folder with it — and a file another transfer still has. forgetFiles takes what
+        // this one wrote, and only that.
+        const written = url.searchParams.get('keepFiles') === '1' ? null : writtenBy(torrent, record);
         // Removed already when a second DELETE of it (a retry, another client) got here first:
         // WebTorrent's remove then rejects, and the rejection nobody handles would end the process.
         await new Promise((resolve) => client.remove(torrent, { destroyStore: false }, resolve).catch(() => resolve()));
-        await forgetFiles(written);
+        if (written) await forgetFiles(written);
         return send(req, res, 200, { ok: true });
       }
+    }
+
+    // The .torrent of a transfer: what the app saves, edits, or hands to another client.
+    const own = pathname.match(/^\/api\/transfers\/([a-f0-9]{40})\/torrent$/i);
+    if (own && req.method === 'GET') {
+      const torrent = findTorrent(own[1].toLowerCase());
+      if (!torrent) return send(req, res, 404, { error: 'no such transfer' });
+      if (!torrent.metadata) return send(req, res, 409, { error: 'no metadata yet' });
+      const bytes = Buffer.from(torrent.torrentFile);
+      res.writeHead(200, {
+        'Content-Type': 'application/x-bittorrent',
+        'Content-Length': bytes.length,
+        'Content-Disposition': contentDisposition('attachment', `${torrent.name || torrent.infoHash}.torrent`),
+        'Cache-Control': 'no-store',
+        ...corsHeaders(req),
+      });
+      return res.end(bytes);
+    }
+
+    // Show a transfer's files in the Finder: to the person at this machine only, and at a path this
+    // server works out itself, never one the request names.
+    const reveal = pathname.match(/^\/api\/transfers\/([a-f0-9]{40})\/reveal$/i);
+    if (reveal && req.method === 'POST') {
+      if (!LOCAL || !isLoopback(req.socket.remoteAddress)) return send(req, res, 403, { error: 'only a server started with --local shows its files, and only to the machine it runs on' });
+      if (contentType(req) !== 'application/json') return send(req, res, 415, { error: 'send it as application/json' });
+      const torrent = findTorrent(reveal[1].toLowerCase());
+      if (!torrent) return send(req, res, 404, { error: 'no such transfer' });
+      revealInFiles(whereOnDisk(torrent));
+      return send(req, res, 200, { ok: true });
     }
 
     if (fileReq && (req.method === 'GET' || req.method === 'HEAD')) {
@@ -848,8 +1154,21 @@ const server = http.createServer((req, res) => {
 
 await loadState();
 
-server.listen(PORT, '0.0.0.0', () => {
-  console.log(`swarmdeck server on http://0.0.0.0:${server.address().port}`);
+server.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') console.error(`PORT ${PORT} is taken by another program: stop it, or set PORT to another`);
+  else console.error(`could not listen on ${HOST}:${PORT}: ${err.message}`);
+  process.exit(1);
+});
+
+server.listen(PORT, HOST, () => {
+  const { port } = server.address();
+  console.log(`swarmdeck server on http://${HOST.includes(':') ? `[${HOST}]` : HOST}:${port}`);
+  if (LOCAL) {
+    // Always this address, never localhost: what the page keeps belongs to the address it was opened at.
+    const address = `http://127.0.0.1:${port}/`;
+    console.log(`Swarmdeck runs on this computer: ${address}`);
+    if (OPEN_BROWSER) openBrowser(address);
+  }
   // uTP comes from utp-native, a native module that is left out where it has no prebuilt binary
   // and could not be built (WebTorrent then says "uTP not supported"): say what is really on.
   console.log(`BitTorrent on port ${TORRENT_PORT} (${client.utp ? 'TCP and uTP' : 'TCP only: uTP is not available in this build'}), DHT on ${DHT_PORT}/udp`);
