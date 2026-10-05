@@ -106,7 +106,7 @@ device gets, rather than the key to the whole server.
 | | |
 |---|---|
 | `GET /api/health` | no token; `{ ok, torrents, features }` — what it does besides add, list and delete: `pause`, `select`, `keep-files`, `detail`, and `url` with `--local` — with `local: true` when started with `--local`; or `503` once the BitTorrent client has stopped |
-| `GET /api/account` | `{ who, detail }` — transfer count and free space |
+| `GET /api/account` | `{ who, detail }` — transfer count and free space; with `--local`, `downloadDir` too, where its files are, for the command line and an AI on that computer |
 | `GET /api/transfers` | `{ transfers: [...] }`; with `?detail=1`, each with its `detail` |
 | `POST /api/transfers` | `{"magnet": "..."}` as `application/json`, or the `.torrent` bytes as `application/x-bittorrent`; anything else is `415`, whatever follows a `;`. `"paused": true` beside the magnet, or `?paused=1` beside the bytes, adds it paused. With `--local`, `{"url": "https://…"}` has the server fetch the `.torrent` at that address itself |
 | `POST /api/metadata` | `{"magnet": "..."}` (or an info hash) as `application/json`: `{ torrent }`, the `.torrent` as base64 — from the transfer that has it, or else from the DHT and the magnet's trackers, asked for a minute without making a transfer of it — or `null` when nobody sent it; the app's editor asks it to save a magnet as a `.torrent` |

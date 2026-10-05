@@ -8,6 +8,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import http from 'node:http';
 import net from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -187,6 +188,46 @@ try {
   assert.equal(stdoutIsEmpty(down), true, 'and nothing on stdout');
   log('help, usage errors (exit 2), a missing file and a server that is not there (exit 1)');
 
+  /* ---------- the download folder of the server on this computer ---------- */
+  // A server as npm run local answers, with one finished transfer, its downloads in ~/Downloads/Swarmdeck
+  // of a home of the test's own: download leaves its files where they are, and says where.
+  const home = path.join(tmp, 'home');
+  const serverDir = path.join(home, 'Downloads', 'Swarmdeck');
+  mkdirSync(path.join(serverDir, 'Album'), { recursive: true });
+  writeFileSync(path.join(serverDir, 'Album', 'one.flac'), one);
+  const id = 'ab'.repeat(20);
+  const transfer = {
+    id, name: 'Album', size: one.length, progress: 1, state: 'seeding', ready: true, paused: false, metadata: true, peers: 0, files: [],
+    detail: { files: [{ id: 0, name: 'one.flac', path: 'Album/one.flac', size: one.length, downloaded: one.length, progress: 1, done: true, selected: true, link: `/api/transfers/${id}/files/0` }] },
+  };
+  let fileRequests = 0;
+  const fake = http.createServer((req, res) => {
+    const reply = (body) => res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify(body));
+    const { pathname } = new URL(req.url, 'http://x');
+    if (pathname === '/api/health') return reply({ ok: true, torrents: 1, features: [], local: true });
+    if (pathname === '/api/account') return reply({ who: 'your server', detail: '1 transfer', downloadDir: serverDir });
+    if (pathname === '/api/transfers') return reply({ transfers: [transfer] });
+    if (pathname === `/api/transfers/${id}`) return reply({ transfer });
+    fileRequests += 1;
+    return res.writeHead(200).end(one);
+  });
+  await new Promise((resolve) => fake.listen(0, '127.0.0.1', resolve));
+  const fakeAt = ['--server', `http://127.0.0.1:${fake.address().port}`];
+  try {
+    const localStatus = await cli(['status', ...fakeAt]);
+    assert.match(localStatus.stdout, new RegExp(`downloads in ${serverDir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`), 'status says where the server on this computer puts its downloads');
+    const inPlace = await cli(['download', 'Album', ...fakeAt, '--json'], { env: { HOME: home } });
+    assert.equal(inPlace.code, 0, inPlace.stderr);
+    assert.deepEqual(inPlace.json.files.map((f) => [f.path, f.copied]), [[path.join(serverDir, 'Album', 'one.flac'), false]], 'its files are where download would put them: it says so');
+    assert.equal(fileRequests, 0, 'and copies nothing over them');
+    const elsewhere = await cli(['download', 'Album', ...fakeAt, '-o', path.join(tmp, 'copy'), '--json']);
+    assert.equal(elsewhere.json.files[0].copied, true, 'into another folder, it copies');
+    assert.equal(readFileSync(path.join(tmp, 'copy', 'Album', 'one.flac')).equals(one), true);
+  } finally {
+    await new Promise((resolve) => fake.close(resolve));
+  }
+  log('download: into ~/Downloads/Swarmdeck by default, and nothing copied over the files the server on this computer already has there');
+
   /* ---------- the MCP server ---------- */
   const transport = new StdioClientTransport({
     command: process.execPath,
@@ -213,6 +254,7 @@ try {
     assert.equal(byName.list_transfers.annotations.readOnlyHint, true, 'listing is marked read-only');
     assert.equal(byName.inspect_torrent.annotations.readOnlyHint, true);
     assert.equal(byName.remove_transfer.inputSchema.properties.deleteFiles.default, false, 'and keeps the files unless told');
+    assert.ok(!(byName.download_files.inputSchema.required || []).includes('outDir'), 'download_files has a folder of its own when given none');
     const inspectedByMcp = await client.callTool({ name: 'inspect_torrent', arguments: { file: made } });
     assert.ok(!inspectedByMcp.isError, inspectedByMcp.content?.[0]?.text);
     const result = JSON.parse(inspectedByMcp.content[0].text);

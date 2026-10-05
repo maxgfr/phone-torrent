@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "description": "A real BitTorrent client with an HTTP API, for the swarms a browser cannot reach.",
+  "license": "MIT",
   "type": "module",
   "main": "app.mjs",
   "scripts": {

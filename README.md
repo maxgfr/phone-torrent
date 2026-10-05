@@ -369,7 +369,8 @@ npm run cli -- remove <id>                      # its files stay unless --delete
 
 `<id>` is an info hash, its first characters, or the transfer's name. There are also `status`, `show`,
 `pause`, `resume`, `reveal`, `torrent` (save a transfer's `.torrent`), `metadata` (a magnet's `.torrent`,
-without adding it), `download` (copy its files from a server elsewhere) and `link` (a file's address
+without adding it), `download` (copy its files from a server elsewhere, into `~/Downloads/Swarmdeck`
+unless `-o` says otherwise) and `link` (a file's address
 for a player or another device, signed rather than carrying the token); and, with no server at all,
 `inspect`, `magnet`, `edit` (trackers, web seeds, comment, name, private flag, source, date, on several
 files at once), `create` and `check`, with the page's own code. `--json` prints the raw result.
@@ -799,3 +800,7 @@ a call directly, through the CORS proxy set in Settings, even with "route cloud 
 CORS proxy" off (with it on, every call goes through the proxy) — so set only a proxy you run. For
 TorBox and put.io the key is also inside the file links, as above. The files a cloud service or your
 own server holds are downloaded straight from it by the browser: they never pass through this app.
+
+## License
+
+MIT — see [LICENSE](LICENSE). WebTorrent and client‑zip, in `vendor/`, are MIT too.

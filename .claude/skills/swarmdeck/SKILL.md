@@ -33,7 +33,7 @@ say which number you picked.
 | A magnet, everything | `add <magnet>`, then `wait <id>` (`--for done`) |
 | A magnet, **paused or only some files** | `metadata <magnet> -o <tmp>/x.torrent` (`<tmp>`: your scratch folder), then `add <tmp>/x.torrent --paused`, `select <id> --only 0,2`, `resume <id>`, `wait <id>` |
 | A .torrent file or its URL | `add <path or url>` (a URL needs `npm run local`) |
-| Its files | `reveal <id>` on this computer; `download <id> [index] -o <dir>` from a remote server |
+| Its files | `reveal <id>` on this computer; `download <id> [index] [-o <dir>]` from a remote server (into `~/Downloads/Swarmdeck` by default) |
 | To play it (VLC…) or share a file | `link <id> [index]`: an address without the token, signed for a day when the server has one; plays while downloading |
 | A magnet as a .torrent | `metadata <magnet> -o <file>`, no transfer made |
 | A transfer's .torrent | `torrent <id> -o <file or dir/>` |
@@ -55,9 +55,11 @@ trackers and web seeds again, which is often all it needs.
 A file left out can still show progress, even 100% for a small one: the pieces it shares with a kept
 file come with it. That is expected.
 
-The files are in the server's download folder, at their path in the torrent: `~/Downloads/Swarmdeck`
-for `npm run local` unless `DOWNLOAD_DIR` says otherwise (it prints `downloads in …` at start). Tell
-the user that path. `reveal` only opens it in the Finder.
+The files are in the server's download folder, at their path in the torrent. For the server on this
+computer, `status` says which (`downloads in …`, `account.downloadDir` in JSON): tell the user that
+path. `reveal` only opens it in the Finder. `download` copies to `~/Downloads/Swarmdeck` unless `-o`
+says otherwise; from the server on this computer, which already writes there, it copies nothing and
+prints where each file is.
 
 ## Removing
 
