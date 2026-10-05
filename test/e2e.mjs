@@ -2835,16 +2835,36 @@ try {
     await waitFor(() => fromPeers.evaluate(() => window.__swarmdeck.client.torrents.length === 0), { label: 'the search for peers gone once it is saved', timeout: 5000 });
     await fromPeers.click('#ed-close');
 
-    // Closed while peers are asked: they stop being asked. A cache that cannot be read says so while
-    // they are, and what reaches it: itorrents.net, the default, sends no CORS headers.
+    // A torrent cache the page may not read (CORS) is said while peers are asked, with what to do:
+    // open it in a tab, which is not held to CORS, and that search stops; or keep waiting for peers.
     const nobody = createHash('sha1').update(`nobody has this ${Date.now()}`).digest('hex');
+    const cacheUrl = `https://127.0.0.1:1/never/${nobody.toUpperCase()}.torrent`;
     await fromPeers.evaluate(() => { window.__swarmdeck.settings.metadataSources = ['https://127.0.0.1:1/never/{INFOHASH}.torrent']; });
     await fromPeers.fill('#edit-magnet-input', `magnet:?xt=urn:btih:${nobody}&tr=${encodeURIComponent(trackerUrl)}`);
     await fromPeers.click('#edit-magnet-form button[type="submit"]');
     await fromPeers.waitForSelector('#editor-dialog[open][data-mode="magnet"]');
     await fromPeers.click('#ed-save');
-    await waitFor(async () => /Asking peers/.test(await fromPeers.textContent('#ed-metadata-state')), { label: 'peers asked', timeout: 10000 });
-    assert.match(await fromPeers.textContent('#ed-metadata-state'), /Torrent cache 127\.0\.0\.1:1: blocked by CORS or unreachable\. Set a CORS proxy in Settings/, 'why the cache gave nothing, said at once');
+    await fromPeers.waitForSelector('#ed-blocked:not([hidden])', { timeout: 10000 });
+    assert.match(await fromPeers.textContent('#ed-blocked-text'), /The torrent cache 127\.0\.0\.1:1 does not let this page read it \(CORS\)/);
+    assert.equal(await fromPeers.textContent('#ed-blocked-open'), 'Open from 127.0.0.1:1');
+    assert.match(await fromPeers.textContent('#ed-metadata-state'), /Asking peers/, 'and peers are asked meanwhile');
+    const [tab] = await Promise.all([
+      fromPeersCtx.waitForEvent('page'),
+      fromPeersCtx.waitForEvent('request', { predicate: (r) => r.url() === cacheUrl }),
+      fromPeers.click('#ed-blocked-open'),
+    ]);
+    await tab.close().catch(() => {});
+    log('the cache the page may not read opened in a tab, for its .torrent as it is');
+    await waitFor(() => fromPeers.evaluate(() => window.__swarmdeck.client.torrents.length === 0), { label: 'peers no longer asked once the cache is opened', timeout: 5000 });
+    assert.equal(await fromPeers.isHidden('#ed-blocked'), true);
+    assert.equal(await fromPeers.textContent('#ed-save'), 'Save .torrent', 'Save can be clicked again');
+    assert.match(await fromPeers.textContent('#ed-metadata-state'), /Opened 127\.0\.0\.1:1 in a new tab/);
+
+    // Kept waiting for peers: the choices go, the search goes on. Closed: they stop being asked.
+    await fromPeers.click('#ed-save');
+    await fromPeers.waitForSelector('#ed-blocked:not([hidden])', { timeout: 10000 });
+    await fromPeers.click('#ed-blocked-wait');
+    assert.equal(await fromPeers.isHidden('#ed-blocked'), true);
     assert.equal(await fromPeers.textContent('#ed-save'), 'Fetching metadata…');
     assert.equal(await fromPeers.evaluate(() => window.__swarmdeck.client.torrents.length), 1, 'one search, for that magnet');
     await fromPeers.click('#ed-close');

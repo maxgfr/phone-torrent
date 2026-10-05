@@ -1063,7 +1063,7 @@ function cannotDownloadHere(reach) {
  * is almost always a server that does not allow browser (CORS) requests.
  */
 function unreachable() {
-  return new Error(navigator.onLine ? 'blocked by CORS or unreachable' : 'you are offline');
+  return navigator.onLine ? Object.assign(new Error('blocked by CORS or unreachable'), { blocked: true }) : new Error('you are offline');
 }
 
 async function verifyTorrentBytes(bytes, expectedInfoHash) {
@@ -1203,7 +1203,7 @@ function unreachableApi(url, provider) {
  * the API must allow with CORS; when it does not, the user's own proxy relays it instead. Resolves
  * with the answer, and whether it came through that proxy.
  */
-async function cloudFetch(url, { method = 'GET', body, json = false, contentType, key = '', viaProxy: onlyProxy = false, provider = '' } = {}) {
+async function cloudFetch(url, { method = 'GET', body, json = false, contentType, key = '', viaProxy: onlyProxy = false, provider = '', signal } = {}) {
   const viaProxy = proxied(url);
   const hasProxy = viaProxy !== url;
   // An address the browser will not call from here is not asked directly: only through the proxy,
@@ -1217,8 +1217,10 @@ async function cloudFetch(url, { method = 'GET', body, json = false, contentType
   let last = null;
   for (const target of targets) {
     try {
-      return { res: await fetch(target, { method, body, headers, cache: 'no-store' }), relayed: target !== url };
+      return { res: await fetch(target, { method, body, headers, cache: 'no-store', signal }), relayed: target !== url };
     } catch {
+      // Not wanted any more, rather than not reached.
+      signal?.throwIfAborted();
       // A network-level rejection is indistinguishable from CORS in script.
       last = target === url ? unreachableApi(url, provider) : 'the proxy did not answer';
     }
@@ -5279,22 +5281,45 @@ async function metadataFromPeers(magnet, { signal, onProgress = () => {} } = {})
   }
 }
 
-/**
- * Why the torrent caches gave nothing, or '' when none is set. The default one sends no CORS headers:
- * from a page it fails every time, and only a CORS proxy reaches it.
- */
+/** Why the torrent caches gave nothing, each in its own words; '' when none is set. */
 function cacheMisses(misses) {
-  if (!misses.length) return '';
-  const said = misses.map(({ url, err }) => `${new URL(url).host}: ${err.message}`).join('; ');
-  const proxy = !(settings.corsProxy || '').trim() && misses.some(({ err }) => /CORS/.test(err.message));
-  return `Torrent cache ${said}.${proxy ? ' Set a CORS proxy in Settings and it is asked through it.' : ''}`;
+  return misses.length ? `Torrent cache ${misses.map(({ url, err }) => `${new URL(url).host}: ${err.message}`).join('; ')}.` : '';
+}
+
+/**
+ * A magnet's metadata from your own server: a real client, that reaches the DHT and the udp:// and
+ * http:// trackers a page cannot. Null when no peer sent it to the server within its minute.
+ */
+async function metadataFromServer(magnet, infoHash, signal) {
+  const ctx = cloudCtx({ provider: 'server' });
+  const { torrent } = await ctx.json(`${ctx.base}/api/metadata`, { method: 'POST', body: JSON.stringify({ magnet }), json: true, signal });
+  return torrent ? infoTorrent(Uint8Array.from(atob(torrent), (c) => c.charCodeAt(0)), infoHash) : null;
+}
+
+/** The first of `asks` to find something; null once none has, or the first failure when one failed. */
+function firstFound(asks) {
+  return new Promise((resolve, reject) => {
+    let left = asks.length;
+    let failure = null;
+    const settled = () => {
+      left -= 1;
+      if (left === 0) (failure ? reject(failure) : resolve(null));
+    };
+    for (const ask of asks) {
+      ask.then((found) => (found ? resolve(found) : settled()), (err) => {
+        failure ||= err;
+        settled();
+      });
+    }
+  });
 }
 
 /**
  * A magnet's metadata: from the torrent in the list that has it, or else from the torrent caches, or
  * else from its peers — asked last, as the caches answer at once and peers are only told of the info
- * hash when they must be. `onProgress` hears where it looks: 'caches', then 'peers', how many, and
- * why the caches gave nothing — said while the peers are asked, not a minute later.
+ * hash when they must be — and from your own server, when it is the cloud service, at the same time.
+ * `onProgress` hears where it looks: 'caches', then 'peers', how many, and `{ blocked, server }`:
+ * the caches this page may not read (CORS), said while the peers are asked rather than a minute later.
  */
 async function metadataFor(infoHash, { magnet = `magnet:?xt=urn:btih:${infoHash}`, signal, onProgress = () => {} } = {}) {
   const torrent = listed(infoHash);
@@ -5307,10 +5332,29 @@ async function metadataFor(infoHash, { magnet = `magnet:?xt=urn:btih:${infoHash}
   const cached = await fetchMetadataFallback(infoHash, (url, err) => { if (err) misses.push({ url, err }); });
   if (cached) return cached;
   signal?.throwIfAborted();
-  const caches = cacheMisses(misses);
-  const fromPeers = await metadataFromPeers(magnet, { signal, onProgress: (n) => onProgress('peers', n, caches) });
-  if (!fromPeers && caches) throw new Error(`no peer sent it within a minute. ${caches}`);
-  return fromPeers;
+  const blocked = misses.filter(({ err }) => err.blocked).map(({ url }) => url);
+  const server = settings.cloud?.provider === 'server';
+  // One found it: the others stop asking.
+  const asking = new AbortController();
+  const stop = () => asking.abort(signal.reason);
+  signal?.addEventListener('abort', stop, { once: true });
+  let serverFailure = null;
+  try {
+    const found = await firstFound([
+      metadataFromPeers(magnet, { signal: asking.signal, onProgress: (n) => onProgress('peers', n, { blocked, server }) }),
+      ...(server ? [metadataFromServer(magnet, infoHash, asking.signal).catch((err) => {
+        if (!asking.signal.aborted) serverFailure = err;
+        return null;
+      })] : []),
+    ]);
+    if (found) return found;
+  } finally {
+    signal?.removeEventListener('abort', stop);
+    asking.abort();
+  }
+  const why = [serverFailure && `your server: ${serverFailure.message}.`, cacheMisses(misses)].filter(Boolean).join(' ');
+  if (why) throw new Error(`no peer sent it within a minute. ${why}`);
+  return null;
 }
 
 const editor = createEditor({
@@ -5323,6 +5367,7 @@ const editor = createEditor({
   getPresets: () => settings.presets || [],
   isShared: (infoHash) => Boolean(listed(infoHash)),
   appTrackers: effectiveTrackers,
+  openProxySettings,
 });
 
 async function editTorrent(torrent) {
@@ -5702,7 +5747,7 @@ document.addEventListener('visibilitychange', updateWakeLock);
 
 /* ---------- settings dialog ---------- */
 
-els.settingsBtn.addEventListener('click', async () => {
+async function openSettings() {
   els.trackersInput.value = settings.trackers.join('\n');
   els.trackerListToggle.checked = Boolean(settings.trackerList);
   els.trackerListUrl.value = settings.trackerListUrl || '';
@@ -5765,7 +5810,22 @@ els.settingsBtn.addEventListener('click', async () => {
   }
   els.settingsDialog.returnValue = '';
   els.settingsDialog.showModal();
-});
+}
+
+els.settingsBtn.addEventListener('click', () => openSettings());
+
+/**
+ * Settings opened on the CORS proxy field, over the editor. Resolves once closed, with whether a
+ * proxy is set then: the editor asks the torrent caches again through it.
+ */
+async function openProxySettings() {
+  await openSettings();
+  applySettingsMode(true);
+  els.corsProxyInput.scrollIntoView({ block: 'center' });
+  els.corsProxyInput.focus();
+  await new Promise((resolve) => els.settingsDialog.addEventListener('close', resolve, { once: true }));
+  return Boolean((settings.corsProxy || '').trim());
+}
 
 els.netcheckBtn.addEventListener('click', () => {
   // Use the resolver currently chosen in the dialog, even before Save.

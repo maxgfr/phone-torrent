@@ -9,6 +9,7 @@
     "start": "node app.mjs"
   },
   "dependencies": {
+    "memory-chunk-store": "^1.3.5",
     "webtorrent": "^2.8.4"
   },
   "engines": {

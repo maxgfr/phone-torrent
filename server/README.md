@@ -92,6 +92,7 @@ device gets, rather than the key to the whole server.
 | `GET /api/account` | `{ who, detail }` — transfer count and free space |
 | `GET /api/transfers` | `{ transfers: [...] }` |
 | `POST /api/transfers` | `{"magnet": "..."}` as `application/json`, or the `.torrent` bytes as `application/x-bittorrent`; anything else is `415`, whatever follows a `;` |
+| `POST /api/metadata` | `{"magnet": "..."}` (or an info hash) as `application/json`: `{ torrent }`, the `.torrent` as base64 — from the transfer that has it, or else from the DHT and the magnet's trackers, asked for a minute without making a transfer of it — or `null` when nobody sent it; the app's editor asks it to save a magnet as a `.torrent` |
 | `GET /api/transfers/{infoHash}` | one transfer |
 | `DELETE /api/transfers/{infoHash}` | removes it **and its files**, and the folders they leave empty; nothing it did not write, whatever its name |
 | `GET /api/transfers/{infoHash}/files/{index}` | the file, with `Range` support; the token, or the file's signed `link` |

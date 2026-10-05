@@ -18,6 +18,7 @@ import crypto from 'node:crypto';
 import dns from 'node:dns';
 import { fileURLToPath } from 'node:url';
 import WebTorrent from 'webtorrent';
+import MemoryChunkStore from 'memory-chunk-store';
 
 // The DHT's socket is IPv4, and it looks a router's name up with dns.lookup, which since Node 17
 // answers in the resolver's order: IPv6 first on a dual-stack machine. The router was then asked at
@@ -318,7 +319,7 @@ function writtenBy(torrent, record) {
  * but leaves their folders, and a transfer that failed is torn down without its store's delete.
  */
 async function forgetFiles({ files, folders }) {
-  const others = new Set(client.torrents.flatMap((t) => t.files.map(onDisk)));
+  const others = new Set(transfers().flatMap((t) => t.files.map(onDisk)));
   for (const file of files) {
     if (!file.startsWith(DOWNLOAD_DIR + path.sep) || others.has(file) || (path.dirname(file) === DOWNLOAD_DIR && isStateName(path.basename(file)))) continue;
     // Not recursive: where a folder stands in a file's place, it is not this transfer's.
@@ -349,7 +350,103 @@ function describe(torrent) {
 }
 
 function findTorrent(id) {
-  return client.torrents.find((t) => t.infoHash === id) || null;
+  return transfers().find((t) => t.infoHash === id) || null;
+}
+
+/* ---------- a magnet's metadata, for the app's editor ---------- */
+
+// How long the swarm is given to send a magnet's metadata: as long as the app gives its own peers.
+const METADATA_TIMEOUT_MS = 60000;
+
+/**
+ * Magnets asked about for their metadata alone, by info hash: in memory, nothing selected, nothing
+ * written to disk, and never a transfer. Gone once the metadata is in, the minute is up, or the
+ * last one asking hangs up. Two asks for one magnet share one; a transfer of it stops it first.
+ */
+const probes = new Map();
+
+/** The torrents the client runs that are transfers: a probe is not one. */
+function transfers() {
+  const probing = new Set([...probes.values()].map((p) => p.torrent));
+  return client.torrents.filter((t) => !probing.has(t));
+}
+
+/** The info hash a magnet or a bare info hash names, in hex; '' when it names none. */
+function infoHashOf(given) {
+  let hash = given;
+  if (/^magnet:\?/i.test(given)) {
+    const xt = new URLSearchParams(given.slice(given.indexOf('?') + 1)).getAll('xt').find((x) => /^urn:btih:/i.test(x));
+    hash = xt ? xt.slice('urn:btih:'.length) : '';
+  }
+  if (/^[a-f0-9]{40}$/i.test(hash)) return hash.toLowerCase();
+  if (!/^[a-z2-7]{32}$/i.test(hash)) return '';
+  const bits = [...hash.toLowerCase()].map((c) => 'abcdefghijklmnopqrstuvwxyz234567'.indexOf(c).toString(2).padStart(5, '0')).join('');
+  return bits.match(/.{4}/g).map((b) => parseInt(b, 2).toString(16)).join('');
+}
+
+/** Resolves true once the torrent has its metadata, false when `ms` pass, it fails, or it goes. */
+function whenMetadata(torrent, ms) {
+  if (torrent.metadata) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const settle = (value) => {
+      clearTimeout(timer);
+      torrent.removeListener('metadata', onMetadata);
+      torrent.removeListener('error', onGone);
+      torrent.removeListener('close', onGone);
+      resolve(value);
+    };
+    const onMetadata = () => settle(true);
+    const onGone = () => settle(false);
+    const timer = setTimeout(onGone, ms);
+    torrent.once('metadata', onMetadata);
+    torrent.once('error', onGone);
+    torrent.once('close', onGone);
+  });
+}
+
+function probeFor(magnet, infoHash) {
+  if (probes.has(infoHash)) return probes.get(infoHash);
+  const torrent = client.add(magnet, { store: MemoryChunkStore, deselect: true, destroyStoreOnDestroy: true });
+  const probe = { torrent, users: 0 };
+  probe.done = whenMetadata(torrent, METADATA_TIMEOUT_MS).then((found) => {
+    const bytes = found ? Buffer.from(torrent.torrentFile) : null;
+    probe.stop();
+    return bytes;
+  });
+  let stopped = false;
+  probe.stop = () => {
+    if (stopped) return Promise.resolve();
+    stopped = true;
+    if (probes.get(infoHash) === probe) probes.delete(infoHash);
+    // Its pieces are checked once the metadata is in, and WebTorrent stumbles over a check that
+    // ends after the torrent is gone: it goes once they are.
+    const checked = torrent.metadata && !torrent.ready
+      ? new Promise((done) => { torrent.once('ready', done); torrent.once('close', done); setTimeout(done, 10000); })
+      : Promise.resolve();
+    return checked.then(() => (torrent.destroyed ? null : client.remove(torrent, { destroyStore: true }).catch(() => {})));
+  };
+  probes.set(infoHash, probe);
+  return probe;
+}
+
+/**
+ * The .torrent of a magnet, from the transfer that has it or else from the swarm — reached here as a
+ * browser cannot: the DHT, and udp:// and http:// trackers. Null when nobody sent it in time, or the
+ * one asking went first.
+ */
+async function metadataFor(magnet, infoHash, res) {
+  const transfer = findTorrent(infoHash);
+  if (transfer) return (await whenMetadata(transfer, METADATA_TIMEOUT_MS)) ? Buffer.from(transfer.torrentFile) : null;
+  const probe = probeFor(magnet, infoHash);
+  probe.users += 1;
+  // A response closes before it is sent only when the one asking hung up.
+  const hungUp = new Promise((resolve) => res.once('close', () => resolve(null)));
+  try {
+    return await Promise.race([probe.done, hungUp]);
+  } finally {
+    probe.users -= 1;
+    if (probe.users === 0) probe.stop();
+  }
 }
 
 /* ---------- http ---------- */
@@ -566,7 +663,7 @@ async function handle(req, res) {
   // moment before the process goes.
   if (pathname === '/api/health') {
     if (client.destroyed) return send(req, res, 503, { ok: false, error: 'the BitTorrent client stopped' });
-    return send(req, res, 200, { ok: true, torrents: client.torrents.length });
+    return send(req, res, 200, { ok: true, torrents: transfers().length });
   }
 
   if (pathname.startsWith('/api/')) {
@@ -579,7 +676,7 @@ async function handle(req, res) {
     if (!signed && !authorized(req, url)) return send(req, res, 401, { error: 'bad or missing token' });
 
     if (pathname === '/api/account' && req.method === 'GET') {
-      const active = client.torrents.length;
+      const active = transfers().length;
       let free = '';
       try {
         const { bavail, bsize } = await fsp.statfs(DOWNLOAD_DIR);
@@ -593,7 +690,7 @@ async function handle(req, res) {
     }
 
     if (pathname === '/api/transfers' && req.method === 'GET') {
-      return send(req, res, 200, { transfers: [...client.torrents.map(describe), ...failures.values()] });
+      return send(req, res, 200, { transfers: [...transfers().map(describe), ...failures.values()] });
     }
 
     if (pathname === '/api/transfers' && req.method === 'POST') {
@@ -624,7 +721,13 @@ async function handle(req, res) {
       }
       // Sending the same torrent twice is not a mistake — a phone that lost its
       // connection mid-tap does exactly that. Answer with the transfer it already is.
-      const existing = await client.get(torrentId(source)).catch(() => null);
+      let existing = await client.get(torrentId(source)).catch(() => null);
+      // A magnet the editor is asking the swarm about, sent for real: that stops, and this goes on.
+      const probe = existing && [...probes.values()].find((p) => p.torrent === existing);
+      if (probe) {
+        await probe.stop();
+        existing = null;
+      }
       if (existing) return send(req, res, 200, { transfer: describe(existing) });
       let torrent;
       try {
@@ -665,6 +768,30 @@ async function handle(req, res) {
         return send(req, res, 400, { error: `refused: it would overwrite ${path.basename(STATE_FILE)}, the server's list of transfers` });
       }
       return send(req, res, 201, { transfer: describe(torrent) });
+    }
+
+    if (pathname === '/api/metadata' && req.method === 'POST') {
+      // JSON for the same reason as a transfer: a page on another site does not get past the preflight.
+      const type = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+      if (type !== 'application/json') return send(req, res, 415, { error: 'send the magnet as application/json' });
+      let magnet;
+      let infoHash;
+      try {
+        const given = String(JSON.parse((await readBody(req)).toString() || '{}').magnet || '').trim();
+        infoHash = infoHashOf(given);
+        if (!infoHash) throw new Error('need a magnet link or an info hash');
+        magnet = /^magnet:\?/i.test(given) ? given : `magnet:?xt=urn:btih:${infoHash}`;
+      } catch (err) {
+        return send(req, res, 400, { error: err.message });
+      }
+      let bytes;
+      try {
+        bytes = await metadataFor(magnet, infoHash, res);
+      } catch (err) {
+        return send(req, res, 400, { error: err.message });
+      }
+      if (res.destroyed) return undefined;
+      return send(req, res, 200, { torrent: bytes ? bytes.toString('base64') : null });
     }
 
     const one = pathname.match(/^\/api\/transfers\/([a-f0-9]{40})$/i);

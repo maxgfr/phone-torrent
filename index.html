@@ -654,6 +654,14 @@
           <button id="ed-get-metadata" class="btn small" type="button">Get metadata</button>
         </div>
         <p class="hint" id="ed-metadata-state" role="status"></p>
+        <div id="ed-blocked" hidden>
+          <p class="hint" id="ed-blocked-text"></p>
+          <div class="details-actions">
+            <button id="ed-blocked-open" class="btn small" type="button">Open it from the cache</button>
+            <button id="ed-blocked-proxy" class="btn small" type="button">Set a CORS proxy</button>
+            <button id="ed-blocked-wait" class="btn small ghost" type="button">Keep waiting for peers</button>
+          </div>
+        </div>
       </section>
 
       <section class="editor-section">

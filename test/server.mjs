@@ -446,6 +446,24 @@ try {
   assert.equal((await api(`/api/transfers/${dhtSeeded.infoHash}`, { method: 'DELETE' })).status, 200);
   log('a bare info hash is found on the DHT, from a router named by a host that resolves to IPv6 first:', foundOnDht.name);
 
+  // A magnet's .torrent for the app's editor, from the DHT a page cannot reach; asked about, it is
+  // never a transfer, and a magnet nobody has is let go when the one asking hangs up.
+  const metadata = (magnet, init = {}) => api('/api/metadata', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ magnet }), ...init });
+  assert.equal((await api('/api/metadata', { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: '{}' })).status, 415, 'JSON only, as a transfer');
+  assert.equal((await metadata('magnet:?dn=no-hash')).status, 400, 'a magnet with no info hash is refused');
+  const meta = await metadata(`magnet:?xt=urn:btih:${base32(Buffer.from(dhtSeeded.infoHash, 'hex'))}&dn=asked`);
+  assert.equal(meta.status, 200);
+  const { torrent: metaB64 } = await meta.json();
+  assert.ok(metaB64, 'the metadata found on the DHT');
+  const { default: parseTorrent } = await import('parse-torrent');
+  const parsedMeta = await parseTorrent(Buffer.from(metaB64, 'base64'));
+  assert.equal(parsedMeta.infoHash, dhtSeeded.infoHash, 'the .torrent of that magnet');
+  assert.deepEqual((await (await api('/api/transfers')).json()).transfers.map((t) => t.id), [transfer.id], 'and no transfer made of it');
+  const nobody = createHash('sha1').update(`nobody has this ${Date.now()}`).digest('hex');
+  await assert.rejects(metadata(nobody, { signal: AbortSignal.timeout(1500) }), { name: 'TimeoutError' });
+  assert.equal((await (await fetch(`${serverUrl}/api/health`)).json()).torrents, 1, 'searches are not counted as transfers');
+  log('a magnet\'s metadata is fetched for the editor from the DHT, and nothing is kept of the search');
+
   // The downloads are inside the web root here, as they are when the server runs from a
   // checkout. The static side must not serve what /api guards with the token.
   const leaked = path.relative(path.join(HERE, '..'), downloads).split(path.sep).join('/');
