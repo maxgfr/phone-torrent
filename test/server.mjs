@@ -996,6 +996,12 @@ try {
   assert.equal(cliCopied.code, 0, cliCopied.stderr);
   assert.deepEqual(cliCopied.json.files.map((f) => f.index), [0], 'download copies the complete files it fetches');
   assert.equal(sha(readFileSync(path.join(cliOut, 'Cli', 'a.bin'))), sha(cliBytes[0]), 'byte for byte, at its path in the torrent');
+  const cliLink = await cli(['link', short, '0', '--server', serverUrl], withToken);
+  assert.equal(cliLink.code, 0, cliLink.stderr);
+  const linkUrl = cliLink.stdout.trim();
+  assert.ok(linkUrl.startsWith(`${serverUrl}/api/transfers/${cliId}/files/0?`) && !linkUrl.includes(TOKEN), `link prints the file's signed address alone, without the token (${linkUrl})`);
+  assert.equal(sha(Buffer.from(await (await fetch(linkUrl)).arrayBuffer())), sha(cliBytes[0]), 'which a player opens with no token');
+  assert.deepEqual((await cli(['link', short, ...at], withToken)).json.files.map((f) => f.index), [0], 'every file it fetches, with no index');
   const cliReveal = await cli(['reveal', short, ...at], withToken);
   assert.equal(cliReveal.code, 1, 'reveal on a server that is not --local is refused');
   assert.match(cliReveal.stderr, /403.*--local/);
@@ -1036,6 +1042,9 @@ try {
     assert.equal((await call('resume_transfer', { id: 'Cli' })).paused, false);
     assert.equal((await call('wait_transfer', { id: short, until: 'done', timeout: 60 })).ready, true);
     assert.deepEqual((await call('list_transfers', { id: short })).detail.files.map((f) => f.selected), [true, false, true]);
+    const mcpLinks = await call('file_links', { id: short });
+    assert.deepEqual(mcpLinks.files.map((f) => f.index), [0, 2], 'file_links gives the files it fetches');
+    assert.equal(sha(Buffer.from(await (await fetch(mcpLinks.files[1].url)).arrayBuffer())), sha(cliBytes[2]), 'at addresses that open with no token');
     const removed = await call('remove_transfer', { id: short, deleteFiles: true });
     assert.equal(removed.filesDeleted, true);
     await waitFor(() => !existsSync(path.join(downloads, 'Cli')), { label: 'the files remove_transfer was told to delete to go', timeout: 5000 });

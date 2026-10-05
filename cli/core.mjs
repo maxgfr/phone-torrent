@@ -251,6 +251,28 @@ export function connect({ server, token } = {}) {
     },
 
     /**
+     * The address of each file it fetches (or of file `index`), to play in a player or open on another
+     * device: signed for that file and a day when the server has a token, never containing the token.
+     * A file still downloading plays as its pieces arrive.
+     */
+    async links(ref, { index } = {}) {
+      const transfer = await api.show(ref);
+      if (!transfer.metadata) throw new Error(`${transfer.name} has no metadata yet: its files are not known`);
+      const files = transfer.detail.files;
+      let chosen = files.filter((f) => f.selected);
+      if (index !== undefined && index !== null) {
+        const f = files[Number(index)];
+        if (!f) throw new Error(`${transfer.name} has files 0 to ${files.length - 1}: ${index} is not one of them`);
+        chosen = [f];
+      }
+      return {
+        infoHash: transfer.id,
+        name: transfer.name,
+        files: chosen.map((f) => ({ index: f.id, path: f.path, size: f.size, done: f.done, url: new URL(f.link, `${base}/`).href })),
+      };
+    },
+
+    /**
      * Until its metadata is in (`until: 'metadata'`) or the files wanted are all there ('done'). A
      * transfer that fails, or is paused where it can get no further, ends the wait with an error.
      */

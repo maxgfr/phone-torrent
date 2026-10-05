@@ -34,6 +34,7 @@ say which number you picked.
 | A magnet, **paused or only some files** | `metadata <magnet> -o <tmp>/x.torrent` (`<tmp>`: your scratch folder), then `add <tmp>/x.torrent --paused`, `select <id> --only 0,2`, `resume <id>`, `wait <id>` |
 | A .torrent file or its URL | `add <path or url>` (a URL needs `npm run local`) |
 | Its files | `reveal <id>` on this computer; `download <id> [index] -o <dir>` from a remote server |
+| To play it (VLC…) or share a file | `link <id> [index]`: an address without the token, signed for a day when the server has one; plays while downloading |
 | A magnet as a .torrent | `metadata <magnet> -o <file>`, no transfer made |
 | A transfer's .torrent | `torrent <id> -o <file or dir/>` |
 | Trackers on many .torrent files | `edit a.torrent b.torrent --add-tracker URL --in-place` (or `-o dir/`) |

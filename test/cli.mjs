@@ -160,7 +160,7 @@ try {
   /* ---------- the command line itself ---------- */
   const help = await cli(['help']);
   assert.equal(help.code, 0);
-  for (const command of ['status', 'list', 'add', 'select', 'remove', 'download', 'wait', 'inspect', 'create', 'check']) {
+  for (const command of ['status', 'list', 'add', 'select', 'remove', 'download', 'link', 'wait', 'inspect', 'create', 'check']) {
     assert.match(help.stdout, new RegExp(`\\b${command}\\b`), `help lists ${command}`);
   }
   const unknown = await cli(['frobnicate']);
@@ -195,7 +195,7 @@ try {
   try {
     const { tools } = await client.listTools();
     assert.deepEqual(tools.map((t) => t.name).sort(), [
-      'add_transfer', 'check_torrent', 'create_torrent', 'download_files', 'edit_torrent', 'fetch_metadata', 'inspect_torrent',
+      'add_transfer', 'check_torrent', 'create_torrent', 'download_files', 'edit_torrent', 'fetch_metadata', 'file_links', 'inspect_torrent',
       'list_transfers', 'pause_transfer', 'remove_transfer', 'resume_transfer', 'reveal_transfer', 'save_torrent', 'select_files',
       'swarmdeck_status', 'torrent_magnet', 'wait_transfer',
     ], 'one tool per operation');
@@ -221,7 +221,7 @@ try {
   } finally {
     await client.close();
   }
-  log('MCP: 17 tools, annotated; inspect, create and check through it; a server that is not there is an error');
+  log('MCP: 18 tools, annotated; inspect, create and check through it; a server that is not there is an error');
 } catch (err) {
   failed = true;
   console.error(err);

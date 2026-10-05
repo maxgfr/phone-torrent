@@ -369,7 +369,8 @@ npm run cli -- remove <id>                      # its files stay unless --delete
 
 `<id>` is an info hash, its first characters, or the transfer's name. There are also `status`, `show`,
 `pause`, `resume`, `reveal`, `torrent` (save a transfer's `.torrent`), `metadata` (a magnet's `.torrent`,
-without adding it) and `download` (copy its files from a server elsewhere); and, with no server at all,
+without adding it), `download` (copy its files from a server elsewhere) and `link` (a file's address
+for a player or another device, signed rather than carrying the token); and, with no server at all,
 `inspect`, `magnet`, `edit` (trackers, web seeds, comment, name, private flag, source, date, on several
 files at once), `create` and `check`, with the page's own code. `--json` prints the raw result.
 `swarmdeck help` lists it all. The server is `SWARMDECK_URL` (`http://127.0.0.1:8080` by default) or

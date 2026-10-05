@@ -82,6 +82,11 @@ tool('download_files', `Copy a transfer's files from the server to a folder here
   outDir: z.string().describe('Folder to copy into'),
 }, local, ({ id: ref, index, outDir }) => api.download(ref, { index, outDir }));
 
+tool('file_links', 'The address of each file a transfer fetches (or of file `index`), to play in a player such as VLC or open on another device. Signed for that one file and a day when the server has a token, and never containing the token. A file still downloading plays as its pieces arrive.', {
+  id,
+  index: z.number().int().min(0).optional().describe('Only this file (its number in detail.files)'),
+}, read, ({ id: ref, index }) => api.links(ref, { index }));
+
 tool('wait_transfer', 'Wait until a transfer has its metadata ("metadata": its files are known and can be selected) or has every file it fetches ("done"). Fails at once when the transfer fails or is paused where it cannot go further, and after `timeout` seconds with its state.', {
   id,
   until: z.enum(['metadata', 'done']).default('done'),

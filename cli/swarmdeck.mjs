@@ -26,6 +26,8 @@ The server's transfers (SWARMDECK_URL, default ${DEFAULT_SERVER}; SWARMDECK_TOKE
   torrent <id> [-o file|dir]      save its .torrent
   metadata <magnet> [-o file|dir] a magnet's .torrent, asked of the swarm, without adding it
   download <id> [index] [-o dir]  copy its complete files (or that one) from the server
+  link <id> [index]               the address of its files (or that one), to play or share;
+                                  it never contains the token
   wait <id> [--for metadata|done] [--timeout s]
                                   until its metadata is in, or its files are all there
 
@@ -224,6 +226,14 @@ async function run(argv) {
       if (args[1] !== undefined && !/^\d+$/.test(args[1])) throw new UsageError('the file to copy is its number (see show)');
       const r = await server().download(args[0], { index: args[1] === undefined ? undefined : Number(args[1]), outDir: o.out || '.' });
       return { result: r, text: r.files.map((f) => `wrote ${f.path} (${formatSize(f.size)})`).join('\n') };
+    }
+    case 'link': {
+      need(args, 1, 'a transfer');
+      if (args[1] !== undefined && !/^\d+$/.test(args[1])) throw new UsageError('the file is its number (see show)');
+      const r = await server().links(args[0], { index: args[1] === undefined ? undefined : Number(args[1]) });
+      // One file asked for: its address alone, to hand to a player.
+      const text = args[1] !== undefined ? r.files[0].url : r.files.map((f) => `${f.url}  ${f.path}${f.done ? '' : ' (downloading)'}`).join('\n');
+      return { result: r, text };
     }
     case 'wait': {
       need(args, 1, 'a transfer');
