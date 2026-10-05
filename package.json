@@ -1,6 +1,6 @@
 {
   "name": "swarmdeck",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "private": true,
   "description": "Torrents in the browser, on a phone or a computer: download, seed, edit and make .torrent files, with an optional server of your own. Static site.",
   "license": "MIT",
