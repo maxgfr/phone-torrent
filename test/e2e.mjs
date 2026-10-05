@@ -2848,13 +2848,14 @@ try {
     assert.match(await fromPeers.textContent('#ed-blocked-text'), /The torrent cache 127\.0\.0\.1:1 does not let this page read it \(CORS\)/);
     assert.equal(await fromPeers.textContent('#ed-blocked-open'), 'Open from 127.0.0.1:1');
     assert.match(await fromPeers.textContent('#ed-metadata-state'), /Asking peers/, 'and peers are asked meanwhile');
-    const [tab] = await Promise.all([
-      fromPeersCtx.waitForEvent('page'),
-      fromPeersCtx.waitForEvent('request', { predicate: (r) => r.url() === cacheUrl }),
-      fromPeers.click('#ed-blocked-open'),
-    ]);
-    await tab.close().catch(() => {});
-    log('the cache the page may not read opened in a tab, for its .torrent as it is');
+    // What the tab is asked to open, not the tab: an engine says nothing of a request to an address
+    // that refuses it (WebKit, to this one), and what a tab does with a .torrent is the browser's.
+    await fromPeers.evaluate(() => {
+      window.__opened = [];
+      window.open = (...args) => { window.__opened.push(args); return null; };
+    });
+    await fromPeers.click('#ed-blocked-open');
+    assert.deepEqual(await fromPeers.evaluate(() => window.__opened), [[cacheUrl, '_blank', 'noopener']], 'the cache opened in a tab of its own');
     await waitFor(() => fromPeers.evaluate(() => window.__swarmdeck.client.torrents.length === 0), { label: 'peers no longer asked once the cache is opened', timeout: 5000 });
     assert.equal(await fromPeers.isHidden('#ed-blocked'), true);
     assert.equal(await fromPeers.textContent('#ed-save'), 'Save .torrent', 'Save can be clicked again');
