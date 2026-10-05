@@ -11,6 +11,7 @@
     "lint": "eslint app.js saver.js lib/*.js sw.js proxy/cloudflare-worker.js server/app.mjs cloudflare/worker.js test/*.mjs",
     "test:server": "node test/server.mjs",
     "test:unit": "node test/meta.mjs",
+    "smoke:archive": "node test/archive-smoke.mjs",
     "test:all": "npm run test:unit && npm run test:server && npm test"
   },
   "devDependencies": {
