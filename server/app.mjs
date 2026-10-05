@@ -207,7 +207,15 @@ function torrentId(source) {
  * fetch the files left out with the rest. track() selects what is wanted once that check is over.
  */
 function addToClient(source, { paused = false, deselected = [] } = {}) {
-  return client.add(torrentId(source), { path: DOWNLOAD_DIR, paused: Boolean(paused), deselect: Boolean(deselected && deselected.length) });
+  const torrent = client.add(torrentId(source), { path: DOWNLOAD_DIR, paused: Boolean(paused), deselect: Boolean(deselected && deselected.length) });
+  // pause() only turns new peers away: a web seed added with the metadata — which WebTorrent adds paused
+  // or not — or a wire that was being set up as it came, would go on fetching. Listened to from the
+  // start: a .torrent's metadata is in before the add has been saved, and its web seed with it, which
+  // asks for pieces as soon as its wire is announced.
+  torrent.on('wire', (wire) => {
+    if (torrent.paused) wire.destroy();
+  });
+  return torrent;
 }
 
 /** transfers.json, or one of the files saving it goes through (see saveState and loadState). */
@@ -274,11 +282,6 @@ function track(torrent, id) {
   torrent.on('ready', () => {
     applySelection(torrent);
     checkComplete(torrent);
-  });
-  // pause() only turns new peers away: a web seed added with the metadata, or a wire that was being
-  // set up as it came, would go on fetching.
-  torrent.on('wire', (wire) => {
-    if (torrent.paused) wire.destroy();
   });
   torrent.on('download', () => receivedAt.set(torrent, Date.now()));
   torrent.on('done', () => checkComplete(torrent));

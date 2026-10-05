@@ -800,6 +800,29 @@ try {
   assert.ok(JSON.parse(readFileSync(path.join(downloads, 'transfers.json'), 'utf8')).find((row) => row.id === trioId).paused, 'the pause is saved');
   log('a transfer added paused fetches nothing');
 
+  // Nor from a web seed. WebTorrent adds a .torrent's web seeds with its metadata, paused or not, and
+  // the metadata came in while the add was being saved, before anything was listening to close them:
+  // Sintel, added paused, downloaded 35 MB in 15 s from webtorrent.io.
+  const pausedSeedBytes = randomBytes(256 * 1024);
+  const pausedSeedServer = await webSeed(pausedSeedBytes, { delay: 0 });
+  const pausedSeedDir = path.join(tmp, 'paused-seed');
+  mkdirSync(pausedSeedDir);
+  writeFileSync(path.join(pausedSeedDir, 'file.bin'), pausedSeedBytes);
+  const pausedSeeded = await new Promise((resolve) => seeder.seed(path.join(pausedSeedDir, 'file.bin'), { announce: [], urlList: [pausedSeedServer.url], pieceLength: 16 * 1024 }, resolve));
+  await new Promise((resolve) => seeder.remove(pausedSeeded.infoHash, { destroyStore: false }, resolve));
+  assert.equal((await api('/api/transfers?paused=1', { method: 'POST', headers: { 'Content-Type': 'application/x-bittorrent' }, body: pausedSeeded.torrentFile })).status, 201);
+  await new Promise((r) => setTimeout(r, 2000));
+  const pausedWithSeed = await transferOf(pausedSeeded.infoHash, false);
+  assert.equal(pausedSeedServer.requests, 0, 'a .torrent added paused asks its web seed nothing');
+  assert.equal(pausedWithSeed.downloaded, 0, 'and fetches nothing from it');
+  assert.equal(pausedWithSeed.peers, 0, 'with no wire open to it');
+  assert.equal((await change(pausedSeeded.infoHash, { paused: false })).status, 200);
+  await waitFor(async () => (await transferOf(pausedSeeded.infoHash, false)).ready, { label: 'the resumed transfer to finish from its web seed', timeout: 15000 });
+  assert.ok(pausedSeedServer.requests > 0, 'resumed, it fetches from the web seed');
+  assert.equal((await api(`/api/transfers/${pausedSeeded.infoHash}`, { method: 'DELETE' })).status, 200);
+  await pausedSeedServer.close();
+  log('a .torrent with a web seed, added paused, asks the web seed nothing until it is resumed');
+
   // The middle file left out — twice, as a client that resends it would: the same thing both times.
   for (let i = 0; i < 2; i++) {
     const left = await change(trioId, { deselected: [1] });
