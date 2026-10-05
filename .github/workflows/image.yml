@@ -9,21 +9,10 @@ name: Publish the server image
 # leave running at home.
 
 on:
+  # Every push to main publishes, whatever it touched, so the image's sha tag always names the
+  # head of main.
   push:
     branches: [main]
-    paths:
-      - "server/**"
-      - "index.html"
-      - "app.js"
-      - "saver.js"
-      - "sw.js"
-      - "styles.css"
-      - "manifest.webmanifest"
-      - "icon.svg"
-      - "icons/**"
-      - "vendor/**"
-      - "lib/**"
-      - ".github/workflows/image.yml"
   # The smoke test below, on a change to the image; only main publishes (a push to it, or a run
   # started by hand on it): a run started on another branch must not put that branch on :latest.
   pull_request:
