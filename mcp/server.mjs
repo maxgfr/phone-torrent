@@ -4,13 +4,15 @@
  * `npm run local` opens), with SWARMDECK_TOKEN when it has one. Results are JSON text; a failure is a
  * tool error whose text says what to do about it.
  */
+import { readFile } from 'node:fs/promises';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { check, connect, create, edit, inspect, magnet } from '../cli/core.mjs';
 
 const api = connect();
-const server = new McpServer({ name: 'swarmdeck', version: '1.0.0' });
+const { version } = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
+const server = new McpServer({ name: 'swarmdeck', version });
 
 const id = z.string().describe('The transfer: its info hash, the first characters of it, or its exact name');
 const paths = 'Paths are read and written on the machine this MCP server runs on; give them absolute.';

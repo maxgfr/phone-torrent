@@ -5,7 +5,8 @@
   "description": "Torrents in the browser, on a phone or a computer: download, seed, edit and make .torrent files, with an optional server of your own. Static site.",
   "type": "module",
   "bin": {
-    "swarmdeck": "cli/swarmdeck.mjs"
+    "swarmdeck": "cli/swarmdeck.mjs",
+    "swarmdeck-mcp": "mcp/server.mjs"
   },
   "scripts": {
     "start": "node test/serve.mjs",

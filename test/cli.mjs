@@ -163,6 +163,10 @@ try {
   for (const command of ['status', 'list', 'add', 'select', 'remove', 'download', 'link', 'wait', 'inspect', 'create', 'check']) {
     assert.match(help.stdout, new RegExp(`\\b${command}\\b`), `help lists ${command}`);
   }
+  const { version } = JSON.parse(readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+  const versionOut = await cli(['--version']);
+  assert.equal(versionOut.code, 0);
+  assert.equal(versionOut.stdout.trim(), version, '--version prints the version of package.json, which a release is tagged with');
   const unknown = await cli(['frobnicate']);
   assert.equal(unknown.code, 2, 'an unknown command is a usage error');
   assert.match(unknown.stderr, /frobnicate/);
