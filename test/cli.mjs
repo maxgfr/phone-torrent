@@ -203,7 +203,12 @@ try {
       'list_transfers', 'pause_transfer', 'remove_transfer', 'resume_transfer', 'reveal_transfer', 'save_torrent', 'select_files',
       'swarmdeck_status', 'torrent_magnet', 'wait_transfer',
     ], 'one tool per operation');
+    // Installed with Homebrew there is no skill beside it: what an AI must know comes with the server.
+    const instructions = client.getInstructions() || '';
+    assert.match(instructions, /fetch_metadata.*add_transfer.*paused.*select_files/s, 'the instructions say to fetch a magnet\'s .torrent before choosing its files');
+    assert.match(instructions, /deleteFiles/, 'and never to delete the files unasked');
     const byName = Object.fromEntries(tools.map((t) => [t.name, t]));
+    assert.match(byName.select_files.description, /fetch_metadata/, 'select_files says so too, where the files are chosen');
     assert.equal(byName.remove_transfer.annotations.destructiveHint, true, 'removing is marked destructive');
     assert.equal(byName.list_transfers.annotations.readOnlyHint, true, 'listing is marked read-only');
     assert.equal(byName.inspect_torrent.annotations.readOnlyHint, true);

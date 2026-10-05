@@ -12,7 +12,17 @@ import { check, connect, create, edit, inspect, magnet } from '../cli/core.mjs';
 
 const api = connect();
 const { version } = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
-const server = new McpServer({ name: 'swarmdeck', version });
+// What the repository's skill teaches, for a client that has the server alone (installed with Homebrew).
+const INSTRUCTIONS = `Swarmdeck is a BitTorrent client running as a server; these tools drive its transfers, and work on .torrent files on disk.
+- Start with swarmdeck_status. If it fails and the user means this computer, the server is started with \`npm run local -- --no-open\` in a Swarmdeck checkout.
+- To download only some files of a magnet, or to add one paused: do not add the magnet itself, which starts every file (and a magnet added paused never gets its file list). fetch_metadata it to a .torrent first, add_transfer that file with paused: true, select_files, then resume_transfer and wait_transfer. If fetch_metadata finds nobody, add the magnet unpaused, wait_transfer until "metadata", select_files at once, and say some data may have arrived.
+- Files are numbered as list_transfers({ id }).detail.files lists them; when "the first file" or "the video" is ambiguous, say which number you chose.
+- remove_transfer keeps the downloaded files. Pass deleteFiles: true only when the user explicitly asks for the files to be deleted; it cannot be undone.
+- A transfer stuck below 100% with downloadSpeed 0 for minutes: pause_transfer then resume_transfer asks its trackers and web seeds again.
+- The files are in the server's download folder (~/Downloads/Swarmdeck for npm run local, unless DOWNLOAD_DIR says otherwise); a file_links address stops working once its transfer is removed.
+- Out of reach: torrents running inside a browser tab, the web page's settings, and its cloud services.`;
+
+const server = new McpServer({ name: 'swarmdeck', version }, { instructions: INSTRUCTIONS });
 
 const id = z.string().describe('The transfer: its info hash, the first characters of it, or its exact name');
 const paths = 'Paths are read and written on the machine this MCP server runs on; give them absolute.';
@@ -42,7 +52,7 @@ tool('list_transfers', 'Every transfer on the server (id, name, size, progress 0
   detail: z.boolean().default(false).describe('With every transfer\'s files (heavier)'),
 }, read, ({ id: ref, detail }) => (ref ? api.show(ref) : api.list({ detail })));
 
-tool('add_transfer', `Add a torrent to the server: a magnet link, an info hash, the http(s) address of a .torrent (a server started with --local only), or the path of a .torrent file. Answers { transfer, created } (created false: it was there already). A magnet added paused asks no one for its metadata, so its files cannot be chosen until it is resumed; to choose the files of a magnet before anything downloads, fetch_metadata it, then add that .torrent paused. ${paths}`, {
+tool('add_transfer', `Add a torrent to the server: a magnet link, an info hash, the http(s) address of a .torrent (a server started with --local only), or the path of a .torrent file. Answers { transfer, created } (created false: it was there already). A magnet starts fetching every file as soon as it is added, and one added paused asks no one for its metadata, so its files cannot be chosen. To keep only some files of a magnet, or add it paused: fetch_metadata it, add that .torrent with paused: true, select_files, then resume_transfer. ${paths}`, {
   source: z.string().describe('Magnet, info hash, http(s) address of a .torrent, or path of a .torrent file'),
   paused: z.boolean().default(false).describe('Add it without fetching anything yet'),
 }, { ...change, idempotentHint: true }, ({ source, paused }) => api.add(source, { paused }));
@@ -53,7 +63,7 @@ tool('pause_transfer', 'Pause a transfer: every connection closes, nothing more 
 tool('resume_transfer', 'Resume a paused transfer.', { id }, change,
   ({ id: ref }) => api.setPaused(ref, false));
 
-tool('select_files', 'Choose which files of a transfer are fetched, by their numbers in list_transfers({ id }).detail.files: exactly one of `only` (fetch these), `skip` (fetch all but these) or `all`. Set, not toggled. Needs the metadata (wait_transfer until "metadata" first).', {
+tool('select_files', 'Choose which files of a transfer are fetched, by their numbers in list_transfers({ id }).detail.files: exactly one of `only` (fetch these), `skip` (fetch all but these) or `all`. Set, not toggled. Needs the metadata. For a magnet, choose before anything downloads: fetch_metadata, add_transfer that .torrent paused, select_files, then resume_transfer; selecting after adding the magnet unpaused lets every file start.', {
   id,
   only: z.array(z.number().int().min(0)).optional().describe('Fetch only these files'),
   skip: z.array(z.number().int().min(0)).optional().describe('Fetch every file but these'),
